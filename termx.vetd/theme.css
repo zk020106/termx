@@ -2,165 +2,46 @@
 @import "@fontsource/jetbrains-mono/400.css";
 @import "@fontsource/jetbrains-mono/500.css";
 
-/* TermX Design System — Bespoke Obsidian & Industrial Luminescence */
+/* TermX — Linear Design System
+ * Atmosphere: Engineered calm. Near-black workspace, soft indigo primary (#5e6ad2),
+ * rare cyan accent (#56b6c2), hairline micro-borders, 15-24px tight headings.
+ */
 @theme {
-	--font-sans: "IBM Plex Sans Variable", "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif;
-	--font-display: "IBM Plex Sans Variable", "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif;
-	--font-mono: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+	--font-sans: "IBM Plex Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+	--font-display: "IBM Plex Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+	--font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
 
-	/* Default Accent: Electric Cyan (Laser-machined, clean contrast) */
-	--color-primary: oklch(74% 0.14 210);
-	--color-primary-foreground: oklch(12% 0.02 210);
-	--color-accent: oklch(74% 0.14 210);
-	--color-accent-soft: oklch(24% 0.045 210);
+	/* Linear Core Palette */
+	--color-primary: oklch(56% 0.19 274);
+	--color-primary-foreground: oklch(99% 0 0);
+	--color-surface: oklch(14% 0.006 260);
+	--color-surface-raised: oklch(17.5% 0.008 260);
+	--color-surface-sunk: oklch(11% 0.005 260);
+	--color-surface-foreground: oklch(96% 0.002 260);
+	--color-muted: oklch(66% 0.008 260);
+	--color-faint: oklch(46% 0.01 260);
+	--color-border: oklch(24% 0.008 260);
 
-	/* Deep Obsidian / Carbon Surfaces (Rich, non-muddy dark depth) */
-	--color-surface-sunk: oklch(11.5% 0.008 260);
-	--color-surface: oklch(13.8% 0.01 260);
-	--color-surface-raised: oklch(16.8% 0.012 260);
-	--color-surface-overlay: oklch(20.5% 0.014 260);
-	--color-surface-foreground: oklch(95% 0.008 260);
-	--color-muted: oklch(68% 0.018 260);
-	--color-faint: oklch(48% 0.018 260);
-	--color-border: rgba(255, 255, 255, 0.07);
+	/* Accent & Signals */
+	--color-accent: oklch(76% 0.12 205);
+	--color-accent-soft: oklch(22% 0.04 205);
+	--color-danger: oklch(62% 0.21 25);
+	--color-danger-soft: oklch(22% 0.06 25);
+	--color-warning: oklch(74% 0.15 65);
+	--color-warning-soft: oklch(24% 0.05 65);
+	--color-success: oklch(72% 0.15 155);
+	--color-success-soft: oklch(23% 0.04 155);
 
-	/* Status Colors with Controlled Vibrancy */
-	--color-danger: oklch(66% 0.21 27);
-	--color-danger-soft: oklch(25% 0.07 27);
-	--color-warning: oklch(78% 0.14 80);
-	--color-warning-soft: oklch(26% 0.05 80);
-	--color-success: oklch(75% 0.15 152);
-	--color-success-soft: oklch(25% 0.05 152);
+	/* Environments */
+	--color-env-prod: oklch(62% 0.21 25);
+	--color-env-stage: oklch(74% 0.15 65);
+	--color-env-test: oklch(72% 0.15 155);
+	--color-env-dev: oklch(66% 0.008 260);
 
-	/* Environment Safety System */
-	--color-env-prod: oklch(63% 0.22 27);
-	--color-env-stage: oklch(75% 0.15 76);
-	--color-env-test: oklch(74% 0.14 150);
-	--color-env-dev: oklch(68% 0.02 260);
+	/* Terminal Canvas */
+	--color-term: oklch(12% 0.006 260);
+	--color-term-ink: oklch(91% 0.004 260);
 
-	/* Terminal Canvas (True Pitch Void) & 16-ANSI Palette */
-	--color-term: oklch(9.8% 0.008 260);
-	--color-term-ink: oklch(91% 0.012 260);
-	--color-term-cursor: oklch(74% 0.14 210);
-	--color-term-selection: oklch(26% 0.04 210);
-
-	--color-ansi-black: oklch(20% 0.01 260);
-	--color-ansi-red: oklch(68% 0.20 27);
-	--color-ansi-green: oklch(75% 0.15 152);
-	--color-ansi-yellow: oklch(80% 0.14 80);
-	--color-ansi-blue: oklch(72% 0.15 240);
-	--color-ansi-magenta: oklch(73% 0.16 315);
-	--color-ansi-cyan: oklch(76% 0.13 205);
-	--color-ansi-white: oklch(88% 0.01 260);
-	--color-ansi-bright-black: oklch(42% 0.02 260);
-	--color-ansi-bright-red: oklch(74% 0.20 27);
-	--color-ansi-bright-green: oklch(82% 0.15 152);
-	--color-ansi-bright-yellow: oklch(88% 0.14 80);
-	--color-ansi-bright-blue: oklch(78% 0.15 240);
-	--color-ansi-bright-magenta: oklch(79% 0.16 315);
-	--color-ansi-bright-cyan: oklch(82% 0.13 205);
-	--color-ansi-bright-white: oklch(99% 0.002 260);
-
-	--radius-card: 12px;
-	--radius-control: 8px;
-}
-
-/* Light Theme — Alabaster & Warm Paper with Crisp Dark Ink */
-[data-theme="light"],
-.theme-light {
-	color-scheme: light;
-	--color-surface-sunk: oklch(92.5% 0.008 85);
-	--color-surface: oklch(96.8% 0.005 85);
-	--color-surface-raised: oklch(100% 0 0);
-	--color-surface-overlay: oklch(100% 0 0);
-	--color-surface-foreground: oklch(18% 0.02 260);
-	--color-muted: oklch(46% 0.02 260);
-	--color-faint: oklch(62% 0.02 260);
-	--color-border: rgba(0, 0, 0, 0.08);
-	--color-primary-foreground: oklch(100% 0 0);
-	--color-accent-soft: oklch(92% 0.04 210);
-	--color-danger-soft: oklch(94% 0.04 27);
-	--color-warning-soft: oklch(94% 0.05 80);
-	--color-success-soft: oklch(94% 0.04 152);
-}
-
-/* Accent Variations */
-[data-accent="cyan"] {
-	--color-primary: oklch(74% 0.14 210);
-	--color-primary-foreground: oklch(12% 0.02 210);
-	--color-accent: oklch(74% 0.14 210);
-	--color-accent-soft: oklch(24% 0.045 210);
-}
-[data-accent="copper"] {
-	--color-primary: oklch(74% 0.13 50);
-	--color-primary-foreground: oklch(14% 0.03 50);
-	--color-accent: oklch(74% 0.13 50);
-	--color-accent-soft: oklch(25% 0.05 50);
-}
-[data-accent="iris"] {
-	--color-primary: oklch(72% 0.15 295);
-	--color-primary-foreground: oklch(14% 0.03 295);
-	--color-accent: oklch(72% 0.15 295);
-	--color-accent-soft: oklch(25% 0.06 295);
-}
-[data-accent="emerald"] {
-	--color-primary: oklch(74% 0.14 165);
-	--color-primary-foreground: oklch(14% 0.03 165);
-	--color-accent: oklch(74% 0.14 165);
-	--color-accent-soft: oklch(24% 0.05 165);
-}
-[data-accent="cobalt"] {
-	--color-primary: oklch(68% 0.16 250);
-	--color-primary-foreground: oklch(100% 0 0);
-	--color-accent: oklch(68% 0.16 250);
-	--color-accent-soft: oklch(25% 0.06 250);
-}
-[data-accent="rose"] {
-	--color-primary: oklch(73% 0.17 12);
-	--color-primary-foreground: oklch(16% 0.03 12);
-	--color-accent: oklch(73% 0.17 12);
-	--color-accent-soft: oklch(26% 0.06 12);
-}
-
-/* Terminal Preset Overrides */
-[data-term-scheme="one-dark"] {
-	--color-term: oklch(14.5% 0.015 260);
-	--color-term-ink: oklch(86% 0.01 250);
-	--color-term-cursor: oklch(72% 0.15 240);
-	--color-ansi-cyan: oklch(78% 0.12 210);
-	--color-ansi-green: oklch(77% 0.14 140);
-	--color-ansi-yellow: oklch(82% 0.13 85);
-	--color-ansi-red: oklch(70% 0.18 25);
-}
-[data-term-scheme="tokyo-night"] {
-	--color-term: oklch(13.8% 0.03 265);
-	--color-term-ink: oklch(86% 0.02 260);
-	--color-term-cursor: oklch(75% 0.17 310);
-	--color-ansi-cyan: oklch(80% 0.12 215);
-	--color-ansi-blue: oklch(74% 0.15 250);
-	--color-ansi-magenta: oklch(75% 0.17 310);
-}
-[data-term-scheme="catppuccin"] {
-	--color-term: oklch(15.2% 0.025 270);
-	--color-term-ink: oklch(88% 0.02 270);
-	--color-term-cursor: oklch(82% 0.11 200);
-	--color-ansi-cyan: oklch(82% 0.11 200);
-	--color-ansi-green: oklch(83% 0.14 140);
-	--color-ansi-yellow: oklch(86% 0.13 90);
-	--color-ansi-red: oklch(72% 0.17 25);
-}
-[data-term-scheme="dracula"] {
-	--color-term: oklch(14.8% 0.02 280);
-	--color-term-ink: oklch(94% 0.01 280);
-	--color-term-cursor: oklch(78% 0.19 325);
-	--color-ansi-magenta: oklch(78% 0.19 325);
-	--color-ansi-green: oklch(84% 0.18 140);
-	--color-ansi-cyan: oklch(85% 0.12 185);
-}
-[data-term-scheme="nord"] {
-	--color-term: oklch(16.5% 0.02 245);
-	--color-term-ink: oklch(89% 0.02 240);
-	--color-term-cursor: oklch(78% 0.08 215);
-	--color-ansi-cyan: oklch(78% 0.08 215);
-	--color-ansi-blue: oklch(73% 0.10 240);
+	--radius-card: 6px;
+	--radius-control: 6px;
 }

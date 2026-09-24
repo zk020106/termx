@@ -8,56 +8,58 @@ const tabs = ["基本信息", "认证凭据", "跳板机网络", "高级选项",
 export default function HostEdit() {
 	return (
 		<WindowChrome activity="hosts">
-			<div className="relative min-h-0 flex-1 bg-surface-sunk">
+			<div className="relative min-h-0 flex-1 bg-surface">
 				{/* 底层主机网格预览 */}
-				<div className="flex h-12 items-center justify-between px-6 border-b border-border/40">
-					<div className="text-[13px] text-muted">
-						主机库 <span className="text-border">/</span> 订单服务集群
+				<div className="flex h-10 items-center justify-between border-b border-border bg-surface-sunk px-4">
+					<div className="flex items-center gap-1.5 text-[12px] text-muted">
+						<span>主机库</span>
+						<span className="text-border">/</span>
+						<span className="text-surface-foreground">订单服务集群</span>
 					</div>
 					<span className="mr-[480px] font-mono text-[11px] text-faint">8 台节点</span>
 				</div>
 
-				<div className="grid grid-cols-3 content-start gap-4 p-6 pr-[500px]">
-					{["order-api-01", "order-api-02", "order-stage", "bastion-sh", "redis-test-01", "log-agg"].map((name) => (
+				<div className="grid grid-cols-3 content-start gap-3 p-4 pr-[480px]">
+					{["order-api-01", "order-api-02", "order-stage", "bastion-sh", "redis-test-01", "log-agg-node"].map((name) => (
 						<div
 							key={name}
-							className="rounded-xl border border-white/[0.06] bg-surface-raised/60 p-4 text-[13px]"
+							className="rounded-md border border-border bg-surface-raised p-3 text-[12px]"
 						>
-							<div className="font-semibold text-surface-foreground">{name}</div>
-							<div className="mt-1 font-mono text-[11px] text-faint">deploy@10.0.3.21</div>
+							<div className="font-mono font-medium text-surface-foreground">{name}</div>
+							<div className="mt-1 font-mono text-[11px] text-muted">deploy@10.0.3.21</div>
 						</div>
 					))}
 				</div>
 
-				{/* Linear 级高级磨砂右滑抽屉 */}
-				<aside className="absolute inset-y-0 right-0 flex w-[480px] flex-col border-l border-white/[0.1] bg-surface-raised/95 shadow-[-24px_0_64px_rgba(0,0,0,0.85)] backdrop-blur-2xl">
-					{/* 抽屉标题栏 */}
-					<div className="flex h-14 items-center justify-between border-b border-border/70 px-5">
+				{/* Linear 风格侧滑抽屉 (460px) */}
+				<aside className="absolute inset-y-0 right-0 flex w-[460px] flex-col border-l border-border bg-surface-raised shadow-xl">
+					{/* 抽屉头部 */}
+					<div className="flex h-11 items-center justify-between border-b border-border px-4">
 						<div className="flex items-center gap-2">
-							<span className="icon-[lucide--server] size-4 text-accent drop-shadow-[0_0_8px_var(--color-accent)]" />
-							<h1 className="font-display text-[15px] font-semibold tracking-tight text-surface-foreground">
+							<span className="icon-[lucide--server] size-4 text-primary" />
+							<h1 className="text-[13px] font-semibold tracking-tight text-surface-foreground">
 								编辑主机配置
 							</h1>
 						</div>
 						<Link
 							to="/hosts"
-							className="grid size-7 place-items-center rounded-lg text-muted hover:bg-white/[0.06] hover:text-surface-foreground transition-colors"
+							className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-surface-foreground"
 							aria-label="关闭抽屉"
 						>
-							<span className="icon-[lucide--x] size-4" />
+							<span className="icon-[lucide--x] size-3.5" />
 						</Link>
 					</div>
 
-					{/* 导航分栏胶囊 */}
-					<div className="flex gap-1 border-b border-border/50 px-4 py-2.5">
+					{/* 选项卡 */}
+					<div className="flex gap-1 border-b border-border bg-surface-sunk p-2">
 						{tabs.map((t, i) => (
 							<button
 								key={t}
 								type="button"
-								className={`rounded-lg px-2.5 py-1 text-[12px] font-medium transition-colors ${
+								className={`rounded px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
 									i === 1
-										? "bg-accent-soft text-accent border border-accent/30 shadow-sm"
-										: "text-muted hover:text-surface-foreground hover:bg-white/[0.04]"
+										? "bg-surface-raised text-surface-foreground shadow-sm border border-border"
+										: "text-muted hover:text-surface-foreground"
 								}`}
 							>
 								{t}
@@ -66,74 +68,83 @@ export default function HostEdit() {
 					</div>
 
 					{/* 表单字段区 */}
-					<div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-5">
+					<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
 						<Field label="主机显示名称" value="order-api-01" />
 
-						<div className="grid grid-cols-[1fr_96px] gap-3">
-							<Field label="IPv4 / 域名地址" value="10.0.3.21" mono />
-							<Field label="端口" value="22" mono />
+						<div className="grid grid-cols-[1fr_80px] gap-2">
+							<Field label="连接主机地址 (IP / 域名)" value="10.0.3.21" mono />
+							<Field label="SSH 端口" value="22" mono />
 						</div>
 
-						<Field label="SSH 登录用户名" value="deploy" mono />
+						<Field label="登录用户名" value="deploy" mono />
 
-						<div>
-							<div className="mb-1.5 flex items-center justify-between text-[12px]">
-								<span className="font-medium text-surface-foreground">认证凭据方式</span>
-								<span className="text-[11px] text-faint">推荐 Ed25519 秘钥</span>
-							</div>
-							<div className="flex h-9 items-center rounded-lg border border-white/[0.07] bg-surface-sunk p-0.5 text-[12px]">
-								{["密码验证", "私钥凭据", "私钥+Passphrase", "Agent 转发"].map((m, i) => (
-									<span
+						{/* 认证方式切换 */}
+						<div className="flex flex-col">
+							<span className="mb-1 text-[11px] text-muted">认证方式</span>
+							<div className="grid grid-cols-4 rounded border border-border bg-surface p-0.5 text-[11px]">
+								{["密码", "私钥", "私钥+口令", "Agent"].map((m, i) => (
+									<button
 										key={m}
-										className={`flex-1 rounded-md text-center py-1 font-medium transition-all ${
+										type="button"
+										className={`rounded py-1 text-center font-medium transition-colors ${
 											i === 1
-												? "bg-surface-raised text-accent border border-white/[0.08] shadow-sm"
+												? "bg-surface-raised text-surface-foreground shadow-sm border border-border"
 												: "text-muted hover:text-surface-foreground"
 										}`}
 									>
 										{m}
-									</span>
+									</button>
 								))}
 							</div>
 						</div>
 
-						<Field label="选择私钥文件" value="工作笔记本专用 · id_ed25519_prod" />
+						<Field label="指定私钥身份" value="工作笔记本 · Ed25519 (默认)" />
 
-						{/* 生产环境配置提示 */}
-						<div className="rounded-lg border border-border bg-surface-sunk/60 p-3 text-[12px] text-muted">
-							<div className="flex items-center gap-2">
-								<EnvPill env="PROD" />
-								<span className="font-medium text-surface-foreground">生产环境安全确认</span>
+						{/* 生产环境提示卡片 */}
+						<div className="rounded border border-env-prod/30 bg-env-prod/10 p-2.5 text-[11.5px] text-env-prod leading-relaxed">
+							<div className="flex items-center gap-1.5 font-medium">
+								<span className="icon-[lucide--shield-alert] size-3.5" />
+								<span>生产环境 (PROD) 已激活</span>
 							</div>
-							<p className="mt-1 text-[11px] text-faint leading-relaxed">
-								该主机保存后标签与状态栏将标识为生产环境，执行高危命令或粘贴多行脚本前需二次确认。
+							<p className="mt-1 text-[11px] opacity-90">
+								标签与终端将带红条标识，执行 rm -rf 等危险命令前必须二次弹窗确认。
 							</p>
 						</div>
 
-						<div className="rounded-lg border border-white/[0.06] bg-surface/50 p-3 text-[11px] text-muted">
-							<span className="font-mono text-accent">跳板拓扑：</span>
-							<span>bastion-sh (10.0.0.4) → 本机安全隧道。高级选项已折叠。</span>
+						{/* 跳板机与高级折叠项 */}
+						<div className="rounded border border-border bg-surface p-2.5 text-[11.5px]">
+							<div className="flex items-center justify-between text-muted">
+								<span className="flex items-center gap-1.5 font-medium text-surface-foreground">
+									<span className="icon-[lucide--waypoints] size-3.5 text-primary" />
+									跳板机链路
+								</span>
+								<span className="font-mono text-[11px]">bastion-sh (直连)</span>
+							</div>
+							<div className="mt-2 text-[10.5px] text-faint">
+								高级选项：自动心跳 30s、UTF-8 编码、终端类型 xterm-256color（已折叠）
+							</div>
 						</div>
 					</div>
 
-					{/* 抽屉底部操作条 */}
-					<div className="flex h-14 items-center justify-between border-t border-border px-5 bg-surface-sunk/60">
-						<span className="flex items-center gap-1.5 text-[12px] text-warning font-mono">
-							<span className="size-1.5 rounded-full bg-warning animate-pulse" />
-							<span>检测到未保存配置</span>
+					{/* 抽屉底部操作栏 */}
+					<div className="flex h-12 items-center justify-between border-t border-border bg-surface-sunk px-4">
+						<span className="flex items-center gap-1 text-[11px] text-warning">
+							<span className="size-1.5 rounded-full bg-warning" />
+							有未保存的修改
 						</span>
-						<div className="flex items-center gap-2.5">
+						<div className="flex items-center gap-2">
 							<Link
 								to="/hosts"
-								className="rounded-lg border border-white/10 px-3.5 py-1.5 text-[13px] text-muted hover:text-surface-foreground hover:bg-white/[0.04] transition-colors"
+								className="h-7 rounded border border-border bg-surface px-2.5 text-[11.5px] font-medium text-muted hover:bg-surface-raised hover:text-surface-foreground flex items-center"
 							>
-								放弃更改
+								取消
 							</Link>
 							<Link
 								to="/"
-								className="rounded-lg bg-accent px-4 py-1.5 text-[13px] font-semibold text-primary-foreground shadow-[0_0_16px_-2px_var(--color-accent)] transition-all hover:brightness-110 active:scale-95"
+								className="h-7 rounded bg-primary px-3 text-[11.5px] font-medium text-primary-foreground shadow-sm hover:opacity-90 flex items-center gap-1"
 							>
-								保存配置
+								<span className="icon-[lucide--check] size-3" />
+								保存主机
 							</Link>
 						</div>
 					</div>
@@ -145,15 +156,11 @@ export default function HostEdit() {
 
 function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
 	return (
-		<label className="flex flex-col gap-1.5">
-			<span className="text-[12px] font-medium text-surface-foreground">{label}</span>
-			<span
-				className={`flex h-9 items-center rounded-lg border border-white/[0.08] bg-surface/80 px-3 text-[13px] text-surface-foreground shadow-inner focus-within:border-accent/60 ${
-					mono ? "font-mono" : ""
-				}`}
-			>
+		<div className="flex flex-col">
+			<span className="mb-1 text-[11px] text-muted">{label}</span>
+			<div className={`flex h-7.5 items-center rounded border border-border bg-surface px-2.5 text-[12px] text-surface-foreground ${mono ? "font-mono" : ""}`}>
 				{value}
-			</span>
-		</label>
+			</div>
+		</div>
 	);
 }

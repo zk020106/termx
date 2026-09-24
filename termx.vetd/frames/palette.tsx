@@ -1,132 +1,120 @@
 export const frame = { width: 1440, height: 900, title: "命令面板" };
 
 import { Link } from "react-router";
-import { WindowChrome } from "../components/WindowChrome";
+import { EnvPill, WindowChrome } from "../components/WindowChrome";
 
 export default function Palette() {
 	return (
 		<WindowChrome command="order">
-			{/* 背景暗沉模糊遮罩 */}
-			<div className="relative flex min-h-0 flex-1 flex-col items-center justify-start bg-term/95 p-4">
-				{/* 虚化底层内容 */}
-				<div className="absolute inset-0 bg-black/60 backdrop-blur-md transition-opacity" />
-
-				{/* Raycast 级悬浮聚光搜索框 */}
-				<div className="relative z-10 mt-14 w-[620px] overflow-hidden rounded-2xl border border-white/[0.12] bg-surface-raised/90 shadow-[0_32px_80px_-16px_rgba(0,0,0,0.9),inset_0_1px_0_0_rgba(255,255,255,0.12)] backdrop-blur-2xl">
-					{/* 搜索输入行 */}
-					<div className="flex h-14 items-center gap-3 border-b border-border/80 px-4">
-						<span className="icon-[lucide--search] size-5 text-accent drop-shadow-[0_0_8px_var(--color-accent)]" />
-						<div className="flex flex-1 items-center gap-0.5 text-[15px] font-sans">
+			<div className="relative flex min-h-0 flex-1 flex-col items-center justify-start bg-term/90 p-4">
+				{/* 浮动命令面板 (Linear 风格 580px) */}
+				<div className="relative z-10 mt-12 w-[580px] overflow-hidden rounded-lg border border-border bg-surface-raised shadow-2xl">
+					{/* 搜索输入栏 */}
+					<div className="flex h-11 items-center gap-2.5 border-b border-border bg-surface px-3.5">
+						<span className="icon-[lucide--search] size-4 text-primary" />
+						<div className="flex flex-1 items-center gap-0.5 text-[13px]">
 							<span className="text-surface-foreground font-medium">order</span>
-							<span className="inline-block h-5 w-[2px] bg-accent shadow-[0_0_8px_var(--color-accent)] animate-pulse" />
+							<span className="inline-block h-4 w-[1.5px] bg-primary animate-pulse" />
 						</div>
 						<div className="flex items-center gap-1.5">
-							<span className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px] text-faint">
-								⌘K
-							</span>
 							<Link
 								to="/"
-								className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px] text-muted hover:text-surface-foreground transition-colors"
+								className="flex items-center rounded border border-border bg-surface-raised px-1.5 py-0.5 font-mono text-[9px] text-muted hover:text-surface-foreground"
 							>
 								ESC
 							</Link>
 						</div>
 					</div>
 
-					{/* 选项组列表 */}
-					<div className="p-2 space-y-3 max-h-[460px] overflow-y-auto">
-						{/* 组 1: 主机快速直连 */}
+					{/* 搜索结果分组列表 */}
+					<div className="max-h-[460px] overflow-y-auto p-1.5 space-y-2">
+						{/* 主机会话 */}
 						<div>
-							<div className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-widest text-faint font-semibold">
+							<div className="px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-faint font-semibold">
 								匹配的主机 (3)
 							</div>
-							<div className="flex flex-col gap-0.5 mt-0.5">
-								<Item
+							<div className="space-y-0.5">
+								<ResultItem
 									icon="icon-[simple-icons--ubuntu]"
-									iconColor="text-[#E95420]"
 									title="order-api-01"
-									hint="deploy@10.0.3.21 · 华东1 生产集群"
-									badge="PROD"
+									meta="deploy@10.0.3.21 · 华东1"
+									env="PROD"
 									selected
-									action="↵ 直连终端"
+									shortcut="↵ 连接"
 								/>
-								<Item
+								<ResultItem
 									icon="icon-[simple-icons--ubuntu]"
-									iconColor="text-[#E95420]"
 									title="order-api-02"
-									hint="deploy@10.0.3.22 · 华东1 生产集群"
-									badge="PROD"
-									action="回车连接"
+									meta="deploy@10.0.3.22 · 华东1"
+									env="PROD"
+									shortcut="回车"
 								/>
-								<Item
+								<ResultItem
 									icon="icon-[simple-icons--debian]"
-									iconColor="text-[#D70A53]"
 									title="order-stage"
-									hint="deploy@10.1.4.8 · 预发布验证节点"
-									badge="STG"
-									action="回车连接"
+									meta="deploy@10.1.4.8 · 测试环境"
+									env="STG"
+									shortcut="回车"
 								/>
 							</div>
 						</div>
 
-						{/* 组 2: 常用操作与片段 */}
+						{/* 命令片段 */}
 						<div>
-							<div className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-widest text-faint font-semibold">
-								快捷操作与代码片段 (2)
+							<div className="px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-faint font-semibold">
+								命令片段 (2)
 							</div>
-							<div className="flex flex-col gap-0.5 mt-0.5">
-								<Item
+							<div className="space-y-0.5">
+								<ResultItem
 									icon="icon-[lucide--terminal-square]"
-									title="查看订单服务实时异常"
-									hint="片段 · tail -f /var/log/order.log | grep ERROR"
-									tag="命令片段"
+									title="重启指定微服务"
+									meta="sudo systemctl restart ${service}"
+									tag="日常发布"
 								/>
-								<Item
-									icon="icon-[lucide--folder-git-2]"
-									title="打开 order-api-01 的 SFTP 目录"
-									hint="快速定位 /home/deploy/app"
-									tag="文件浏览"
+								<ResultItem
+									icon="icon-[lucide--file-search]"
+									title="排查最近 200 条错误日志"
+									meta="journalctl -u order-api -n 200 | grep ERROR"
+									tag="排障诊断"
 								/>
 							</div>
 						</div>
 
-						{/* 组 3: 系统偏好设置 */}
+						{/* 全局设置与快捷动作 */}
 						<div>
-							<div className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-widest text-faint font-semibold">
-								应用设置 (1)
+							<div className="px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-faint font-semibold">
+								快捷操作与设置 (3)
 							</div>
-							<div className="flex flex-col gap-0.5 mt-0.5">
-								<Item
-									icon="icon-[lucide--palette]"
-									title="外观与终端配色设置"
-									hint="偏好设置 · 主题 / 强调色 / 字体"
-									tag="设置"
+							<div className="space-y-0.5">
+								<ResultItem
+									icon="icon-[lucide--plus]"
+									title="新建 SSH 主机配置…"
+									meta="配置新连接、认证凭据与跳板链路"
+								/>
+								<ResultItem
+									icon="icon-[lucide--arrow-down-up]"
+									title="打开 SFTP 文件传输队列"
+									meta="查看正在传输的 2 项任务"
+								/>
+								<ResultItem
+									icon="icon-[lucide--sliders]"
+									title="外观与终端字体设置"
+									meta="切换深浅主题、JetBrains Mono 字体字号"
 								/>
 							</div>
 						</div>
 					</div>
 
-					{/* 底部 Linear 风格快捷键微导航 */}
-					<div className="flex h-10 items-center justify-between border-t border-border/80 bg-surface-sunk/80 px-4 text-[11px] text-faint font-mono">
+					{/* 底部导航提示 */}
+					<div className="flex h-7 items-center justify-between border-t border-border bg-surface-sunk px-3 font-mono text-[10.5px] text-faint">
 						<div className="flex items-center gap-3">
-							<span className="flex items-center gap-1">
-								<kbd className="rounded border border-white/10 bg-white/[0.04] px-1 py-0.5 text-[9px]">↑↓</kbd>
-								<span>导航</span>
-							</span>
-							<span className="flex items-center gap-1">
-								<kbd className="rounded border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[9px]">↵</kbd>
-								<span>确认打开</span>
-							</span>
-							<span className="flex items-center gap-1">
-								<kbd className="rounded border border-white/10 bg-white/[0.04] px-1 py-0.5 text-[9px]">&gt;</kbd>
-								<span>仅搜命令</span>
-							</span>
+							<span><kbd className="text-muted">↑↓</kbd> 选择</span>
+							<span><kbd className="text-muted">↵</kbd> 执行</span>
+							<span>输入 <kbd className="text-muted">&gt;</kbd> 仅搜命令</span>
 						</div>
-						<div className="flex items-center gap-1 text-muted">
-							<span>按</span>
-							<kbd className="rounded border border-white/10 bg-white/[0.04] px-1 py-0.5 text-[9px]">Tab</kbd>
-							<span>更多操作</span>
-						</div>
+						<Link to="/" className="text-primary hover:underline font-sans">
+							关闭面板
+						</Link>
 					</div>
 				</div>
 			</div>
@@ -134,70 +122,43 @@ export default function Palette() {
 	);
 }
 
-function Item({
+function ResultItem({
 	icon,
-	iconColor,
 	title,
-	hint,
-	badge,
+	meta,
+	env,
 	tag,
 	selected,
-	action,
+	shortcut,
 }: {
 	icon: string;
-	iconColor?: string;
 	title: string;
-	hint: string;
-	badge?: string;
+	meta: string;
+	env?: "PROD" | "STG" | "TEST" | "DEV";
 	tag?: string;
 	selected?: boolean;
-	action?: string;
+	shortcut?: string;
 }) {
 	return (
-		<div
-			className={`group flex h-11 items-center gap-3 rounded-xl px-3 transition-all cursor-pointer ${
+		<Link
+			to="/"
+			className={`flex h-9 items-center justify-between rounded px-2.5 text-[12px] transition-colors ${
 				selected
-					? "bg-accent/15 text-surface-foreground border border-accent/35 shadow-[0_0_16px_-4px_var(--color-accent)]"
-					: "text-surface-foreground/90 hover:bg-white/[0.04] border border-transparent"
+					? "bg-surface border border-border text-surface-foreground"
+					: "text-muted hover:bg-surface hover:text-surface-foreground"
 			}`}
 		>
-			<span className={`${icon} size-4 shrink-0 ${iconColor ?? (selected ? "text-accent" : "text-muted")}`} />
-			<div className="flex flex-1 items-center gap-2 min-w-0">
-				<span className={`text-[13px] font-medium tracking-tight truncate ${selected ? "text-accent" : ""}`}>
-					{title}
-				</span>
-				<span className="text-[12px] text-faint truncate font-mono">{hint}</span>
+			<div className="flex items-center gap-2 truncate">
+				<span className={`${icon} size-3.5 ${selected ? "text-primary" : "text-muted"} shrink-0`} />
+				<span className="font-medium text-surface-foreground font-mono">{title}</span>
+				<span className="text-faint font-mono text-[11px] truncate">{meta}</span>
 			</div>
 
-			{badge && (
-				<span
-					className={`rounded-md border px-1.5 py-0.5 font-mono text-[9px] font-semibold tracking-wider ${
-						badge === "PROD"
-							? "border-env-prod/40 bg-env-prod/15 text-env-prod shadow-[0_0_8px_-2px_var(--color-env-prod)]"
-							: "border-env-stage/40 bg-env-stage/15 text-env-stage"
-					}`}
-				>
-					{badge}
-				</span>
-			)}
-
-			{tag && (
-				<span className="rounded bg-white/[0.05] border border-white/5 px-2 py-0.5 font-mono text-[10px] text-faint">
-					{tag}
-				</span>
-			)}
-
-			{action && (
-				<span
-					className={`ml-2 rounded-lg border px-2 py-0.5 font-mono text-[10px] transition-colors ${
-						selected
-							? "border-accent/40 bg-accent text-primary-foreground font-semibold shadow-sm"
-							: "border-white/10 bg-white/[0.04] text-muted opacity-0 group-hover:opacity-100"
-					}`}
-				>
-					{action}
-				</span>
-			)}
-		</div>
+			<div className="flex items-center gap-2 shrink-0">
+				{env && <EnvPill env={env} />}
+				{tag && <span className="rounded border border-border bg-surface px-1 py-0.2 font-mono text-[9px] text-muted">{tag}</span>}
+				{shortcut && <kbd className="font-mono text-[9.5px] text-muted">{shortcut}</kbd>}
+			</div>
+		</Link>
 	);
 }

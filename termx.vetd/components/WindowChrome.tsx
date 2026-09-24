@@ -14,7 +14,7 @@ const activities: { id: Activity; to: string; icon: string; label: string }[] = 
 	{ id: "hosts", to: "/", icon: "icon-[lucide--server]", label: "主机库" },
 	{ id: "sftp", to: "/sftp", icon: "icon-[lucide--folder-tree]", label: "文件" },
 	{ id: "forward", to: "/forward", icon: "icon-[lucide--waypoints]", label: "转发" },
-	{ id: "snippets", to: "/snippets", icon: "icon-[lucide--square-terminal]", label: "片段" },
+	{ id: "snippets", to: "/snippets", icon: "icon-[lucide--terminal-square]", label: "片段" },
 	{ id: "keys", to: "/keys", icon: "icon-[lucide--key-round]", label: "密钥" },
 	{ id: "transfers", to: "/transfers", icon: "icon-[lucide--arrow-down-up]", label: "传输" },
 ];
@@ -34,63 +34,64 @@ export function WindowChrome({
 	const current = activity ?? fromPath(pathname);
 
 	return (
-		<div className="flex h-full flex-col bg-surface text-surface-foreground antialiased selection:bg-accent-soft selection:text-accent">
-			{/* 顶栏：融合 macOS 信号灯与 Raycast 质感 Spotlight 搜索框 */}
-			<header className="flex h-10 shrink-0 items-center justify-between border-b border-border bg-surface-sunk/80 px-3.5 backdrop-blur-md">
-				{/* 窗口控制按钮 + 品牌标识 */}
-				<div className="flex items-center gap-3.5">
-					<div className="flex items-center gap-1.5 pr-2">
-						<span className="size-3 rounded-full bg-[#FF5F57] shadow-[inset_0_1px_1px_rgba(255,255,255,0.4)] transition-transform hover:scale-110" />
-						<span className="size-3 rounded-full bg-[#FEBC2E] shadow-[inset_0_1px_1px_rgba(255,255,255,0.4)] transition-transform hover:scale-110" />
-						<span className="size-3 rounded-full bg-[#28C840] shadow-[inset_0_1px_1px_rgba(255,255,255,0.4)] transition-transform hover:scale-110" />
+		<div className="flex h-full flex-col bg-surface text-surface-foreground antialiased selection:bg-primary/20 selection:text-surface-foreground">
+			{/* Windows 自定义无边框标题栏：高密度、深黑、居中 Command Palette */}
+			<header className="flex h-9 shrink-0 items-center justify-between border-b border-border bg-surface-sunk px-3">
+				{/* 左侧应用标识 */}
+				<div className="flex w-36 items-center gap-2">
+					<div className="flex size-5 items-center justify-center rounded bg-primary/15 text-primary">
+						<span className="icon-[lucide--terminal] size-3.5" />
 					</div>
-					<div className="flex items-center gap-2">
-						<span className="icon-[lucide--terminal] size-4 text-accent drop-shadow-[0_0_8px_var(--color-accent)]" />
-						<span className="font-display text-[13px] font-semibold tracking-tight text-surface-foreground">
-							TermX
-						</span>
-					</div>
+					<span className="font-sans text-[12px] font-semibold tracking-tight text-surface-foreground">
+						TermX
+					</span>
+					<span className="font-mono text-[10px] text-faint">v0.2</span>
 				</div>
 
-				{/* 居中命令面板入口（Raycast 悬浮胶囊质感） */}
+				{/* 居中 Command Palette（Linear 风格，细腻深色输入框与极简按键帽） */}
 				<Link
 					to="/palette"
-					className="group flex h-7 w-[460px] items-center gap-2.5 rounded-lg border border-white/[0.08] bg-surface-raised/70 px-3 text-[12px] text-faint shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)] transition-all hover:border-white/[0.16] hover:bg-surface-raised hover:text-surface-foreground"
+					className="group flex h-6 w-[420px] items-center gap-2 rounded border border-border bg-surface px-2.5 text-[12px] text-faint transition-colors hover:border-white/20 hover:text-surface-foreground"
 				>
-					<span className="icon-[lucide--search] size-3.5 text-faint transition-colors group-hover:text-accent" />
-					<span className="flex-1 truncate tracking-normal font-sans">
+					<span className="icon-[lucide--search] size-3 text-muted transition-colors group-hover:text-primary" />
+					<span className="flex-1 truncate font-sans tracking-tight">
 						{command ?? "搜索主机、执行命令、切换设置…"}
 					</span>
-					<div className="flex items-center gap-1">
-						<kbd className="rounded border border-white/10 bg-white/[0.05] px-1.5 py-0.5 font-mono text-[10px] text-muted shadow-[0_1px_0_rgba(255,255,255,0.08)]">
-							Ctrl K
-						</kbd>
-					</div>
+					<kbd className="flex items-center gap-0.5 rounded border border-border bg-surface-raised px-1 py-0.2 font-mono text-[9px] text-muted">
+						Ctrl K
+					</kbd>
 				</Link>
 
-				{/* 右侧轻量状态快捷入口 */}
-				<div className="flex w-28 items-center justify-end gap-1.5 text-muted">
-					<Link
-						to="/settings"
-						className="grid size-7 place-items-center rounded-md hover:bg-white/[0.06] hover:text-surface-foreground transition-colors"
-						title="设置"
-					>
-						<span className="icon-[lucide--sliders-horizontal] size-3.5" />
-					</Link>
+				{/* 右侧 Windows 经典窗口三键（最小化、最大化、关闭） */}
+				<div className="flex w-36 items-center justify-end text-muted">
 					<button
 						type="button"
-						className="grid size-7 place-items-center rounded-md hover:bg-white/[0.06] hover:text-surface-foreground transition-colors"
-						title="分屏"
+						className="flex size-8 items-center justify-center hover:bg-surface-raised hover:text-surface-foreground"
+						aria-label="最小化"
 					>
-						<span className="icon-[lucide--split] size-3.5" />
+						<span className="icon-[lucide--minus] size-3.5" />
+					</button>
+					<button
+						type="button"
+						className="flex size-8 items-center justify-center hover:bg-surface-raised hover:text-surface-foreground"
+						aria-label="最大化"
+					>
+						<span className="icon-[lucide--square] size-3" />
+					</button>
+					<button
+						type="button"
+						className="flex size-8 items-center justify-center hover:bg-danger hover:text-primary-foreground"
+						aria-label="关闭"
+					>
+						<span className="icon-[lucide--x] size-3.5" />
 					</button>
 				</div>
 			</header>
 
-			{/* 中部主内容区 */}
+			{/* 中部核心区：左侧极窄活动栏 + 右侧主工作区 */}
 			<div className="flex min-h-0 flex-1">
-				{/* 极细活动栏 */}
-				<nav className="flex w-12 shrink-0 flex-col items-center gap-1.5 border-r border-border bg-surface-sunk py-3">
+				{/* Linear 风格活动栏（44px，微弱半透与高亮指示条） */}
+				<nav className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-surface-sunk py-2">
 					{activities.map((item) => {
 						const on = item.id === current;
 						return (
@@ -98,36 +99,36 @@ export function WindowChrome({
 								key={item.id}
 								to={item.to}
 								title={item.label}
-								className={`group relative grid size-8 place-items-center rounded-lg transition-all ${
+								className={`group relative flex size-7 items-center justify-center rounded transition-colors ${
 									on
-										? "bg-accent/10 text-accent ring-1 ring-accent/30 shadow-[0_0_12px_-2px_var(--color-accent)]"
-										: "text-muted hover:bg-white/[0.05] hover:text-surface-foreground"
+										? "bg-surface-raised text-surface-foreground"
+										: "text-muted hover:bg-surface-raised/60 hover:text-surface-foreground"
 								}`}
 							>
 								{on && (
-									<span className="absolute -left-[9px] h-3.5 w-[3px] rounded-r-full bg-accent shadow-[0_0_8px_var(--color-accent)]" />
+									<span className="absolute -left-2 h-3.5 w-0.5 rounded-r bg-primary" />
 								)}
-								<span className={`${item.icon} size-4 transition-transform group-hover:scale-105`} />
+								<span className={`${item.icon} size-3.5`} />
 							</Link>
 						);
 					})}
 					<Link
 						to="/settings"
 						title="设置"
-						className={`mt-auto group relative grid size-8 place-items-center rounded-lg transition-all ${
+						className={`mt-auto group relative flex size-7 items-center justify-center rounded transition-colors ${
 							current === "settings"
-								? "bg-accent/10 text-accent ring-1 ring-accent/30 shadow-[0_0_12px_-2px_var(--color-accent)]"
-								: "text-muted hover:bg-white/[0.05] hover:text-surface-foreground"
+								? "bg-surface-raised text-surface-foreground"
+								: "text-muted hover:bg-surface-raised/60 hover:text-surface-foreground"
 						}`}
 					>
 						{current === "settings" && (
-							<span className="absolute -left-[9px] h-3.5 w-[3px] rounded-r-full bg-accent shadow-[0_0_8px_var(--color-accent)]" />
+							<span className="absolute -left-2 h-3.5 w-0.5 rounded-r bg-primary" />
 						)}
-						<span className="icon-[lucide--settings] size-4 transition-transform group-hover:rotate-45" />
+						<span className="icon-[lucide--settings] size-3.5" />
 					</Link>
 				</nav>
 
-				{/* 页面主视图 */}
+				{/* 视图内容容器 */}
 				<div className="flex min-w-0 flex-1 flex-col">{children}</div>
 			</div>
 
@@ -151,38 +152,32 @@ function fromPath(pathname: string): Activity | undefined {
 
 function DefaultStatus() {
 	return (
-		<footer className="flex h-6 shrink-0 items-center gap-4 border-t border-border bg-surface-sunk/90 px-3.5 font-mono text-[11px] text-muted backdrop-blur-md">
-			{/* 连接状态带呼吸微光 */}
-			<div className="flex items-center gap-2">
-				<span className="relative flex size-2">
-					<span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-50" />
-					<span className="relative inline-flex size-2 rounded-full bg-success shadow-[0_0_8px_var(--color-success)]" />
-				</span>
-				<span className="font-sans font-medium text-surface-foreground text-[11px]">已连接</span>
+		<footer className="flex h-6 shrink-0 items-center gap-3 border-t border-border bg-surface-sunk px-3 font-mono text-[11px] text-muted">
+			{/* 连接状态 */}
+			<div className="flex items-center gap-1.5">
+				<span className="size-1.5 rounded-full bg-success shadow-[0_0_6px_var(--color-success)]" />
+				<span className="font-sans font-medium text-surface-foreground">已连接</span>
 			</div>
 
-			<span className="text-border">|</span>
-			<span className="text-muted/80">deploy@10.0.3.21:22</span>
+			<span className="text-border">/</span>
+			<span>deploy@10.0.3.21:22</span>
 
-			<span className="text-border">|</span>
-			<span className="flex items-center gap-1 text-surface-foreground">
-				<span className="icon-[lucide--activity] size-3 text-success" />
-				<span className="tabular-nums">28 ms</span>
-			</span>
+			<span className="text-border">/</span>
+			<span className="tabular-nums text-surface-foreground">28 ms</span>
 
-			<span className="text-border">|</span>
+			<span className="text-border">/</span>
 			<span className="text-faint">UTF-8</span>
 
-			<span className="text-border">|</span>
-			<span className="flex items-center gap-1.5 text-warning font-sans">
+			<span className="text-border">/</span>
+			<span className="flex items-center gap-1 text-warning">
 				<span className="icon-[lucide--arrow-down-up] size-3" />
-				<span>传输 2 项 · 64%</span>
+				<span className="font-sans">传输 2 项 · 64%</span>
 			</span>
 
-			<span className="text-border">|</span>
-			<span className="text-faint">端口转发: 3 条运行</span>
+			<span className="text-border">/</span>
+			<span className="font-sans text-faint">转发 3 条活跃</span>
 
-			<div className="ml-auto">
+			<div className="ml-auto flex items-center gap-2">
 				<EnvPill env="PROD" />
 			</div>
 		</footer>
@@ -194,10 +189,10 @@ export function EnvPill({ env }: { env: "PROD" | "STG" | "TEST" | "DEV" }) {
 		PROD: "border-env-prod/40 bg-env-prod/15 text-env-prod",
 		STG: "border-env-stage/40 bg-env-stage/15 text-env-stage",
 		TEST: "border-env-test/40 bg-env-test/15 text-env-test",
-		DEV: "border-white/10 bg-white/[0.04] text-muted",
+		DEV: "border-border bg-surface-raised text-muted",
 	}[env];
 	return (
-		<span className={`rounded-md border px-1.5 font-mono text-[9px] font-semibold tracking-wider leading-4 ${tone}`}>
+		<span className={`rounded border px-1.5 font-mono text-[9px] font-semibold leading-4 tracking-wider ${tone}`}>
 			{env}
 		</span>
 	);
