@@ -1,0 +1,516 @@
+<title>TermX 设计需求书</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#F3F5F6; --surface:#FFFFFF; --sunk:#E9EDEF;
+  --ink:#16202A; --muted:#5A6771; --line:#D8DFE3;
+  --accent:#23648C; --accent-soft:#E1EDF4;
+  --prod:#C4391D; --stage:#B7791F; --test:#2F7D4F; --dev:#5B6B7A;
+  --ok:#2F7D4F; --warn:#B7791F; --err:#C4391D; --info:#23648C;
+  --term:#0F161C; --term-ink:#C9D4DC;
+  --sans:"IBM Plex Sans","PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;
+  --mono:"JetBrains Mono","Cascadia Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#0D1317; --surface:#141C22; --sunk:#1B252C;
+    --ink:#E2E9EE; --muted:#8D9BA6; --line:#26323A;
+    --accent:#6DB3DE; --accent-soft:#17303F;
+    --prod:#F07158; --stage:#E0A64A; --test:#5DBB84; --dev:#8D9BA6;
+    --ok:#5DBB84; --warn:#E0A64A; --err:#F07158; --info:#6DB3DE;
+    --term:#090E12; --term-ink:#C9D4DC;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0D1317; --surface:#141C22; --sunk:#1B252C;
+  --ink:#E2E9EE; --muted:#8D9BA6; --line:#26323A;
+  --accent:#6DB3DE; --accent-soft:#17303F;
+  --prod:#F07158; --stage:#E0A64A; --test:#5DBB84; --dev:#8D9BA6;
+  --ok:#5DBB84; --warn:#E0A64A; --err:#F07158; --info:#6DB3DE;
+  --term:#090E12; --term-ink:#C9D4DC;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.7;padding-inline:20px;padding-block:0 64px}
+.wrap{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:200px minmax(0,1fr);gap:48px}
+nav.toc{position:sticky;top:calc(env(safe-area-inset-top,0px) + 24px);align-self:start;padding-top:40px;font-size:13px}
+nav.toc .label{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+nav.toc ol{list-style:none;margin:0;padding:0;display:grid;gap:2px;counter-reset:t}
+nav.toc a{display:flex;gap:8px;color:var(--muted);text-decoration:none;padding:3px 8px;border-radius:4px}
+nav.toc a::before{counter-increment:t;content:counter(t,decimal-leading-zero);font-family:var(--mono);font-size:11px;opacity:.6;padding-top:2px}
+nav.toc a:hover,nav.toc a:focus-visible{color:var(--ink);background:var(--sunk);outline:none}
+main{min-width:0;padding-top:40px}
+header.doc{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:12px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.06em;color:var(--accent)}
+h1{font-size:34px;line-height:1.25;margin:8px 0 12px;font-weight:600;text-wrap:balance}
+.lede{font-size:16px;color:var(--muted);max-width:62ch;margin:0}
+.meta{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:18px;font-size:13px;color:var(--muted)}
+.meta b{color:var(--ink);font-weight:500}
+section{padding-top:36px}
+h2{font-size:22px;font-weight:600;margin:0 0 6px;display:flex;align-items:baseline;gap:12px;text-wrap:balance}
+h2 .n{font-family:var(--mono);font-size:13px;color:var(--accent);font-weight:500}
+h3{font-size:16px;font-weight:600;margin:26px 0 8px}
+p{margin:8px 0;max-width:70ch}
+.sub{color:var(--muted);margin:0 0 16px}
+ul.plain{margin:8px 0;padding-left:1.2em}
+ul.plain li{margin:3px 0}
+code,kbd,.mono{font-family:var(--mono);font-size:.86em}
+kbd{display:inline-block;padding:1px 6px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;background:var(--surface);white-space:nowrap}
+.note{border-left:3px solid var(--accent);background:var(--accent-soft);padding:10px 14px;border-radius:0 6px 6px 0;margin:14px 0;max-width:none}
+.note.warn{border-color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,var(--surface))}
+
+/* cards */
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px 18px}
+.card h4{margin:0 0 6px;font-size:15px;font-weight:600}
+.card p,.card ul{font-size:14px;color:var(--muted);margin:4px 0}
+.card ul{padding-left:1.1em}
+.card .tag{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:.04em}
+
+/* tables */
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--surface);margin:10px 0 4px}
+table{border-collapse:collapse;width:100%;font-size:14px;min-width:560px}
+th,td{text-align:left;padding:9px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:500;font-size:12px;color:var(--muted);background:var(--sunk);letter-spacing:.02em}
+tr:last-child td{border-bottom:0}
+td:first-child{font-weight:500;white-space:nowrap}
+td.p{width:56px}
+.pri{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:500;padding:1px 7px;border-radius:10px;border:1px solid}
+.p0{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.p1{color:var(--muted);border-color:var(--line);background:var(--sunk)}
+.p2{color:var(--muted);border-color:var(--line);border-style:dashed}
+.legend{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:13px;color:var(--muted);align-items:center;margin:4px 0 8px}
+
+/* wireframe */
+.wf-scroll{overflow-x:auto;margin:14px 0}
+.wf{min-width:700px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface);font-size:12px;display:grid;grid-template-columns:48px 220px 1fr 190px;grid-template-rows:34px 34px 1fr 26px;height:420px}
+.wf>div{border:0 solid var(--line);padding:6px 10px;position:relative}
+.wf .z{font-family:var(--mono);font-size:10px;color:var(--accent);display:block}
+.wf-title{grid-column:1/-1;border-bottom-width:1px!important;display:flex;align-items:center;gap:10px;background:var(--sunk)}
+.wf-title .dots{margin-left:auto;display:flex;gap:10px;color:var(--muted)}
+.wf-act{grid-row:2/4;border-right-width:1px!important;background:var(--sunk);display:flex;flex-direction:column;align-items:center;gap:12px;padding-top:12px!important}
+.wf-act i{width:18px;height:18px;border-radius:4px;border:1.5px solid var(--muted);display:block}
+.wf-act i.on{border-color:var(--accent);background:var(--accent-soft)}
+.wf-side{grid-row:2/4;border-right-width:1px!important;display:flex;flex-direction:column;gap:6px}
+.wf-search{border:1px solid var(--line);border-radius:5px;padding:3px 8px;color:var(--muted)}
+.wf-grp{color:var(--muted);font-size:11px;margin-top:4px}
+.wf-host{display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:4px}
+.wf-host.sel{background:var(--accent-soft)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
+.env{font-family:var(--mono);font-size:9px;padding:0 4px;border-radius:3px;color:#fff;margin-left:auto}
+.wf-tabs{border-bottom-width:1px!important;display:flex;align-items:flex-end;gap:2px;padding:0 6px!important;grid-column:3/5}
+.wf-tab{padding:5px 12px;border:1px solid var(--line);border-bottom:0;border-radius:6px 6px 0 0;display:flex;gap:6px;align-items:center;color:var(--muted);background:var(--sunk)}
+.wf-tab.on{background:var(--term);color:var(--term-ink);border-color:var(--term)}
+.wf-tab .stripe{width:3px;height:12px;border-radius:2px}
+.wf-main{background:var(--term);color:var(--term-ink);display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 120px;gap:1px;padding:0!important;border-right:1px solid var(--line)}
+.wf-main .pane{background:var(--term);padding:8px 10px;font-family:var(--mono);font-size:11px;line-height:1.6;overflow:hidden}
+.wf-main .pane.focus{box-shadow:inset 0 0 0 1px var(--accent)}
+.wf-main .sftp{grid-column:1/-1;background:var(--surface);color:var(--ink);font-family:var(--sans);border-top:1px solid var(--line)}
+.wf-main .pane .g{color:#5DBB84}.wf-main .pane .y{color:#E0A64A}.wf-main .pane .c{color:#6DB3DE}.wf-main .pane .r{color:#F07158}
+.wf-right{display:flex;flex-direction:column;gap:8px}
+.bar{height:6px;border-radius:3px;background:var(--sunk);overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
+.wf-right .row{display:flex;justify-content:space-between;color:var(--muted);font-size:11px}
+.wf-status{grid-column:1/-1;border-top-width:1px!important;display:flex;gap:16px;align-items:center;background:var(--sunk);color:var(--muted);font-family:var(--mono);font-size:10.5px}
+.wf-status .r{margin-left:auto}
+.zones{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 28px;margin-top:10px}
+.zones div{display:grid;grid-template-columns:24px 1fr;gap:6px;font-size:14px;padding:6px 0;border-bottom:1px dashed var(--line)}
+.zones b{font-family:var(--mono);color:var(--accent);font-weight:500}
+
+/* state chips */
+.chips{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border-radius:14px;border:1px solid var(--line);background:var(--surface);font-size:13px}
+.chip .dot.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){.chip .dot.pulse{animation:none}}
+
+/* flows */
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:10px 0;font-size:13px}
+.flow span{background:var(--surface);border:1px solid var(--line);border-radius:5px;padding:3px 10px}
+.flow em{font-style:normal;color:var(--muted)}
+
+.qs{counter-reset:q;display:grid;gap:10px;margin-top:12px}
+.q{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 16px;display:grid;grid-template-columns:28px 1fr;gap:8px}
+.q::before{counter-increment:q;content:"Q" counter(q);font-family:var(--mono);color:var(--accent);font-size:13px;padding-top:2px}
+.q p{margin:2px 0;font-size:14px}
+.q .opt{color:var(--muted)}
+
+@media (max-width:900px){
+  .wrap{grid-template-columns:1fr;gap:0}
+  nav.toc{display:none}
+  .grid3{grid-template-columns:1fr 1fr}
+}
+@media (max-width:600px){
+  body{padding-inline:16px}
+  h1{font-size:27px}
+  .grid2,.grid3,.zones{grid-template-columns:1fr}
+}
+</style>
+
+<div class="wrap">
+<nav class="toc" aria-label="目录">
+  <div class="label">目录</div>
+  <ol>
+    <li><a href="#overview">产品概述</a></li>
+    <li><a href="#refs">参考产品取舍</a></li>
+    <li><a href="#principles">交互原则</a></li>
+    <li><a href="#layout">主窗口布局</a></li>
+    <li><a href="#features">功能清单</a></li>
+    <li><a href="#screens">设计交付清单</a></li>
+    <li><a href="#interactions">关键交互细则</a></li>
+    <li><a href="#visual">视觉要求</a></li>
+    <li><a href="#keys">快捷键</a></li>
+    <li><a href="#open">待确认问题</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="doc">
+  <div class="eyebrow">TERMX · UI/UX 设计需求 · v0.2</div>
+  <h1>TermX 设计需求书</h1>
+  <p class="lede">个人使用的跨平台 SSH 客户端。它把终端、SFTP、端口转发、主机监控放在同一个工作区里，重点是交互顺手、界面耐看，能长时间使用。</p>
+  <div class="meta">
+    <span><b>使用场景</b> 个人日常开发、运维（不做团队功能）</span>
+    <span><b>平台</b> Windows / macOS / Linux 桌面端</span>
+    <span><b>技术</b> TypeScript + Electron 或 Tauri（待定）</span>
+    <span><b>日期</b> 2026-09-24</span>
+  </div>
+</header>
+
+<section id="overview">
+  <h2><span class="n">01</span>产品概述</h2>
+  <h3>目标用户</h3>
+  <ul class="plain">
+    <li><b>日常开发</b>：连测试、预发、生产环境部署和排查问题，常改远程配置文件、传文件。</li>
+    <li><b>运维场景</b>：手上管理几十台主机，常同时在多台机器上看日志、执行命令。</li>
+    <li><b>多台电脑</b>：可能在公司和家里的电脑上都要用，需要能方便地迁移配置。</li>
+  </ul>
+  <h3>设计目标</h3>
+  <div class="grid3">
+    <div class="card"><div class="tag">快</div><h4>3 秒内连上任意主机</h4><p>打开应用 → <kbd>Ctrl</kbd>+<kbd>K</kbd> → 输入几个字母 → 回车即连接，全程不用碰鼠标。</p></div>
+    <div class="card"><div class="tag">稳</div><h4>不会误操作生产环境</h4><p>生产主机在标签、终端边框、状态栏上都有明显标识；执行高危操作前要求确认。</p></div>
+    <div class="card"><div class="tag">顺</div><h4>一台主机，所有工具都在旁边</h4><p>终端、文件、转发、监控共用同一个连接，在同一个标签里切换，不用另开窗口，也不用重新登录。</p></div>
+  </div>
+  <p class="note"><b>范围说明：</b>不做 RDP、VNC 等远程桌面协议。Telnet、串口、Mosh 优先级较低（P2），只需预留入口。</p>
+</section>
+
+<section id="refs">
+  <h2><span class="n">02</span>参考产品取舍</h2>
+  <p class="sub">整体交互以 OxideTerm 为主要参考，同时吸收 Netcatty 在主机管理和视觉上的优点。</p>
+  <div class="grid2">
+    <div class="card">
+      <div class="tag">主要参考</div>
+      <h4>OxideTerm — 学它的工作区模型</h4>
+      <ul>
+        <li><b>以主机为中心</b>：终端、SFTP、转发、监控都挂在同一个主机节点下，共用一条连接。</li>
+        <li><b>命令面板</b>加全局快捷键，所有操作都能通过键盘完成。</li>
+        <li><b>断线宽限期重连</b>：网络闪断时保留终端内容，恢复后接着用，vim、top 这类程序不会中断。</li>
+        <li>分屏最多 4 格，分隔线可拖拽调整。</li>
+        <li>端口转发自动检测远程正在监听的端口，一键转发到本地。</li>
+        <li>SFTP 传输队列显示进度、剩余时间，支持限速。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="tag">辅助参考</div>
+      <h4>Netcatty — 学它的主机库和视觉</h4>
+      <ul>
+        <li><b>主机库三种视图</b>：卡片看总览、列表快速扫、树形看层级。</li>
+        <li>连接后自动识别系统发行版，显示 Ubuntu、CentOS 等图标。</li>
+        <li>完整的深色和浅色主题，界面整洁，留白舒服。</li>
+        <li>终端输出按关键词高亮，规则可以自定义。</li>
+        <li>SFTP 支持拖拽上传下载，内置编辑器可直接改文件。</li>
+        <li>右键可保存当前屏幕内容。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="note warn"><b>要避免的问题：</b>Netcatty 的操作层级偏深，很多功能要进设置页或弹窗才能完成。TermX 的常用操作要在当前界面内联完成，不打断正在做的事。</p>
+</section>
+
+<section id="principles">
+  <h2><span class="n">03</span>交互原则</h2>
+  <p class="sub">设计评审时用这六条逐项检查。</p>
+  <div class="grid2">
+    <div class="card"><h4>1. 键盘优先，鼠标可达</h4><p>所有功能都能通过命令面板或快捷键触发。鼠标操作同样完整，右键菜单要全。</p></div>
+    <div class="card"><h4>2. 少用模态弹窗</h4><p>编辑主机、查看详情用右侧抽屉；重命名等小操作用内联编辑。只有确认危险操作和验证主机指纹时才用模态框。</p></div>
+    <div class="card"><h4>3. 状态始终可见</h4><p>连接状态、延迟、重连倒计时、传输进度一直显示在标签和状态栏上，不需要用户去找。</p></div>
+    <div class="card"><h4>4. 渐进披露</h4><p>新建主机最少只填地址和用户名，其他高级选项折叠起来。首次使用时界面不能出现一整屏的表单。</p></div>
+    <div class="card"><h4>5. 环境有辨识度</h4><p>生产、预发、测试、开发各有固定颜色，贯穿主机库、标签、终端边框和状态栏。</p></div>
+    <div class="card"><h4>6. 可撤销优于确认</h4><p>删除主机、关闭标签用 Toast 提供“撤销”，不弹确认框。只有删除远程文件这类不可撤销的操作才要求确认。</p></div>
+  </div>
+</section>
+
+<section id="layout">
+  <h2><span class="n">04</span>主窗口布局</h2>
+  <p class="sub">设计稿基准尺寸 1440×900，最小窗口 960×600。使用自定义无边框标题栏。</p>
+  <div class="wf-scroll">
+  <div class="wf" role="img" aria-label="主窗口线框图：标题栏、活动栏、侧边面板、标签栏、终端分屏加 SFTP、右侧监控面板、状态栏">
+    <div class="wf-title"><span class="z">①</span><b>TermX</b><span style="color:var(--muted)">⌘K 搜索主机、命令、设置…</span><span class="dots"><span>—</span><span>☐</span><span>✕</span></span></div>
+    <div class="wf-act"><span class="z">②</span><i class="on"></i><i></i><i></i><i></i><i></i><i style="margin-top:auto;margin-bottom:10px"></i></div>
+    <div class="wf-side"><span class="z">③ 主机库</span>
+      <div class="wf-search">搜索主机…</div>
+      <div class="wf-grp">▾ 订单服务</div>
+      <div class="wf-host sel"><span class="dot" style="background:var(--ok)"></span>order-api-01<span class="env" style="background:var(--prod)">PROD</span></div>
+      <div class="wf-host"><span class="dot" style="background:var(--ok)"></span>order-api-02<span class="env" style="background:var(--prod)">PROD</span></div>
+      <div class="wf-host"><span class="dot" style="background:var(--line)"></span>order-stage<span class="env" style="background:var(--stage)">STG</span></div>
+      <div class="wf-grp">▾ 基础设施</div>
+      <div class="wf-host"><span class="dot" style="background:var(--warn)"></span>bastion-sh<span class="env" style="background:var(--dev)">OPS</span></div>
+      <div class="wf-host"><span class="dot" style="background:var(--line)"></span>redis-test-01<span class="env" style="background:var(--test)">TEST</span></div>
+    </div>
+    <div class="wf-tabs"><span class="z" style="position:absolute;left:8px;top:2px">④</span>
+      <div class="wf-tab on"><span class="stripe" style="background:var(--prod)"></span>order-api-01 ×</div>
+      <div class="wf-tab"><span class="stripe" style="background:var(--stage)"></span>order-stage</div>
+      <div class="wf-tab"><span class="stripe" style="background:var(--dev)"></span>本地终端</div>
+      <div class="wf-tab" style="background:none;border:0">＋</div>
+    </div>
+    <div class="wf-main">
+      <div class="pane focus"><span class="c">deploy@order-api-01</span>:~$ tail -f app.log<br><span class="g">INFO</span> order created id=88213<br><span class="y">WARN</span> slow query 1.2s<br><span class="r">ERROR</span> redis timeout<br><span class="z" style="position:absolute;margin-top:6px">⑤ 终端分屏</span></div>
+      <div class="pane"><span class="c">deploy@order-api-01</span>:~$ htop<br>CPU[|||||     42%]<br>Mem[||||||  3.1G/8G]</div>
+      <div class="pane sftp"><span class="z">⑥ SFTP 面板（可收起，跟随终端目录）</span>/home/deploy/app ▸ logs &nbsp;·&nbsp; app.log 12.4 MB &nbsp;·&nbsp; config.yml 2 KB &nbsp;·&nbsp; release/</div>
+    </div>
+    <div class="wf-right"><span class="z">⑦ 主机监控</span>
+      <div class="row"><span>CPU</span><span class="mono">42%</span></div><div class="bar"><i style="width:42%"></i></div>
+      <div class="row"><span>内存</span><span class="mono">3.1/8 G</span></div><div class="bar"><i style="width:39%"></i></div>
+      <div class="row"><span>磁盘 /</span><span class="mono">71%</span></div><div class="bar"><i style="width:71%;background:var(--warn)"></i></div>
+      <div class="row"><span>网络</span><span class="mono">↓2.1 ↑0.4 MB/s</span></div>
+    </div>
+    <div class="wf-status"><span class="z" style="display:inline">⑧</span><span style="color:var(--ok)">● 已连接</span><span>deploy@10.0.3.21:22</span><span>28 ms</span><span>UTF-8</span><span class="r">传输 2 项 · 64%</span><span>转发 3</span></div>
+  </div>
+  </div>
+  <div class="zones">
+    <div><b>①</b><span><b>标题栏</b>：可拖动窗口；中间是命令面板入口（点击等同 <kbd>Ctrl</kbd>+<kbd>K</kbd>）；Windows 和 macOS 的窗口按钮位置各自适配。</span></div>
+    <div><b>②</b><span><b>活动栏</b>：主机库、SFTP、端口转发、命令片段、密钥库、传输队列；设置固定在底部。</span></div>
+    <div><b>③</b><span><b>侧边面板</b>：宽度 240–360px 可拖拽，<kbd>Ctrl</kbd>+<kbd>B</kbd> 收起。内容随活动栏切换。</span></div>
+    <div><b>④</b><span><b>标签栏</b>：每个标签左侧有环境色条和连接状态；可拖拽排序、双击重命名；右键菜单可复制会话、分屏、关闭其他标签。</span></div>
+    <div><b>⑤</b><span><b>终端区</b>：支持水平、垂直分屏，最多 4 格；当前焦点格有细描边；分隔线可拖动，双击恢复等分。</span></div>
+    <div><b>⑥</b><span><b>底部 SFTP 面板</b>：附着在当前连接下，可收起；也可以切换到全屏双栏模式。</span></div>
+    <div><b>⑦</b><span><b>右侧工具面板</b>：可在主机监控、命令片段、AI（预留）之间切换，默认收起。</span></div>
+    <div><b>⑧</b><span><b>状态栏</b>：连接状态、用户@地址、延迟、编码、传输进度、转发数；每一项都可点击跳转。</span></div>
+  </div>
+</section>
+
+<section id="features">
+  <h2><span class="n">05</span>功能清单</h2>
+  <div class="legend"><span><span class="pri p0">P0</span> 首版必须</span><span><span class="pri p1">P1</span> 第二阶段</span><span><span class="pri p2">P2</span> 后续 / 预留入口</span><span>设计稿要覆盖 P0 和 P1；P2 只需在信息架构中预留位置。</span></div>
+
+  <h3>A. 主机库</h3>
+  <div class="tbl"><table>
+    <tr><th>功能</th><th>说明</th><th>优先级</th></tr>
+    <tr><td>三种视图</td><td>卡片、列表、树形三种视图，切换时保持当前选中项</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>分组</td><td>多级文件夹，支持拖拽移动和排序，可折叠</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>环境与标签</td><td>内置环境：生产、预发、测试、开发（带固定颜色），另可加自定义标签</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>搜索</td><td>按名称、IP、用户名、标签模糊匹配，匹配字符高亮</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>最近与收藏</td><td>最近连接列表、收藏置顶</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>在线状态</td><td>显示主机最后一次连接的状态和延迟</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>系统图标</td><td>首次连接后识别发行版，显示 Ubuntu、CentOS、Debian 等图标</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>批量操作</td><td>多选后可批量连接、移动、修改、删除</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>导入</td><td>支持 ~/.ssh/config、Xshell、FinalShell、MobaXterm、CSV</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>导出备份</td><td>导出加密备份文件，导入时需输入密码</td><td class="p"><span class="pri p1">P1</span></td></tr>
+  </table></div>
+
+  <h3>B. 连接与认证</h3>
+  <div class="tbl"><table>
+    <tr><th>功能</th><th>说明</th><th>优先级</th></tr>
+    <tr><td>认证方式</td><td>密码、私钥、私钥加口令、SSH Agent、键盘交互（二次验证码）</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>主机指纹</td><td>首次连接时确认指纹；指纹发生变化时显示醒目警告</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>跳板机</td><td>多级跳板链，每一跳可单独配置认证方式</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>连接进度</td><td>分步显示：解析地址、建立连接、握手、认证、打开终端；失败时标出是哪一步出错</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>代理</td><td>支持 SOCKS5 和 HTTP 代理</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>断线重连</td><td>心跳检测；断线后有宽限期，恢复后保留终端内容，同时恢复转发和传输</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>高级选项</td><td>字符编码、终端类型、环境变量、登录后自动执行的命令</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>本地终端</td><td>PowerShell、cmd、WSL、bash、zsh</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>其他协议</td><td>Telnet、串口、Mosh</td><td class="p"><span class="pri p2">P2</span></td></tr>
+  </table></div>
+
+  <h3>C. 终端</h3>
+  <div class="tbl"><table>
+    <tr><th>功能</th><th>说明</th><th>优先级</th></tr>
+    <tr><td>多标签</td><td>支持拖拽排序、复制会话、重命名</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>分屏</td><td>水平或垂直分屏，最多 4 格，每格可以连不同主机</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>复制粘贴</td><td>右键菜单；可选“选中即复制”和“右键粘贴”</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>搜索</td><td>在终端输出中搜索，支持正则、区分大小写，可在结果间上下跳转</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>外观</td><td>配色方案、字体、字号、行高、光标样式，可单独给某台主机设置</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>粘贴保护</td><td>粘贴多行内容时先预览；在生产环境执行 <code>rm -rf</code>、<code>reboot</code> 等命令前二次确认</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>关键词高亮</td><td>ERROR、WARN、IP 地址等内置规则，可自定义</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>广播输入</td><td>把键盘输入同步发送到多个终端，被广播的终端有明显标识</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>会话日志</td><td>自动保存会话日志；可保存当前屏幕内容、导出日志</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>rz/sz</td><td>支持 Zmodem 和 trzsz 文件传输，弹出系统文件选择框</td><td class="p"><span class="pri p2">P2</span></td></tr>
+    <tr><td>录制回放</td><td>录制终端会话并回放</td><td class="p"><span class="pri p2">P2</span></td></tr>
+    <tr><td>多窗口</td><td>把标签拖出成为独立窗口</td><td class="p"><span class="pri p2">P2</span></td></tr>
+  </table></div>
+
+  <h3>D. SFTP 文件管理</h3>
+  <div class="tbl"><table>
+    <tr><th>功能</th><th>说明</th><th>优先级</th></tr>
+    <tr><td>文件浏览</td><td>面包屑路径（点击后可直接编辑）、前进、后退、刷新、显示隐藏文件</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>上传下载</td><td>和系统文件管理器之间双向拖拽；支持整个文件夹</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>文件操作</td><td>新建、重命名、删除、修改权限（勾选框和数字两种方式）、查看属性、复制路径</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>跟随终端目录</td><td>在终端里 <code>cd</code> 之后，文件面板自动切到同一目录（可关闭）</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>双栏模式</td><td>本地↔远程、远程↔远程两栏并排</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>传输队列</td><td>显示进度、速度、剩余时间；可暂停、重试、取消、限速；同名文件时询问处理方式</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>内置编辑器</td><td>语法高亮、多标签；保存时如果远程文件已被修改，给出冲突提示</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>外部编辑</td><td>用本地编辑器打开，保存后自动上传回服务器</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>书签</td><td>收藏常用目录</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>压缩解压</td><td>在远程直接打包或解压</td><td class="p"><span class="pri p2">P2</span></td></tr>
+  </table></div>
+
+  <h3>E. 端口转发</h3>
+  <div class="tbl"><table>
+    <tr><th>功能</th><th>说明</th><th>优先级</th></tr>
+    <tr><td>转发类型</td><td>本地 (-L)、远程 (-R)、动态 SOCKS5 (-D)</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>规则管理</td><td>保存规则；可设置连接后自动启动；一键开关</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>运行状态</td><td>显示运行状态、当前连接数、流量；出错时说明原因（例如本地端口被占用）</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>端口发现</td><td>检测远程正在监听的端口，一键转发到本地并在浏览器打开</td><td class="p"><span class="pri p2">P2</span></td></tr>
+  </table></div>
+
+  <h3>F. 效率工具与监控</h3>
+  <div class="tbl"><table>
+    <tr><th>功能</th><th>说明</th><th>优先级</th></tr>
+    <tr><td>命令面板</td><td>在一个入口里搜索主机、命令片段、操作和设置项</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>命令片段</td><td>分组管理；支持变量占位 <code>${service}</code>，发送前填写；可发到当前、选中或全部终端</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>主机监控</td><td>CPU、内存、磁盘、网络、负载的实时小图；状态栏常驻迷你指标</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>进程列表</td><td>可排序、搜索，可结束进程</td><td class="p"><span class="pri p2">P2</span></td></tr>
+    <tr><td>批量执行</td><td>选多台主机执行同一条命令，按主机汇总结果，高亮失败项</td><td class="p"><span class="pri p2">P2</span></td></tr>
+    <tr><td>AI 助手</td><td>解释命令输出、生成命令；执行前必须由用户确认。只预留右侧面板入口</td><td class="p"><span class="pri p2">P2</span></td></tr>
+  </table></div>
+
+  <h3>G. 密钥、安全与数据</h3>
+  <div class="tbl"><table>
+    <tr><th>功能</th><th>说明</th><th>优先级</th></tr>
+    <tr><td>密钥库</td><td>生成 Ed25519、RSA、ECDSA 密钥；导入私钥；复制公钥</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>部署公钥</td><td>一键把公钥写入目标主机的 authorized_keys</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>身份</td><td>把用户名和认证方式组合成“身份”，多台主机可以复用</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>应用锁</td><td>主密码；闲置一段时间自动锁定；凭据存入系统钥匙串</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>known_hosts</td><td>查看、删除已信任的主机指纹</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>配置同步</td><td>多台电脑之间同步主机、密钥、片段和设置，数据加密后存到用户自己的存储（详见待确认问题）</td><td class="p"><span class="pri p2">P2</span></td></tr>
+  </table></div>
+
+  <h3>H. 设置</h3>
+  <div class="tbl"><table>
+    <tr><th>功能</th><th>说明</th><th>优先级</th></tr>
+    <tr><td>外观</td><td>深色、浅色、跟随系统；强调色；界面密度（紧凑、标准）</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>终端</td><td>默认字体、配色、滚动行数、响铃、右键行为</td><td class="p"><span class="pri p0">P0</span></td></tr>
+    <tr><td>快捷键</td><td>查看全部快捷键并自定义，检测冲突</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>语言</td><td>简体中文、English</td><td class="p"><span class="pri p1">P1</span></td></tr>
+    <tr><td>背景</td><td>终端背景图片、窗口透明度</td><td class="p"><span class="pri p2">P2</span></td></tr>
+  </table></div>
+</section>
+
+<section id="screens">
+  <h2><span class="n">06</span>设计交付清单</h2>
+  <p class="sub">每个界面都要出深色和浅色两套，并覆盖列出的全部状态。</p>
+  <div class="tbl"><table>
+    <tr><th>界面</th><th>需要覆盖的状态</th><th>形式</th></tr>
+    <tr><td>首次启动</td><td>欢迎页；导入 ~/.ssh/config 或其他软件的会话；手动新建第一台主机；设置主密码（可跳过）</td><td>整页</td></tr>
+    <tr><td>主机库</td><td>卡片、列表、树形三种视图；空状态；搜索无结果；多选状态；拖拽进行中</td><td>主区 + 侧栏</td></tr>
+    <tr><td>主机编辑</td><td>新建和编辑；基本信息 / 认证 / 跳板机 / 高级 / 外观 五个分区；校验失败；未保存离开时提示</td><td>右侧抽屉</td></tr>
+    <tr><td>连接过程</td><td>分步进度；输入密码或二次验证码；首次指纹确认；指纹变化警告；各步骤的失败状态</td><td>标签内覆盖层 + 模态</td></tr>
+    <tr><td>终端工作区</td><td>单屏、2 格、4 格分屏；搜索栏；右键菜单；广播中；重连宽限期覆盖层；已断开</td><td>主区</td></tr>
+    <tr><td>SFTP</td><td>底部面板和双栏两种模式；拖拽上传的放置高亮；权限编辑；同名冲突；空目录；无权限</td><td>面板 / 整页</td></tr>
+    <tr><td>传输队列</td><td>进行中、已暂停、失败、已完成；空状态</td><td>侧栏 + 状态栏弹层</td></tr>
+    <tr><td>编辑器</td><td>多个文件标签；未保存标记；保存冲突对比</td><td>标签页</td></tr>
+    <tr><td>端口转发</td><td>规则列表；新建规则时三种类型的表单；运行中、已停止、出错</td><td>侧栏 + 抽屉</td></tr>
+    <tr><td>命令片段</td><td>列表；编辑；发送前填写变量；选择发送目标</td><td>侧栏 + 弹层</td></tr>
+    <tr><td>密钥库</td><td>密钥列表；生成密钥；导入；部署公钥</td><td>侧栏 + 抽屉</td></tr>
+    <tr><td>主机监控</td><td>正常；有指标超出阈值；无法获取数据</td><td>右侧面板</td></tr>
+    <tr><td>命令面板</td><td>默认显示最近使用；搜索结果按主机、命令、设置分组；用 <code>&gt;</code> 前缀只搜命令</td><td>浮层</td></tr>
+    <tr><td>设置</td><td>外观、终端、快捷键、安全、数据各分区</td><td>整页标签</td></tr>
+    <tr><td>锁屏</td><td>输入主密码解锁；密码错误</td><td>全窗口覆盖</td></tr>
+    <tr><td>通用组件</td><td>Toast（带撤销按钮）、确认框、危险确认框（需输入主机名才能继续）、空状态、骨架屏、右键菜单、提示气泡</td><td>组件库</td></tr>
+  </table></div>
+</section>
+
+<section id="interactions">
+  <h2><span class="n">07</span>关键交互细则</h2>
+
+  <h3>连接状态</h3>
+  <p>连接状态用同一套颜色和图标，出现在标签、主机库列表和状态栏三个位置。</p>
+  <div class="chips">
+    <span class="chip"><span class="dot" style="background:var(--line);border:1px solid var(--muted)"></span>未连接</span>
+    <span class="chip"><span class="dot pulse" style="background:var(--info)"></span>连接中</span>
+    <span class="chip"><span class="dot" style="background:var(--ok)"></span>已连接</span>
+    <span class="chip"><span class="dot pulse" style="background:var(--warn)"></span>重连中 · 剩 18s</span>
+    <span class="chip"><span class="dot" style="background:var(--muted)"></span>已断开</span>
+    <span class="chip"><span class="dot" style="background:var(--err)"></span>连接失败</span>
+  </div>
+
+  <h3>连接流程</h3>
+  <div class="flow"><span>双击主机 / 回车</span><em>→</em><span>打开新标签</span><em>→</em><span>显示分步进度</span><em>→</em><span>需要时输入密码或验证码</span><em>→</em><span>首次连接确认指纹</span><em>→</em><span>进入终端</span></div>
+  <ul class="plain">
+    <li>进度显示在标签内部，不弹窗。连接期间用户可以切到其他标签。</li>
+    <li>连接失败时，在出错的那一步给出原因和操作按钮：<b>重试</b>、<b>编辑主机</b>、<b>复制错误信息</b>。</li>
+    <li>输入密码的界面有“记住密码”勾选框，默认不勾选。</li>
+  </ul>
+
+  <h3>断线重连</h3>
+  <ul class="plain">
+    <li>断线后终端内容保持不变，顶部出现一条横幅：“连接已中断，正在重连（剩 18 秒）”，右侧有<b>立即重连</b>和<b>关闭</b>两个按钮。</li>
+    <li>宽限期内恢复：横幅消失，终端可以继续使用。</li>
+    <li>宽限期结束仍未恢复：终端变灰，显示“已断开”覆盖层，按回车即可重新连接。</li>
+  </ul>
+
+  <h3>生产环境防误操作</h3>
+  <ul class="plain">
+    <li>生产主机的标签有红色色条；终端区域有 2px 红色内描边（可关闭）；状态栏显示 <span class="env" style="background:var(--prod);position:static;margin:0">PROD</span> 标记。</li>
+    <li>粘贴多行内容时，先弹出预览浮层，显示行数和内容。</li>
+    <li>匹配到高危命令规则时拦截，要求用户确认后再执行。</li>
+    <li>给生产主机发送广播输入或命令片段时，要单独勾选确认。</li>
+  </ul>
+
+  <h3>分屏</h3>
+  <ul class="plain">
+    <li>把主机从侧栏拖到终端区，会出现上、下、左、右、中间五个放置区；中间表示在当前格打开，四个方向表示在对应方向新建分屏。</li>
+    <li>也可以用快捷键或右键菜单分屏，默认打开同一台主机的新会话。</li>
+    <li>当前焦点格用 1px 强调色描边标出；非焦点格文字稍微调暗（可关闭）。</li>
+  </ul>
+
+  <h3>SFTP 拖拽</h3>
+  <ul class="plain">
+    <li>从系统文件管理器拖入时，目标目录高亮，并提示“上传到 /home/deploy/app”。</li>
+    <li>拖到某个子文件夹上停留 600ms，会自动展开这个文件夹。</li>
+    <li>开始传输后状态栏立即出现进度；遇到同名文件时询问处理方式：覆盖、跳过、重命名，并可勾选“全部应用”。</li>
+  </ul>
+</section>
+
+<section id="visual">
+  <h2><span class="n">08</span>视觉要求</h2>
+  <div class="grid2">
+    <div class="card"><h4>主题</h4><ul><li>以深色为主，浅色要同样完整，另支持跟随系统。</li><li>终端配色方案和界面主题分开设置；预置 8 套以上配色，如 One Dark、Dracula、Solarized、Nord。</li><li>强调色可以更换，预置 6 个。</li></ul></div>
+    <div class="card"><h4>字体</h4><ul><li>界面字体使用系统 UI 字体，中文使用苹方或微软雅黑。</li><li>终端默认 JetBrains Mono，支持连字和 Nerd Font 图标。</li><li>IP、端口、大小、速度等数字一律用等宽数字。</li></ul></div>
+    <div class="card"><h4>密度与尺寸</h4><ul><li>提供标准和紧凑两档密度；标准档列表行高 32px，紧凑档 26px。</li><li>圆角克制：面板 8px，按钮和输入框 6px，标签 6px。</li><li>尽量不用阴影，层级靠背景明暗区分；浮层可以用阴影。</li></ul></div>
+    <div class="card"><h4>动效</h4><ul><li>时长 120–200ms，使用缓出曲线。</li><li>用于抽屉滑入、标签切换、分屏展开、Toast 出现。</li><li>终端区域内不加任何动画；系统开启“减少动态效果”时关闭所有动画。</li></ul></div>
+    <div class="card"><h4>图标</h4><ul><li>使用线性图标，风格参考 Lucide，线宽 1.5px。</li><li>系统发行版图标使用各自的品牌色，需要准备 15 个左右。</li><li>环境标记用文字胶囊（PROD、STG、TEST、DEV），不单独用颜色点区分。</li></ul></div>
+    <div class="card"><h4>环境色</h4><ul><li><span style="color:var(--prod)">■</span> 生产 红　<span style="color:var(--stage)">■</span> 预发 琥珀　<span style="color:var(--test)">■</span> 测试 绿　<span style="color:var(--dev)">■</span> 开发 灰</li><li>环境色和语义色（成功、警告、错误）要能区分开，不能和强调色冲突。</li><li>深浅两套主题下都要满足 WCAG AA 对比度。</li></ul></div>
+  </div>
+</section>
+
+<section id="keys">
+  <h2><span class="n">09</span>默认快捷键</h2>
+  <p class="sub">macOS 下把 <kbd>Ctrl</kbd> 换成 <kbd>⌘</kbd>。终端里用到的 <kbd>Ctrl</kbd>+字母（如 <kbd>Ctrl</kbd>+<kbd>C</kbd>）要原样发给远程，所以应用快捷键多数加 <kbd>Shift</kbd>。</p>
+  <div class="tbl"><table>
+    <tr><th>操作</th><th>快捷键</th><th>操作</th><th>快捷键</th></tr>
+    <tr><td>命令面板</td><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>快速连接</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd></td></tr>
+    <tr><td>新建标签</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd></td><td>关闭标签</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></td></tr>
+    <tr><td>切换标签</td><td><kbd>Ctrl</kbd>+<kbd>Tab</kbd> / <kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>9</kbd></td><td>向右分屏</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd></td></tr>
+    <tr><td>向下分屏</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></td><td>切换焦点格</td><td><kbd>Alt</kbd>+方向键</td></tr>
+    <tr><td>复制 / 粘贴</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> / <kbd>V</kbd></td><td>终端内搜索</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td></tr>
+    <tr><td>显示 / 隐藏侧栏</td><td><kbd>Ctrl</kbd>+<kbd>B</kbd></td><td>显示 / 隐藏 SFTP</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td></tr>
+    <tr><td>广播输入</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd></td><td>锁定应用</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd></td></tr>
+    <tr><td>设置</td><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>调整字号</td><td><kbd>Ctrl</kbd>+<kbd>=</kbd> / <kbd>-</kbd> / <kbd>0</kbd></td></tr>
+  </table></div>
+</section>
+
+<section id="open">
+  <h2><span class="n">10</span>待确认问题</h2>
+  <p class="sub">这些问题会影响信息架构，最好在出设计稿之前定下来。</p>
+  <div class="qs">
+    <div class="q"><div><p><b>多台电脑之间要不要同步配置？</b></p><p class="opt">A. 不做同步，只用加密备份文件导入导出　B. 同步到自己的 WebDAV、S3 或 GitHub Gist（加密后上传）　C. 放到 P2 以后再说</p></div></div>
+    <div class="q"><div><p><b>AI 助手是否进入规划？</b>两个参考产品都有，目前按 P2 只预留入口。</p></div></div>
+    <div class="q"><div><p><b>你主要用什么系统？</b>这决定设计稿以 Windows 还是 macOS 的标题栏和窗口控件为主。</p></div></div>
+    <div class="q"><div><p><b>是否需要对接公司的堡垒机</b>（如 JumpServer）？</p></div></div>
+  </div>
+</section>
+</main>
+</div>

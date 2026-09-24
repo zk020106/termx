@@ -1,0 +1,225 @@
+{
+	"version": 1,
+	"type": "vetta-design",
+	"canvas": {
+		"zoom": 0.5413411329464508,
+		"x": -10658.719890476408,
+		"y": -19.471308173928833
+	},
+	"frames": [
+		{
+			"id": "connect",
+			"file": "frames/connect.tsx",
+			"x": 3040,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "连接过程",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "连接过程"
+			}
+		},
+		{
+			"id": "editor",
+			"file": "frames/editor.tsx",
+			"x": 16720,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "编辑器",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "编辑器"
+			}
+		},
+		{
+			"id": "forward",
+			"file": "frames/forward.tsx",
+			"x": 9120,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "端口转发",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "端口转发"
+			}
+		},
+		{
+			"id": "host-edit",
+			"file": "frames/host-edit.tsx",
+			"x": 4560,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "编辑主机",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "编辑主机"
+			}
+		},
+		{
+			"id": "hosts",
+			"file": "frames/hosts.tsx",
+			"x": 0,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "主机库",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "主机库"
+			}
+		},
+		{
+			"id": "index",
+			"file": "frames/index.tsx",
+			"x": 1523,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "终端工作区",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "终端工作区"
+			}
+		},
+		{
+			"id": "keys",
+			"file": "frames/keys.tsx",
+			"x": 10640,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "密钥库",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "密钥库"
+			}
+		},
+		{
+			"id": "lock",
+			"file": "frames/lock.tsx",
+			"x": 6080,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "锁屏",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "锁屏"
+			}
+		},
+		{
+			"id": "monitor",
+			"file": "frames/monitor.tsx",
+			"x": 18240,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "主机监控",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "主机监控"
+			}
+		},
+		{
+			"id": "palette",
+			"file": "frames/palette.tsx",
+			"x": 19760,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "命令面板",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "命令面板"
+			}
+		},
+		{
+			"id": "settings",
+			"file": "frames/settings.tsx",
+			"x": 21280,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "设置",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "设置"
+			}
+		},
+		{
+			"id": "sftp",
+			"file": "frames/sftp.tsx",
+			"x": 12160,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "SFTP 双栏",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "SFTP 双栏"
+			}
+		},
+		{
+			"id": "snippets",
+			"file": "frames/snippets.tsx",
+			"x": 13680,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "命令片段",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "命令片段"
+			}
+		},
+		{
+			"id": "transfers",
+			"file": "frames/transfers.tsx",
+			"x": 15200,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "传输队列",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "传输队列"
+			}
+		},
+		{
+			"id": "welcome",
+			"file": "frames/welcome.tsx",
+			"x": 7615,
+			"y": 0,
+			"width": 1440,
+			"height": 900,
+			"title": "首次启动",
+			"meta": {
+				"width": 1440,
+				"height": 900,
+				"title": "首次启动"
+			}
+		}
+	],
+	"defaultFrameSize": {
+		"width": 1440,
+		"height": 900
+	}
+}
