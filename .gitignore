@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建产物
+dist/
+dist-ssr/
+*.local
+.vite/
+
+# 界面自检截图
+shots/
+.tmp/
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.log

@@ -1,0 +1,17 @@
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "default",
+	"description": "TermX 主窗口默认能力：窗口控制（无边框自绘标题栏）+ 事件通道（终端输出）",
+	"windows": ["main"],
+	"permissions": [
+		"core:default",
+		"core:event:default",
+		"core:window:allow-minimize",
+		"core:window:allow-maximize",
+		"core:window:allow-unmaximize",
+		"core:window:allow-toggle-maximize",
+		"core:window:allow-is-maximized",
+		"core:window:allow-close",
+		"core:window:allow-start-dragging"
+	]
+}

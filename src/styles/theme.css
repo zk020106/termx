@@ -1,0 +1,178 @@
+@import "tailwindcss";
+@plugin "@iconify/tailwind4";
+
+/* =============================================================================
+ * TermX — 设计系统落地层
+ *
+ * 来源：termx.vetd/theme.css（Vetta 设计画布）与 termx.vetd/DESIGN.md（Linear 体系）
+ * 结构：
+ *   1) :root / [data-theme] 定义 --tx-* 原始语义变量（可随主题切换）
+ *   2) @theme 把 --tx-* 映射为 Tailwind 的 --color-*，从而生成 bg-surface /
+ *      text-muted / border-border 等工具类
+ *
+ * 注意：主题属性必须挂在 <html> 上，--color-* 的 var 引用才解析到正确的主题值。
+ * 规则：帧里禁止硬编码 hex，一律使用 token。
+ * ========================================================================== */
+
+:root,
+:root[data-theme="dark"] {
+	color-scheme: dark;
+
+	/* Linear 核心 */
+	--tx-primary: oklch(56% 0.19 274);
+	--tx-primary-foreground: oklch(99% 0 0);
+	--tx-surface: oklch(14% 0.006 260);
+	--tx-surface-raised: oklch(17.5% 0.008 260);
+	--tx-surface-sunk: oklch(11% 0.005 260);
+	--tx-surface-foreground: oklch(96% 0.002 260);
+	--tx-muted: oklch(66% 0.008 260);
+	--tx-faint: oklch(46% 0.01 260);
+	--tx-border: oklch(24% 0.008 260);
+
+	/* 强调与语义信号 */
+	--tx-accent: oklch(76% 0.12 205);
+	--tx-accent-soft: oklch(22% 0.04 205);
+	--tx-danger: oklch(62% 0.21 25);
+	--tx-danger-soft: oklch(22% 0.06 25);
+	--tx-warning: oklch(74% 0.15 65);
+	--tx-warning-soft: oklch(24% 0.05 65);
+	--tx-success: oklch(72% 0.15 155);
+	--tx-success-soft: oklch(23% 0.04 155);
+
+	/* 环境辨识（需求书 03-5 / 08） */
+	--tx-env-prod: oklch(62% 0.21 25);
+	--tx-env-stage: oklch(74% 0.15 65);
+	--tx-env-test: oklch(72% 0.15 155);
+	--tx-env-dev: oklch(66% 0.008 260);
+
+	/* 终端画布（深浅主题下都保持近黑，见需求书 08） */
+	--tx-term: oklch(12% 0.006 260);
+	--tx-term-ink: oklch(91% 0.004 260);
+}
+
+/* 浅色模式：首版只覆盖基础语义层，逐屏复核属于后续课题 */
+:root[data-theme="light"] {
+	color-scheme: light;
+
+	--tx-primary: oklch(52% 0.19 274);
+	--tx-primary-foreground: oklch(99% 0 0);
+	--tx-surface: oklch(97.5% 0.002 260);
+	--tx-surface-raised: oklch(99.4% 0.001 260);
+	--tx-surface-sunk: oklch(94.5% 0.003 260);
+	--tx-surface-foreground: oklch(24% 0.01 260);
+	--tx-muted: oklch(48% 0.012 260);
+	--tx-faint: oklch(62% 0.01 260);
+	--tx-border: oklch(88% 0.004 260);
+
+	--tx-accent: oklch(55% 0.11 205);
+	--tx-accent-soft: oklch(93% 0.035 205);
+	--tx-danger: oklch(55% 0.2 25);
+	--tx-danger-soft: oklch(94% 0.04 25);
+	--tx-warning: oklch(60% 0.14 65);
+	--tx-warning-soft: oklch(94% 0.05 65);
+	--tx-success: oklch(53% 0.14 155);
+	--tx-success-soft: oklch(94% 0.04 155);
+
+	--tx-env-prod: oklch(55% 0.2 25);
+	--tx-env-stage: oklch(62% 0.14 65);
+	--tx-env-test: oklch(52% 0.14 155);
+	--tx-env-dev: oklch(48% 0.012 260);
+}
+
+/* 把原始变量映射为 Tailwind token。用普通 @theme（非 inline），
+ * 以保证 --color-* 同时存在于 :root，可直接用于 var(--color-primary) 这类任意值。 */
+@theme {
+	--font-sans: "IBM Plex Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+		"Microsoft YaHei", sans-serif;
+	--font-display: var(--font-sans);
+	--font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+
+	--color-primary: var(--tx-primary);
+	--color-primary-foreground: var(--tx-primary-foreground);
+	--color-surface: var(--tx-surface);
+	--color-surface-raised: var(--tx-surface-raised);
+	--color-surface-sunk: var(--tx-surface-sunk);
+	--color-surface-foreground: var(--tx-surface-foreground);
+	--color-muted: var(--tx-muted);
+	--color-faint: var(--tx-faint);
+	--color-border: var(--tx-border);
+
+	--color-accent: var(--tx-accent);
+	--color-accent-soft: var(--tx-accent-soft);
+	--color-danger: var(--tx-danger);
+	--color-danger-soft: var(--tx-danger-soft);
+	--color-warning: var(--tx-warning);
+	--color-warning-soft: var(--tx-warning-soft);
+	--color-success: var(--tx-success);
+	--color-success-soft: var(--tx-success-soft);
+
+	--color-env-prod: var(--tx-env-prod);
+	--color-env-stage: var(--tx-env-stage);
+	--color-env-test: var(--tx-env-test);
+	--color-env-dev: var(--tx-env-dev);
+
+	--color-term: var(--tx-term);
+	--color-term-ink: var(--tx-term-ink);
+
+	--radius-card: 6px;
+	--radius-control: 6px;
+}
+
+@layer base {
+	html,
+	body,
+	#root {
+		height: 100%;
+	}
+
+	body {
+		margin: 0;
+		font-family: var(--font-sans);
+		font-size: 13px;
+		-webkit-font-smoothing: antialiased;
+		text-rendering: optimizeLegibility;
+	}
+
+	/* 桌面端：禁用文本选择拖拽感，终端与输入框再单独放开 */
+	body {
+		user-select: none;
+	}
+	input,
+	textarea,
+	[contenteditable="true"],
+	.selectable {
+		user-select: text;
+	}
+
+	/* 细滚动条，符合高密度界面 */
+	* {
+		scrollbar-width: thin;
+		scrollbar-color: var(--color-border) transparent;
+	}
+	*::-webkit-scrollbar {
+		width: 10px;
+		height: 10px;
+	}
+	*::-webkit-scrollbar-thumb {
+		background-color: var(--color-border);
+		border: 3px solid transparent;
+		background-clip: content-box;
+		border-radius: 6px;
+	}
+	*::-webkit-scrollbar-thumb:hover {
+		background-color: var(--color-faint);
+		background-clip: content-box;
+	}
+	*::-webkit-scrollbar-corner {
+		background: transparent;
+	}
+
+	:focus-visible {
+		outline: 1px solid var(--color-primary);
+		outline-offset: 1px;
+	}
+
+	::selection {
+		background: color-mix(in oklch, var(--color-primary) 30%, transparent);
+	}
+}

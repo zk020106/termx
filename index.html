@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" class="h-full">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta name="color-scheme" content="dark light" />
+		<title>TermX</title>
+		<script>
+			// 首屏前应用主题，避免闪白（与 src/store/theme.ts 共用同一 key）
+			try {
+				var mode = localStorage.getItem("termx.theme") || "dark";
+				var resolved =
+					mode === "system"
+						? window.matchMedia("(prefers-color-scheme: light)").matches
+							? "light"
+							: "dark"
+						: mode;
+				document.documentElement.dataset.theme = resolved;
+			} catch (e) {
+				/* 忽略：保持默认 dark */
+			}
+		</script>
+	</head>
+	<body class="h-full overflow-hidden bg-surface text-surface-foreground">
+		<div id="root" class="h-full"></div>
+		<script type="module" src="/src/main.tsx"></script>
+	</body>
+</html>

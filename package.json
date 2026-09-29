@@ -1,0 +1,43 @@
+{
+	"name": "termx",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "TermX — 个人使用的跨平台 SSH 客户端（终端 / SFTP / 端口转发 / 主机监控同一工作区）",
+	"scripts": {
+		"dev": "vite",
+		"build": "tsc --noEmit && vite build",
+		"preview": "vite preview",
+		"typecheck": "tsc --noEmit",
+		"tauri": "tauri",
+		"tauri:dev": "tauri dev",
+		"tauri:build": "tauri build"
+	},
+	"dependencies": {
+		"@fontsource-variable/ibm-plex-sans": "^5.3.0",
+		"@fontsource/jetbrains-mono": "^5.3.0",
+		"@tauri-apps/api": "^2.12.0",
+		"@xterm/addon-fit": "^0.11.0",
+		"@xterm/addon-web-links": "^0.12.0",
+		"@xterm/xterm": "^6.0.0",
+		"clsx": "^2.1.1",
+		"react": "19.1.1",
+		"react-dom": "19.1.1",
+		"react-router": "^8.4.0",
+		"tailwind-merge": "^3.7.0",
+		"zustand": "^5.0.15"
+	},
+	"devDependencies": {
+		"@iconify-json/lucide": "^1.2.137",
+		"@iconify-json/simple-icons": "^1.2.97",
+		"@iconify/tailwind4": "^1.2.3",
+		"@tailwindcss/vite": "^4.3.3",
+		"@tauri-apps/cli": "^2.12.0",
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0",
+		"@vitejs/plugin-react": "^6.1.1",
+		"tailwindcss": "^4.3.3",
+		"typescript": "^7.0.2",
+		"vite": "^8.3.1"
+	}
+}
