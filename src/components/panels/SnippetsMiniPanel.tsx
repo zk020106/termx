@@ -14,11 +14,7 @@ export function SnippetsMiniPanel({ hostName }: { hostName?: string }) {
 	if (snippets.length === 0) {
 		return (
 			<div className="flex min-h-0 flex-1 flex-col">
-				<EmptyState
-					icon="icon-[lucide--square-terminal]"
-					title="还没有命令片段"
-					description="在「命令片段」里把常用的排查、发布命令存起来，之后不离开工作区就能一键发送。"
-				/>
+				<EmptyState icon="icon-[lucide--square-terminal]" title="还没有命令片段" />
 			</div>
 		);
 	}
@@ -42,7 +38,7 @@ export function SnippetsMiniPanel({ hostName }: { hostName?: string }) {
 
 			<div className="min-h-0 flex-1 overflow-y-auto p-2">
 				{matched.length === 0 ? (
-					<EmptyState icon="icon-[lucide--search-x]" title="没有匹配的片段" description="换个关键词试试。" />
+					<EmptyState icon="icon-[lucide--search-x]" title="没有匹配的片段" />
 				) : (
 					groups.map((group) => (
 						<div key={group} className="mb-2">

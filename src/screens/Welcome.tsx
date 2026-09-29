@@ -97,9 +97,7 @@ export default function Welcome() {
 				<>
 					<Eyebrow>Import Sessions</Eyebrow>
 					<Headline>导入已有会话</Headline>
-					<Lede>
-						选择要迁移的来源，导入后可在主机库继续编辑。同名会话默认跳过并标记冲突，不会覆盖已有配置；导入过程只读取本地文件。
-					</Lede>
+					<Lede>选择要迁移的来源，导入后可在主机库继续编辑。</Lede>
 
 					<div className="mt-5 space-y-1.5">
 						{IMPORT_SOURCES.map((source) => (
@@ -136,7 +134,7 @@ export default function Welcome() {
 				<>
 					<Eyebrow>Manual Host</Eyebrow>
 					<Headline>手动新建第一台主机</Headline>
-					<Lede>最少只填地址和用户名，其余保持默认即可；端口、认证方式、分组等高级选项已折叠起来。</Lede>
+					<Lede>最少只填地址和用户名，其余保持默认；高级选项已折叠。</Lede>
 
 					<div className="mt-5 w-[420px] space-y-3">
 						<Field label="地址" hint="IP 或域名" required error={hostErrors.address}>
@@ -199,13 +197,6 @@ export default function Welcome() {
 								</div>
 							)}
 						</div>
-
-						{!hostReady && (
-							<div className="flex items-center gap-1.5 font-mono text-[10.5px] text-faint">
-								<span className="icon-[lucide--info] size-3" />
-								填好这两项就能保存，其他选项以后随时能改。
-							</div>
-						)}
 					</div>
 				</>
 			);
@@ -216,7 +207,6 @@ export default function Welcome() {
 				<>
 					<Eyebrow>Security</Eyebrow>
 					<Headline>最后一步：设置本地主密码</Headline>
-					<Lede>主密码用于加密本机保存的 SSH 密码与私钥口令，只保存在这台设备上，不会同步、不会上传。</Lede>
 
 					<div className="mt-5 space-y-2 font-mono text-[11.5px] text-muted">
 						<div className="flex items-center gap-2">
@@ -240,7 +230,6 @@ export default function Welcome() {
 			<>
 				<Eyebrow>Native SSH Workspace</Eyebrow>
 				<Headline>一台主机，一个工作区</Headline>
-				<Lede>把终端、SFTP 文件传输、端口转发与实时遥测挂在同一个连接节点。先导入本地配置，或直接新建首台主机。</Lede>
 
 				<div className="mt-6 space-y-2">
 					<EntryRow
@@ -264,12 +253,6 @@ export default function Welcome() {
 						<span className="icon-[lucide--plus] size-3.5" />
 						手动创建第一台主机
 					</button>
-				</div>
-
-				<div className="mt-6 flex items-center gap-4 font-mono text-[11px] text-faint">
-					<span>✓ 跨平台同步</span>
-					<span>✓ 本地主密码加密</span>
-					<span>✓ 零遥测隐私</span>
 				</div>
 			</>
 		);
@@ -353,10 +336,6 @@ export default function Welcome() {
 						</>
 					}
 				>
-					<p className="mt-2.5 text-[12px] leading-relaxed text-muted">
-						所有 SSH 密码与私钥口令均通过 AES-256 加密存入本地系统钥匙串。闲置离开时可自动锁屏保护。
-					</p>
-
 					<div className="mt-4 space-y-3">
 						<Field label="创建主密码">
 							<Input

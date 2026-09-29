@@ -1,10 +1,10 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button } from "@/components/ui/Button";
-import { EmptyState, EnvPill, Segmented, SectionLabel } from "@/components/ui/Display";
+import { EmptyState, Segmented, SectionLabel } from "@/components/ui/Display";
 import { Field, Input, ReadonlyValue, Select, Textarea } from "@/components/ui/Input";
 import { Checkbox, Switch } from "@/components/ui/Toggle";
 import { Drawer, Modal } from "@/components/ui/Overlay";
-import { ENV_NAME, type AuthMethod, type Env, type Host } from "@/data/types";
+import { type AuthMethod, type Host } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
@@ -27,8 +27,6 @@ const TABS: { value: TabKey; label: string }[] = [
 	{ value: "appearance", label: "外观终端" },
 ];
 
-const ENVS: Env[] = ["prod", "stage", "test", "dev"];
-
 const AUTH_OPTIONS: { value: AuthMethod; label: string }[] = [
 	{ value: "password", label: "密码" },
 	{ value: "key", label: "私钥" },
@@ -50,7 +48,6 @@ interface FormState {
 	hostname: string;
 	port: string;
 	username: string;
-	env: Env;
 	groupId: string;
 	tags: string;
 	authMethod: AuthMethod;
@@ -169,7 +166,6 @@ export default function HostEdit() {
 			hostname: form.hostname.trim(),
 			port: Number(form.port),
 			username: form.username.trim() || "root",
-			env: form.env,
 			tags: form.tags
 				.split(/[,，\s]+/)
 				.map((t) => t.trim())
@@ -239,7 +235,6 @@ export default function HostEdit() {
 							<EmptyState
 								icon="icon-[lucide--server-off]"
 								title="还没有主机"
-								description="主机库是空的：填好右侧表单保存第一台主机，它就会出现在这里。"
 								action={
 									<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts")}>
 										去主机库
@@ -255,7 +250,6 @@ export default function HostEdit() {
 							<div key={h.id} className="rounded-card border border-border bg-surface-raised p-3 text-[12px]">
 								<div className="flex items-center justify-between gap-2">
 									<span className="truncate font-mono font-medium text-surface-foreground">{h.name}</span>
-									<EnvPill env={h.env} size="xs" />
 								</div>
 								<div className="mt-1 truncate font-mono text-[11px] text-muted">
 									{h.username}@{h.hostname}
@@ -358,27 +352,6 @@ export default function HostEdit() {
 									/>
 								</Field>
 
-								<Group label="环境标识" hint="生产 / 预发 / 测试 / 开发各用固定颜色">
-									<div className="flex items-center gap-1.5">
-										{ENVS.map((e) => (
-											<button
-												key={e}
-												type="button"
-												onClick={() => set("env", e)}
-												className={cn(
-													"flex h-7 flex-1 items-center justify-center gap-1.5 rounded-control border transition-colors",
-													form.env === e
-														? "border-primary/60 bg-primary/10 text-surface-foreground"
-														: "border-border bg-surface text-muted hover:bg-surface-raised",
-												)}
-											>
-												<EnvPill env={e} size="xs" />
-												<span className="text-[11px]">{ENV_NAME[e]}</span>
-											</button>
-										))}
-									</div>
-								</Group>
-
 								<div className="grid grid-cols-2 gap-2">
 									<Field label="所属分组" hint={groups.length === 0 ? "还没有分组，点下面新建一个" : undefined}>
 										<Select value={form.groupId} onChange={(e) => set("groupId", e.target.value)}>
@@ -431,7 +404,7 @@ export default function HostEdit() {
 											checked={form.rememberPassword}
 											onChange={(v) => set("rememberPassword", v)}
 											label="记住密码"
-											description="默认不勾选（需求书 07-连接流程）；勾选后凭据存入系统钥匙串。"
+											description="勾选后凭据存入系统钥匙串。"
 										/>
 									</>
 								)}
@@ -481,14 +454,14 @@ export default function HostEdit() {
 								{form.authMethod === "agent" && (
 									<ReadonlyValue>
 										<span className="icon-[lucide--key-round] size-3 text-primary" />
-										使用系统 SSH Agent 中的密钥（无需在 TermX 保存凭据）
+										使用系统 SSH Agent 中的密钥
 									</ReadonlyValue>
 								)}
 
 								{form.authMethod === "keyboard-interactive" && (
 									<Group label="键盘交互">
 										<div className="rounded-control border border-border bg-surface p-2.5 text-[11px] text-muted">
-											连接时由服务器逐步提问，TermX 弹出输入框接收密码 / 二次验证码（OTP），不在本地保存。
+											连接时由服务器逐步提问，TermX 弹窗接收密码 / 一次性口令。
 										</div>
 									</Group>
 								)}
@@ -559,7 +532,7 @@ export default function HostEdit() {
 								</Field>
 
 								<div className="rounded-card border border-border bg-surface p-2.5 text-[11px] text-muted">
-									跳板链上的每一跳都可以覆盖认证方式与端口；认证失败时会在连接进度里标出具体是哪一跳。
+									认证失败时会在连接进度里标出具体是哪一跳。
 								</div>
 							</>
 						)}
@@ -773,10 +746,6 @@ export default function HostEdit() {
 					<p>
 						主机 <span className="font-mono text-surface-foreground">{form.name || "未命名"}</span> 的修改尚未保存，离开后这些改动会丢失。
 					</p>
-					<div className="mt-2 flex items-center gap-1.5 font-mono text-[10.5px] text-faint">
-						<span className="icon-[lucide--info] size-3" />
-						也可以按 Esc 返回继续编辑
-					</div>
 				</Modal>
 
 				{/* 新建分组 */}
@@ -862,7 +831,6 @@ function toForm(host?: Host, defaultKeyId?: string): FormState {
 		hostname: host?.hostname ?? "",
 		port: String(host?.port ?? 22),
 		username: host?.username ?? "",
-		env: host?.env ?? "dev",
 		groupId: host?.groupId ?? "",
 		tags: host?.tags.join(", ") ?? "",
 		authMethod: host?.auth.method ?? "key",

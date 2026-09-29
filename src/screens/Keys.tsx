@@ -1,10 +1,10 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button } from "@/components/ui/Button";
-import { Badge, EmptyState, EnvPill, EnvStripe } from "@/components/ui/Display";
+import { Badge, EmptyState } from "@/components/ui/Display";
 import { Field, Input, ReadonlyValue, Textarea } from "@/components/ui/Input";
 import { Drawer, Modal } from "@/components/ui/Overlay";
 import { Checkbox } from "@/components/ui/Toggle";
-import type { Env, KeyType, SshKey } from "@/data/types";
+import type { KeyType, SshKey } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
@@ -181,10 +181,6 @@ export default function Keys() {
 		};
 	}, [keyText]);
 
-	function envOfHost(hostId: string): Env {
-		return hostById(hostId)?.env ?? "dev";
-	}
-
 	function copyText(text: string, label: string) {
 		if (navigator.clipboard) void navigator.clipboard.writeText(text).catch(() => undefined);
 		toast({
@@ -289,7 +285,7 @@ export default function Keys() {
 		setPanel("list");
 		toast({
 			title: `已记录 ${selected.name} 的部署目标（${ids.length} 台主机）`,
-			description: `用户 ${deployUser} · 实际写入 ~/.ssh/authorized_keys 需要先建立 SSH 连接，当前版本只在本机记录目标主机。`,
+			description: `用户 ${deployUser} · 实际写入 ~/.ssh/authorized_keys 需要先建立 SSH 连接。`,
 			tone: "success",
 		});
 	}
@@ -314,7 +310,6 @@ export default function Keys() {
 							<EmptyState
 								icon="icon-[lucide--key-round]"
 								title="还没有密钥"
-								description="把已有的公钥（id_ed25519.pub 等）登记进来，就能在这里查看指纹并选择要部署的主机。"
 								action={
 									<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openAdd}>
 										登记公钥
@@ -350,7 +345,6 @@ export default function Keys() {
 
 										<div className="mt-1 flex items-center justify-between gap-2 text-[10.5px] text-muted">
 											<span className="flex min-w-0 items-center gap-1.5">
-												{deployedTo.length > 0 && <EnvStripe env={envOfHost(deployedTo[0])} />}
 												<span className="truncate">
 													{deployedTo.length > 0 ? `已记录 ${deployedTo.length} 台主机` : "未部署到主机"}
 												</span>
@@ -439,14 +433,13 @@ export default function Keys() {
 														key={hostId}
 														className="inline-flex items-center gap-1.5 rounded border border-border bg-surface px-1.5 py-1 font-mono text-[10.5px] text-muted"
 													>
-														{host ? <EnvPill env={host.env} size="xs" /> : <span className="icon-[lucide--circle-help] size-3 text-faint" />}
 														{host?.name ?? `${hostId}（主机已删除）`}
 													</span>
 												);
 											})}
 										</div>
 									) : (
-										<span className="text-[11px] text-faint">这个密钥还没部署到任何主机，可在下方多选目标主机记录部署。</span>
+										<span className="text-[11px] text-faint">尚未部署到任何主机</span>
 									)}
 								</div>
 							</div>
@@ -470,7 +463,6 @@ export default function Keys() {
 									<EmptyState
 										icon="icon-[lucide--server-off]"
 										title="还没有主机"
-										description="部署公钥需要先有主机：去主机库添加一台，这里就会出现可选的目标。"
 										action={
 											<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts/new")}>
 												新建主机
@@ -510,8 +502,6 @@ export default function Keys() {
 																<span className="truncate text-[11.5px] text-surface-foreground">{host.name}</span>
 																{already && <span className="icon-[lucide--check] size-3 shrink-0 text-success" />}
 																<span className="flex-1" />
-																<EnvStripe env={host.env} />
-																<EnvPill env={host.env} size="xs" />
 																<span className="shrink-0 font-mono text-[10.5px] text-faint">{host.hostname}</span>
 															</div>
 														);
@@ -529,7 +519,7 @@ export default function Keys() {
 												</div>
 												<div className="flex items-start gap-1.5 rounded border border-border bg-surface p-2 text-[10.5px] leading-4 text-faint">
 													<span className="icon-[lucide--info] mt-px size-3 shrink-0" />
-													<span>SSH 层接入后会先备份原文件为 authorized_keys.bak，已存在的相同公钥自动跳过。</span>
+													<span>写入前会先备份原文件为 authorized_keys.bak，已存在的相同公钥自动跳过。</span>
 												</div>
 											</div>
 										</div>
@@ -570,7 +560,6 @@ export default function Keys() {
 							<EmptyState
 								icon="icon-[lucide--key-round]"
 								title="还没有密钥详情"
-								description="登记第一把公钥后，这里会显示它的真实指纹、公钥内容与部署目标。"
 								action={
 									<Button variant="primary" icon="icon-[lucide--plus]" onClick={openAdd}>
 										登记公钥
@@ -601,8 +590,8 @@ export default function Keys() {
 						<div className="flex items-start gap-2 rounded-control border border-border bg-surface p-2.5 text-[10.5px] leading-4 text-muted">
 							<span className="icon-[lucide--info] mt-px size-3.5 shrink-0 text-primary" />
 							<span>
-								需要新密钥对？在应用内生成需要接入本机 ssh-keygen / 系统钥匙串，尚未接入，因此这里不做「假生成」。
-								请先用 <span className="font-mono text-surface-foreground">ssh-keygen -t ed25519</span> 生成，再把 .pub 内容登记进来。
+								应用内生成密钥尚未接入。请先用{" "}
+								<span className="font-mono text-surface-foreground">ssh-keygen -t ed25519</span> 生成，再把 .pub 内容登记进来。
 							</span>
 						</div>
 
@@ -664,7 +653,6 @@ export default function Keys() {
 							<EmptyState
 								icon="icon-[lucide--file-key]"
 								title="尚未解析出公钥"
-								description="粘贴公钥内容或选择 .pub 文件，类型、位数与指纹会实时显示在这里。"
 								className="rounded-control border border-dashed border-border py-6"
 							/>
 						)}
@@ -705,7 +693,6 @@ export default function Keys() {
 					<div className="mb-2 space-y-1">
 						{selectedHosts.map((host) => (
 							<div key={host.id} className="flex items-center gap-2">
-								<EnvPill env={host.env} size="xs" />
 								<span className="font-mono text-[11px] text-surface-foreground">{host.name}</span>
 								<span className="font-mono text-[10.5px] text-faint">
 									{deployUser || "deploy"}@{host.hostname}:{host.port}

@@ -1,10 +1,10 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button } from "@/components/ui/Button";
-import { Badge, EmptyState, EnvPill, EnvStripe, SectionLabel } from "@/components/ui/Display";
+import { Badge, EmptyState, SectionLabel } from "@/components/ui/Display";
 import { Field, Input, Textarea } from "@/components/ui/Input";
 import { Drawer, Modal } from "@/components/ui/Overlay";
 import { Checkbox } from "@/components/ui/Toggle";
-import { SNIPPET_TARGET_LABEL, type Env, type Host, type Snippet, type SnippetTarget } from "@/data/types";
+import { SNIPPET_TARGET_LABEL, type Host, type Snippet, type SnippetTarget } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
 import { useSessionsStore } from "@/store/sessions";
@@ -23,7 +23,6 @@ import { useEffect, useMemo, useState } from "react";
  * ========================================================================== */
 
 const ALL_GROUPS = "全部分组";
-const ENV_ORDER: Env[] = ["prod", "stage", "test", "dev"];
 const TARGETS: SnippetTarget[] = ["current", "selected", "all"];
 
 const VAR_GLOBAL = /\$\{[A-Za-z0-9_-]+\}/g;
@@ -58,7 +57,6 @@ export default function Snippets() {
 	const upsert = useSnippetsStore((s) => s.upsert);
 	const removeSnippet = useSnippetsStore((s) => s.remove);
 	const hostById = useHostsStore((s) => s.hostById);
-	const hosts = useHostsStore((s) => s.hosts);
 	const tabs = useSessionsStore((s) => s.tabs);
 	const panes = useSessionsStore((s) => s.panes);
 	const focusedPaneId = useSessionsStore((s) => s.focusedPaneId);
@@ -69,7 +67,7 @@ export default function Snippets() {
 	const [values, setValues] = useState<Record<string, string>>({});
 	const [target, setTarget] = useState<SnippetTarget>("current");
 	const [pickedPanes, setPickedPanes] = useState<string[]>([]);
-	const [prodChecked, setProdChecked] = useState(false);
+	const [confirmed, setConfirmed] = useState(false);
 	const [draft, setDraft] = useState<Snippet | null>(null);
 	const [draftTouched, setDraftTouched] = useState(false);
 	const [deleteOpen, setDeleteOpen] = useState(false);
@@ -118,9 +116,6 @@ export default function Snippets() {
 		return ids.map((id) => (id ? hostById(id) : undefined)).filter((host): host is Host => host !== undefined);
 	}, [target, pickedPanes, tabs, panes, currentPane, hostById]);
 
-	const prodHosts = affectedHosts.filter((host) => host.env === "prod");
-	const affectedEnvs = ENV_ORDER.filter((env) => affectedHosts.some((host) => host.env === env));
-
 	const unresolved = selected ? selected.variables.filter((name) => (values[name] ?? "").trim() === "") : [];
 	const resolvedCommand = useMemo(() => {
 		if (!selected) return "";
@@ -130,16 +125,16 @@ export default function Snippets() {
 		});
 	}, [selected, values]);
 
-	const needProdConfirm = (target === "all" && tabs.length > 0) || prodHosts.length > 0;
-	const prodBlocked = needProdConfirm && !prodChecked;
+	const needConfirm = target === "all" && tabs.length > 0;
+	const confirmMissing = needConfirm && !confirmed;
 	const blockedReason = !hasSessions
 		? "还没有已连接的终端：先在主机库打开一个会话"
 		: target === "selected" && pickedPanes.length === 0
 			? "请至少选择一个分屏格"
 			: unresolved.length > 0
 				? `还有 ${unresolved.length} 个变量未填写`
-				: prodBlocked
-					? "请先勾选生产环境确认"
+				: confirmMissing
+					? "请先勾选发送确认"
 					: null;
 	const canSend = selected !== null && blockedReason === null;
 
@@ -153,13 +148,13 @@ export default function Snippets() {
 		if (!hasSessions) {
 			return {
 				label: "还没有可发送的终端",
-				detail: "命令片段会注入到已连接的 PTY；先在主机库打开一个会话，这里才能选发送目标。",
+				detail: "先在主机库打开一个会话。",
 			};
 		}
 		if (target === "current") {
 			return {
 				label: currentHost?.name ?? "本地终端",
-				detail: "命令将注入当前焦点分屏格的 PTY（终端注入通道接入后生效）。",
+				detail: undefined,
 			};
 		}
 		if (target === "selected") {
@@ -168,12 +163,12 @@ export default function Snippets() {
 				.map((pane) => (pane.hostId ? (hostById(pane.hostId)?.name ?? "本地终端") : "本地终端"));
 			return {
 				label: names.length > 0 ? `${names.length} 个分屏格 · ${[...new Set(names)].join("、")}` : "尚未选择分屏格",
-				detail: "命令将逐个注入所选分屏格的 PTY，注入顺序与分屏排列一致。",
+				detail: undefined,
 			};
 		}
 		return {
 			label: `全部已连接终端（${tabs.length} 个）`,
-			detail: `广播注入：${tabs.map((tab) => tab.title).join("、") || "—"}。广播期间各标签的输入会互相同步。`,
+			detail: undefined,
 		};
 	}, [target, pickedPanes, currentHost, tabs, panes, hasSessions, hostById]);
 
@@ -195,12 +190,12 @@ export default function Snippets() {
 	const selectSnippet = (id: string) => {
 		setSelectedId(id);
 		setValues({});
-		setProdChecked(false);
+		setConfirmed(false);
 	};
 
 	const togglePane = (id: string) => {
 		setPickedPanes((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
-		setProdChecked(false);
+		setConfirmed(false);
 	};
 
 	const openNew = () => {
@@ -229,7 +224,7 @@ export default function Snippets() {
 		upsert(next);
 		setSelectedId(next.id);
 		setValues({});
-		setProdChecked(false);
+		setConfirmed(false);
 		setDraft(null);
 		setQuery("");
 		setGroup(ALL_GROUPS);
@@ -281,7 +276,7 @@ export default function Snippets() {
 	/** 状态切换器：一键进入某个必查状态 */
 	const applyReview = (next: ReviewState) => {
 		setReview(next);
-		setProdChecked(false);
+		setConfirmed(false);
 		setDraft(null);
 		setQuery("");
 		setGroup(ALL_GROUPS);
@@ -326,7 +321,6 @@ export default function Snippets() {
 			<EmptyState
 				icon="icon-[lucide--terminal-square]"
 				title="还没有命令片段"
-				description="把常用的运维命令保存成片段：用 ${变量} 声明参数，发送前填写即可一键复用。片段只存在你自己的机器上。"
 				action={
 					<Button variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
 						新建片段
@@ -337,11 +331,6 @@ export default function Snippets() {
 			<EmptyState
 				icon="icon-[lucide--search-x]"
 				title="没有匹配的片段"
-				description={
-					query.trim()
-						? `没有找到与「${query.trim()}」匹配的片段，换个关键字，或把分组切回「${ALL_GROUPS}」。`
-						: `「${group}」分组下暂无片段，试试切换分组。`
-				}
 				action={
 					<Button
 						size="sm"
@@ -359,7 +348,6 @@ export default function Snippets() {
 			<EmptyState
 				icon="icon-[lucide--mouse-pointer-click]"
 				title="选择一个命令片段"
-				description="从左侧片段库中选择片段，即可填写变量并发送到终端。"
 			/>
 		) : (
 			<div className="min-h-0 flex-1 overflow-y-auto p-6">
@@ -420,9 +408,6 @@ export default function Snippets() {
 								<h3 className="text-[13px] font-semibold text-surface-foreground">执行前变量替换</h3>
 							</div>
 							<div className="flex items-center gap-1.5">
-								{affectedEnvs.map((env) => (
-									<EnvPill key={env} env={env} size="xs" />
-								))}
 								<span className="font-mono text-[10px] text-faint">
 									{affectedHosts.length > 0 ? `${affectedHosts.length} 台目标主机` : "目标主机 —"}
 								</span>
@@ -492,10 +477,7 @@ export default function Snippets() {
 								{!hasSessions ? (
 									<div className="flex items-start gap-2 rounded border border-border bg-surface p-2.5 text-[11px] leading-relaxed text-muted">
 										<span className="icon-[lucide--terminal-off] mt-px size-3.5 shrink-0 text-faint" />
-										<span>
-											还没有已连接的终端。命令片段会注入到 PTY，先在主机库（{hosts.length} 台主机）打开一个会话，
-											这里就会出现「当前终端 / 选中的终端 / 全部终端」。
-										</span>
+										<span>还没有已连接的终端：先在主机库打开一个会话。</span>
 									</div>
 								) : (
 									<>
@@ -506,7 +488,7 @@ export default function Snippets() {
 													type="button"
 													onClick={() => {
 														setTarget(option);
-														setProdChecked(false);
+														setConfirmed(false);
 													}}
 													className={cn(
 														"truncate rounded py-1 text-center font-medium transition-colors",
@@ -543,7 +525,6 @@ export default function Snippets() {
 															>
 																{picked && <span className="icon-[lucide--check] size-2.5" />}
 															</span>
-															<EnvStripe env={host?.env ?? "dev"} />
 															<span className="truncate text-[11.5px] text-surface-foreground">
 																{host?.name ?? "本地终端"}
 															</span>
@@ -566,42 +547,23 @@ export default function Snippets() {
 									<span className="icon-[lucide--info] size-3.5 text-primary" />
 									<span>目标会话：{targetInfo.label}</span>
 								</div>
-								<p className="mt-0.5 text-[11px] text-faint">{targetInfo.detail}</p>
+								{targetInfo.detail && <p className="mt-0.5 text-[11px] text-faint">{targetInfo.detail}</p>}
 							</div>
-
-							{/* 生产环境二次确认 */}
-							{needProdConfirm && (
+							{/* 全部终端广播前的二次确认 */}
+							{needConfirm && (
 								<div className="rounded border border-danger/40 bg-danger/10 p-2.5">
 									<div className="flex flex-wrap items-center gap-1.5 text-[11.5px] font-medium text-danger">
 										<span className="icon-[lucide--triangle-alert] size-3.5" />
-										生产环境二次确认
-										<EnvPill env="prod" size="xs" />
+										发送到全部终端前确认
 									</div>
 									<p className="mt-1 text-[11px] leading-relaxed text-muted">
-										{target === "all"
-											? "「全部终端」会把命令广播到所有已连接终端，其中包含生产主机；"
-											: "当前发送目标包含生产主机；"}
-										命令将在远端 PTY 立即执行且无法撤销，请确认无误后再发送。
+										命令将在远端 PTY 立即执行且无法撤销。
 									</p>
-									{prodHosts.length > 0 && (
-										<div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-											{prodHosts.map((host) => (
-												<span
-													key={host.id}
-													className="flex items-center gap-1 rounded border border-border bg-surface px-1.5 py-0.5 text-[10.5px] text-muted"
-												>
-													<EnvStripe env={host.env} />
-													<span className="font-mono">{host.name}</span>
-												</span>
-											))}
-										</div>
-									)}
 									<Checkbox
 										className="mt-2"
-										checked={prodChecked}
-										onChange={setProdChecked}
-										label="我已知晓命令将在生产环境执行"
-										description="未勾选前「发送到终端」不可用"
+										checked={confirmed}
+										onChange={setConfirmed}
+										label="我已知晓，确认发送"
 									/>
 								</div>
 							)}
@@ -826,18 +788,6 @@ export default function Snippets() {
 								className="font-sans"
 							/>
 						</Field>
-
-						<div className="rounded border border-border bg-surface-sunk p-2.5 text-[10.5px] leading-relaxed text-muted">
-							<div className="flex items-center gap-1.5 font-medium text-surface-foreground">
-								<span className="icon-[lucide--shield-alert] size-3.5 text-warning" />
-								<span>发送时会自动做这些检查</span>
-							</div>
-							<ul className="mt-1 list-disc space-y-0.5 pl-4">
-								<li>变量未填写完不允许发送</li>
-								<li>目标含生产主机时需要勾选二次确认</li>
-								<li>命令注入前会在预览框里逐字展示最终内容</li>
-							</ul>
-						</div>
 					</div>
 				)}
 			</Drawer>

@@ -62,7 +62,6 @@ export default function Editor() {
 					<EmptyState
 						icon="icon-[lucide--file-code]"
 						title="还没有打开的文件"
-						description="从 SFTP 面板双击一个远程文件，或在终端里打开文件，内容才会出现在这里。内置编辑器内核与文件读取都还没有接入，所以现在没有任何标签页。"
 						action={
 							<div className="flex items-center gap-2">
 								<Button size="sm" icon="icon-[lucide--folder-open]" onClick={() => navigate("/sftp")}>
@@ -75,7 +74,6 @@ export default function Editor() {
 									onClick={() =>
 										toast({
 											title: "本地文件读取尚未接入",
-											description: "接入桌面端文件系统接口后，就能在这里打开本地文件。",
 											tone: "default",
 										})
 									}

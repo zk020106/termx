@@ -49,7 +49,6 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 			id,
 			hostId,
 			title: host?.name ?? "新会话",
-			env: host?.env ?? "dev",
 			status: "connecting",
 			layout: "single",
 			broadcasting: false,

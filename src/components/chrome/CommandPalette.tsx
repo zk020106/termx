@@ -59,7 +59,6 @@ function usePaletteItems(): CommandItem[] {
 			title: h.name,
 			subtitle: `${h.username}@${h.hostname}:${h.port}`,
 			icon: h.os?.icon ?? "icon-[lucide--server]",
-			env: h.env,
 			keywords: [h.hostname, h.username, ...h.tags],
 		}));
 
@@ -265,11 +264,7 @@ export function CommandPalettePanel({
 				{/* 结果列表 */}
 				<div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-1.5">
 					{flat.length === 0 ? (
-						<EmptyState
-							icon="icon-[lucide--search-x]"
-							title="没有匹配的结果"
-							description="换一个主机名、IP 或命令关键词试试；输入 > 只搜命令，输入为空时回到最近使用。"
-						/>
+						<EmptyState icon="icon-[lucide--search-x]" title="没有匹配的结果" />
 					) : (
 						groups.map((group) => (
 							<div key={group.key}>

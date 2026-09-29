@@ -50,7 +50,7 @@ export default function Monitor() {
 	const refresh = () =>
 		toast({
 			title: "监控采集尚未接入",
-			description: "Agentless SSH 采样通道还没有实现，暂时没有可以刷新的指标。",
+			description: "Agentless SSH 采样通道还没有实现。",
 			tone: "default",
 		});
 
@@ -61,7 +61,6 @@ export default function Monitor() {
 				<EmptyState
 					icon="icon-[lucide--activity]"
 					title="指标采集尚未接入"
-					description={`会话「${session.title}」已经打开，但 Agentless SSH 采样还没有接通：CPU、内存、磁盘、网络与进程列表都还没有数据源。`}
 					action={
 						<Button size="sm" variant="primary" icon="icon-[lucide--layout-dashboard]" onClick={() => navigate("/")}>
 							返回工作台
@@ -75,7 +74,6 @@ export default function Monitor() {
 				<EmptyState
 					icon="icon-[lucide--plug-zap]"
 					title="监控需要先建立 SSH 连接"
-					description={`主机库里已经有 ${hostCount} 台主机，但当前没有打开的会话。指标通过 Agentless SSH 采样获取，连接一台主机后这里才会有数据。`}
 					action={
 						<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts")}>
 							去主机库连接一台
@@ -88,7 +86,6 @@ export default function Monitor() {
 			<EmptyState
 				icon="icon-[lucide--server-off]"
 				title="还没有可监控的主机"
-				description="监控指标全部来自 Agentless SSH 采样：先在主机库添加一台服务器并建立连接，这里才会有 CPU、内存、磁盘与进程数据。"
 				action={
 					<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={() => navigate("/hosts/new")}>
 						新建主机
@@ -154,11 +151,7 @@ export default function Monitor() {
 
 					{/* 遥测内容：切到别的页签时隐藏而不卸载，保留滚动位置 */}
 					<div className={cn("min-h-0 flex-1", tab !== "monitor" && "hidden")}>
-						<EmptyState
-							icon="icon-[lucide--gauge]"
-							title="实时指标未接入"
-							description="接通 Agentless SSH 采样后，这里会显示 CPU、内存、磁盘与网络的实时曲线和阈值告警。"
-						/>
+						<EmptyState icon="icon-[lucide--gauge]" title="实时指标未接入" />
 					</div>
 
 					{/* 另两个页签各自的内容（片段与 AI 都读真实 store） */}

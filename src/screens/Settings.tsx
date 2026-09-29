@@ -51,9 +51,9 @@ const DEMO_OPTIONS: { value: DemoState; label: string }[] = [
 
 /* ------------------------------- 外观 ------------------------------- */
 
-const THEME_CARDS: { id: ThemeMode; label: string; desc: string }[] = [
-	{ id: "dark", label: "深色模式 (Linear Dark)", desc: "极暗黑背景 · 纯净低噪" },
-	{ id: "light", label: "浅色模式 (Linear Light)", desc: "高明度纸质灰 · 清晰通透" },
+const THEME_CARDS: { id: ThemeMode; label: string; desc?: string }[] = [
+	{ id: "dark", label: "深色模式 (Linear Dark)" },
+	{ id: "light", label: "浅色模式 (Linear Light)" },
 	{ id: "system", label: "跟随系统 (Auto)", desc: "自动同步操作系统外观偏好" },
 ];
 
@@ -346,9 +346,7 @@ export default function Settings() {
 							<div className="max-w-2xl space-y-6">
 								<div>
 									<h2 className="text-[14px] font-semibold text-surface-foreground">外观与界面主题</h2>
-									<p className="mt-0.5 text-[11.5px] text-muted">
-										控制桌面窗口外壳、侧边栏及对话框的色彩风格；切换后立即生效并写入本地配置。
-									</p>
+									<p className="mt-0.5 text-[11.5px] text-muted">切换后立即生效并写入本地配置。</p>
 
 									<div className="mt-3 grid grid-cols-3 gap-2.5">
 										{THEME_CARDS.map((t) => (
@@ -370,7 +368,7 @@ export default function Settings() {
 														)}
 													/>
 												</div>
-												<span className="mt-1 text-[11px] text-faint">{t.desc}</span>
+												{t.desc && <span className="mt-1 text-[11px] text-faint">{t.desc}</span>}
 											</button>
 										))}
 									</div>
@@ -410,7 +408,6 @@ export default function Settings() {
 									<div className="flex items-center justify-between">
 										<div>
 											<h3 className="text-[12.5px] font-semibold text-surface-foreground">界面显示密度</h3>
-											<p className="mt-0.5 text-[11px] text-faint">紧凑适合 13 寸屏，标准适合外接显示器</p>
 										</div>
 										<div className="flex h-7 items-center rounded border border-border bg-surface-sunk p-0.5 text-[11.5px]">
 											<button
@@ -577,7 +574,7 @@ export default function Settings() {
 									<div>
 										<h2 className="text-[14px] font-semibold text-surface-foreground">快捷键绑定</h2>
 										<p className="mt-0.5 text-[11.5px] text-muted">
-											点击任意按键可重新录制组合键（需带 Ctrl / Alt / Shift），录制期间全局快捷键会被临时拦截。
+											点击按键可重新录制组合键（需带 Ctrl / Alt / Shift）。
 										</p>
 									</div>
 									<div className="flex shrink-0 items-center gap-2">
@@ -699,7 +696,7 @@ export default function Settings() {
 								<div>
 									<h2 className="text-[14px] font-semibold text-surface-foreground">安全与主密码</h2>
 									<p className="mt-0.5 text-[11.5px] text-muted">
-										主密码用于解锁应用与加密本地凭据库；忘记了主密码只能重置并重新录入凭据。
+										忘记主密码只能重置并重新录入凭据。
 									</p>
 								</div>
 
@@ -783,7 +780,7 @@ export default function Settings() {
 								<div>
 									<h2 className="text-[14px] font-semibold text-surface-foreground">数据与备份</h2>
 									<p className="mt-0.5 text-[11.5px] text-muted">
-										配置导入导出、加密备份与 SSH 配置迁移；所有导出文件默认使用主密码派生的密钥加密。
+										导出文件默认使用主密码派生的密钥加密。
 									</p>
 								</div>
 

@@ -1,6 +1,6 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button, IconButton } from "@/components/ui/Button";
-import { Badge, EmptyState, EnvPill, ProgressBar, Segmented } from "@/components/ui/Display";
+import { Badge, EmptyState, ProgressBar, Segmented } from "@/components/ui/Display";
 import { Checkbox } from "@/components/ui/Toggle";
 import type { Transfer, TransferState } from "@/data/types";
 import { cn } from "@/lib/cn";
@@ -186,7 +186,6 @@ export default function Transfers() {
 						<EmptyState
 							icon="icon-[lucide--inbox]"
 							title="队列为空"
-							description={scope === "empty" ? "当前没有等待中的传输任务。" : "这个状态下暂时没有任务。"}
 							action={
 								<Link
 									to="/sftp"
@@ -402,7 +401,6 @@ export default function Transfers() {
 							<EmptyState
 								icon="icon-[lucide--arrow-down-up]"
 								title="暂无传输任务"
-								description="从 SFTP 面板拖拽文件到远程目录，或在文件管理器里拖入窗口，任务会立刻出现在这里。"
 								action={
 									<Link
 										to="/sftp"
@@ -473,7 +471,6 @@ function DetailCard({
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-2">
 						<h2 className="truncate font-mono text-[13px] font-semibold text-surface-foreground">{item.name}</h2>
-						<EnvPill env={item.hostId === "order-stage" ? "stage" : item.hostId === "pg-primary-01" ? "prod" : "prod"} size="xs" />
 					</div>
 					<p className="truncate font-mono text-[10.5px] text-faint">
 						{item.hostId} · {targetOf(item)}

@@ -75,7 +75,6 @@ export default function Updater() {
 						<EmptyState
 							icon="icon-[lucide--cloud-off]"
 							title="更新服务尚未接入"
-							description="TermX 还没有配置更新源：当前版本、可用版本、安装包信息都还没有数据来源。接入发布服务后，这里会显示检查结果。"
 							action={
 								<Button variant="primary" icon="icon-[lucide--refresh-cw]" onClick={checkUpdate}>
 									检查更新
@@ -89,9 +88,7 @@ export default function Updater() {
 						<div className="min-w-0">
 							<div className="text-[11.5px] font-medium text-surface-foreground">软件更新通道</div>
 							<div className="mt-0.5 text-[10.5px] text-faint">
-								{channel === "stable"
-									? "正式稳定版 · 推荐日常工作使用"
-									: "尝鲜预览版 · 提前体验新特性，可能不稳定"}
+								{channel === "stable" ? "正式稳定版" : "尝鲜预览版，可能不稳定"}
 							</div>
 						</div>
 						<Segmented
@@ -139,9 +136,7 @@ export default function Updater() {
 				</div>
 			</div>
 
-			<div className="relative z-10 mt-3 font-mono text-[10.5px] text-term-ink/50">
-				TermX Desktop · Windows x64 · 更新过程不会中断正在运行的会话
-			</div>
+			<div className="relative z-10 mt-3 font-mono text-[10.5px] text-term-ink/50">TermX Desktop · Windows x64</div>
 		</div>
 	);
 }

@@ -39,12 +39,6 @@
 	--tx-success: oklch(72% 0.15 155);
 	--tx-success-soft: oklch(23% 0.04 155);
 
-	/* 环境辨识（需求书 03-5 / 08） */
-	--tx-env-prod: oklch(62% 0.21 25);
-	--tx-env-stage: oklch(74% 0.15 65);
-	--tx-env-test: oklch(72% 0.15 155);
-	--tx-env-dev: oklch(66% 0.008 260);
-
 	/* 终端画布（深浅主题下都保持近黑，见需求书 08） */
 	--tx-term: oklch(12% 0.006 260);
 	--tx-term-ink: oklch(91% 0.004 260);
@@ -72,11 +66,6 @@
 	--tx-warning-soft: oklch(94% 0.05 65);
 	--tx-success: oklch(53% 0.14 155);
 	--tx-success-soft: oklch(94% 0.04 155);
-
-	--tx-env-prod: oklch(55% 0.2 25);
-	--tx-env-stage: oklch(62% 0.14 65);
-	--tx-env-test: oklch(52% 0.14 155);
-	--tx-env-dev: oklch(48% 0.012 260);
 }
 
 /* 把原始变量映射为 Tailwind token。用普通 @theme（非 inline），
@@ -105,11 +94,6 @@
 	--color-warning-soft: var(--tx-warning-soft);
 	--color-success: var(--tx-success);
 	--color-success-soft: var(--tx-success-soft);
-
-	--color-env-prod: var(--tx-env-prod);
-	--color-env-stage: var(--tx-env-stage);
-	--color-env-test: var(--tx-env-test);
-	--color-env-dev: var(--tx-env-dev);
 
 	--color-term: var(--tx-term);
 	--color-term-ink: var(--tx-term-ink);

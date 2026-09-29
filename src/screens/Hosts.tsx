@@ -1,6 +1,6 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button } from "@/components/ui/Button";
-import { EmptyState, EnvPill, EnvStripe, Segmented, StatusDot } from "@/components/ui/Display";
+import { EmptyState, Segmented, StatusDot } from "@/components/ui/Display";
 import { Input, Select } from "@/components/ui/Input";
 import type { Host } from "@/data/types";
 import { cn } from "@/lib/cn";
@@ -158,16 +158,8 @@ export default function Hosts() {
 
 		toast({
 			title: `测速完成：${result.ok} 台 TCP 可达`,
-			description: [
-				result.fail > 0 ? `${result.fail} 台不可达（悬停延迟可看原因）。` : "全部 TCP 可达。",
-				result.intercepted > 0
-					? `其中 ${result.intercepted} 台往返不足 1 毫秒，疑似被本地代理/中间盒接管，不代表真的连到了那些主机。`
-					: "",
-				"口径是 TCP 连通，不等于 SSH 可用。",
-			]
-				.filter(Boolean)
-				.join(""),
-			tone: result.fail === 0 && result.intercepted === 0 ? "success" : "warning",
+			description: result.fail > 0 ? `${result.fail} 台不可达（悬停延迟可看原因）。` : undefined,
+			tone: result.fail === 0 ? "success" : "warning",
 		});
 	};
 
@@ -268,7 +260,7 @@ export default function Hosts() {
 							{dragging && (
 								<span className="flex items-center gap-1 text-[11px] text-primary">
 									<span className="icon-[lucide--move] size-3" />
-									正在拖动 {dragging.name}，放到左侧分组即可移动
+									正在拖动 {dragging.name}
 								</span>
 							)}
 						</div>
@@ -305,7 +297,6 @@ export default function Hosts() {
 							<EmptyState
 								icon="icon-[lucide--server-off]"
 								title="主机库还是空的"
-								description="这里的每一台主机都由你自己录入，并会保存在本地配置文件里。手动新建第一台开始吧。"
 								action={
 									<div className="flex items-center gap-2">
 										<Button variant="primary" size="sm" icon="icon-[lucide--plus]" onClick={() => navigate("/hosts/new")}>
@@ -333,7 +324,6 @@ export default function Hosts() {
 							<EmptyState
 								icon="icon-[lucide--search-x]"
 								title="没有匹配的主机"
-								description={`没有找到与「${query}」匹配的主机。搜索会匹配名称、IP、用户名和标签。`}
 								action={
 									<Button size="sm" icon="icon-[lucide--x]" onClick={() => useHostsStore.getState().setQuery("")} disabled={!query}>
 										清除搜索
@@ -361,7 +351,6 @@ export default function Hosts() {
 							<div className="sticky top-0 z-10 flex h-7 shrink-0 items-center gap-3 border-b border-border bg-surface-sunk px-4 text-[10px] font-medium tracking-wider text-faint uppercase">
 								<span className="w-4" />
 								<span className="w-[190px]">名称</span>
-								<span className="w-12">环境</span>
 								<span className="w-[170px]">地址</span>
 								<span className="w-[90px]">用户</span>
 								<span className="flex-1">标签 / 规格</span>
@@ -438,10 +427,8 @@ export default function Hosts() {
 																draggingId === h.id && "opacity-40",
 															)}
 														>
-															<EnvStripe env={h.env} />
 															<StatusDot status={h.reachable ? "connected" : "disconnected"} />
 															<span className="w-[170px] truncate font-mono text-[11.5px] text-surface-foreground">{h.name}</span>
-															<EnvPill env={h.env} size="xs" />
 															<span className="w-[150px] truncate font-mono text-[11px] text-muted">{h.hostname}</span>
 															<span className="flex-1 truncate text-[11px] text-faint">
 																{h.os?.name ?? "未识别系统"} · {h.username}
@@ -636,7 +623,6 @@ function HostCard({
 							<IconAction icon="icon-[lucide--pencil]" label="编辑" onClick={onEdit} />
 							<IconAction icon="icon-[lucide--trash-2]" label="删除" danger onClick={onDelete} />
 						</span>
-						<EnvPill env={host.env} size="xs" className="group-hover:hidden" />
 					</span>
 				</div>
 
@@ -701,15 +687,10 @@ function HostRow({
 				dragging && "opacity-40",
 			)}
 		>
-			<span className="w-4 shrink-0">
-				<EnvStripe env={host.env} />
-			</span>
+			<span className="w-4 shrink-0" />
 			<span className="flex w-[190px] min-w-0 shrink-0 items-center gap-1.5">
 				<span className={cn(host.os?.icon ?? "icon-[lucide--server]", "size-3 text-muted")} />
 				<span className="truncate font-mono text-[11.5px] font-medium text-surface-foreground">{host.name}</span>
-			</span>
-			<span className="w-12 shrink-0">
-				<EnvPill env={host.env} size="xs" />
 			</span>
 			<span className="w-[170px] shrink-0 truncate font-mono text-[11px] text-muted">
 				{host.hostname}:{host.port}

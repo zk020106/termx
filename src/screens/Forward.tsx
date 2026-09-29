@@ -1,6 +1,6 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button } from "@/components/ui/Button";
-import { Badge, EmptyState, EnvPill, Segmented } from "@/components/ui/Display";
+import { Badge, EmptyState, Segmented } from "@/components/ui/Display";
 import { Field, Input, ReadonlyValue, Select } from "@/components/ui/Input";
 import { Drawer } from "@/components/ui/Overlay";
 import { Checkbox } from "@/components/ui/Toggle";
@@ -235,11 +235,6 @@ export default function Forward() {
 							<EmptyState
 								icon="icon-[lucide--waypoints]"
 								title="还没有转发规则"
-								description={
-									hosts.length === 0
-										? "转发隧道跟随 SSH 主机：先去主机库添加一台主机，再回来新建规则。"
-										: "新建一条规则，把远程端口映射到本地；规则会保存在本机。"
-								}
 								action={
 									hosts.length === 0 ? (
 										<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts/new")}>
@@ -322,7 +317,6 @@ export default function Forward() {
 												{selected.name}
 											</h2>
 											<Badge>{FORWARD_LABEL[selected.type]}</Badge>
-											{host && <EnvPill env={host.env} size="xs" />}
 										</div>
 										<div className="mt-1 flex items-center gap-2 font-mono text-[11px] text-muted">
 											<span className={cn("size-1.5 rounded-full", visual.dot)} />
@@ -422,7 +416,7 @@ export default function Forward() {
 								</div>
 								<p className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-faint">
 									<span className="icon-[lucide--info] size-3" />
-									连接数与流量需要真实的转发隧道；SSH 层接入前没有数据源，因此显示 —。
+									SSH 层接入前没有数据源。
 								</p>
 
 								<div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-3">
@@ -450,7 +444,6 @@ export default function Forward() {
 								<EmptyState
 									icon="icon-[lucide--waypoints]"
 									title="还没有转发规则"
-									description="新建一条规则，把远程端口映射到本地；规则会保存到本机，随时可以编辑或删除。"
 									action={
 										<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
 											新建规则
@@ -474,7 +467,7 @@ export default function Forward() {
 								<EmptyState
 									icon="icon-[lucide--radio]"
 									title="没有可发现的远程监听端口"
-									description="需要先建立 SSH 连接，TermX 才能读取远程主机上的监听端口。当前没有已连接的会话，所以这里不显示任何端口。"
+									description="需要先建立 SSH 连接。"
 									action={
 										hosts.length === 0 ? (
 											<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts/new")}>
@@ -488,10 +481,6 @@ export default function Forward() {
 									}
 								/>
 							</div>
-
-							<p className="mt-2 text-[10.5px] text-faint">
-								连接建立后，这里会列出远程实际监听的端口，并支持一键转发到本地空闲端口。
-							</p>
 						</div>
 					</div>
 				</div>
@@ -557,8 +546,7 @@ export default function Forward() {
 							</Select>
 						</Field>
 						{sshHost && (
-							<div className="-mt-2 flex items-center gap-2 text-[11px] text-muted">
-								<EnvPill env={sshHost.env} size="xs" />
+							<div className="-mt-2 text-[11px] text-muted">
 								<span className="font-mono">
 									{sshHost.username}@{sshHost.hostname}:{sshHost.port}
 								</span>

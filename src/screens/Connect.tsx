@@ -321,11 +321,7 @@ export default function Connect() {
 					<EmptyState
 						icon="icon-[lucide--server-off]"
 						title={hostId ? "找不到这台主机" : "没有指定要连接的主机"}
-						description={
-							hostId
-								? `主机库里没有 id 为 ${hostId} 的主机，它可能已经被删除。`
-								: "连接页从地址栏的 ?host=<id> 取真实主机，不会自动挑一台。先去主机库选一台再发起连接。"
-						}
+						description={hostId ? `主机库里没有 id 为 ${hostId} 的主机。` : undefined}
 						action={
 							<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts")}>
 								去主机库
@@ -423,7 +419,6 @@ export default function Connect() {
 		setProbeError(null);
 		toast({
 			title: summary.ok > 0 ? "TCP 可达" : "TCP 不可达",
-			description: `${host.hostname}:${host.port} · TCP 可达不等于 SSH 可用`,
 			tone: summary.ok > 0 ? "success" : "danger",
 		});
 	};
@@ -720,13 +715,13 @@ export default function Connect() {
 						</div>
 						<div className="text-muted">
 							{connected
-								? "SSH 会话已建立：远端输出会在工作区终端里回放（登录横幅与首个提示符不会丢）"
+								? "SSH 会话已建立，远端输出在工作区终端里回放"
 								: connecting
-									? `Rust 端正在推送真实阶段：${SSH_STAGES.join(" → ")}`
+									? `正在连接：${SSH_STAGES.join(" → ")}`
 									: report
 										? describeProbe(report)
 										: !supported
-											? "浏览器内没有 TCP 探测能力：用 pnpm tauri:dev 启动桌面端后会自动重测"
+											? "浏览器内无法探测 TCP，请用桌面端运行"
 											: (probeError ?? (isProbing ? "正在探测 TCP 可达性…" : "等待发起连接"))}
 						</div>
 						{!connected && ssh.failure && <div className="text-danger">SSH：{ssh.failure}</div>}
@@ -785,7 +780,7 @@ export default function Connect() {
 									<span className={cn("size-3.5 shrink-0", conclusion.icon)} />
 									<span className="text-[12px] font-medium text-surface-foreground">{conclusion.headline}</span>
 								</div>
-								<p className="mt-1.5 text-[11px] leading-4 text-muted">{conclusion.body}</p>
+								{conclusion.body && <p className="mt-1.5 text-[11px] leading-4 text-muted">{conclusion.body}</p>}
 								<div className="mt-2.5 flex items-center gap-1.5">
 									<Button
 										size="sm"
@@ -809,7 +804,7 @@ export default function Connect() {
 										<span className="text-[11.5px] font-medium text-surface-foreground">首次连接未确认指纹，连接已中止</span>
 									</div>
 									<p className="mt-1.5 text-[11px] leading-4 text-muted">
-										Rust 端按 known_hosts 策略拒绝了这次握手：这台主机的密钥还没有被信任。你没确认之前不会建立连接，TermX 也不会替你记下任何指纹。
+										主机密钥未被信任，握手已被拒绝。
 									</p>
 									<FingerprintBlock value={alert.fingerprint} className="mt-2.5" />
 									<div className="mt-2.5 flex items-center gap-1.5">
@@ -835,8 +830,7 @@ export default function Connect() {
 										<div className="min-w-0 flex-1">
 											<div className="text-[12px] font-semibold text-danger">主机指纹变化警告 · 连接已被拒绝</div>
 											<p className="mt-1.5 text-[11px] leading-4 text-muted">
-												主机指纹与已保存的记录不一致。可能是服务器重装过，也可能是中间人攻击。
-												在你人工核对之前，TermX 不会用这把密钥继续连接。
+												指纹与已保存的记录不一致，可能是服务器重装，也可能是中间人攻击。
 											</p>
 											<FingerprintBlock
 												value={alert.fingerprint}
@@ -869,7 +863,7 @@ export default function Connect() {
 											) : (
 												<div className="mt-2.5 flex items-center gap-1.5">
 													<span className="text-[10.5px] leading-4 text-faint">
-														你已取消这次连接：TermX 没有改动 known_hosts，连接保持断开。
+														已取消这次连接，known_hosts 未改动。
 													</span>
 													<Button size="sm" icon="icon-[lucide--rotate-cw]" onClick={() => setAlert({ ...alert, open: true })}>
 														重新查看
@@ -896,7 +890,7 @@ export default function Connect() {
 									<Segmented value={authMethod} onChange={setMethodOverride} options={AUTH_CHOICES} className="mt-2 w-full" />
 									{methodOverride && methodOverride !== hostMethod && (
 										<p className="mt-1.5 text-[10.5px] leading-4 text-warning">
-											这台主机登记的是「{AUTH_LABEL[hostMethod]}」，本次连接改用「{AUTH_LABEL[authMethod]}」；只影响这次连接，不改主机库里的配置。
+											这台主机登记的是「{AUTH_LABEL[hostMethod]}」，本次连接改用「{AUTH_LABEL[authMethod]}」。
 										</p>
 									)}
 
@@ -929,13 +923,9 @@ export default function Connect() {
 											{loadedFromKeychain && (
 												<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-success">
 													<span className="icon-[lucide--key-round] mt-px size-3 shrink-0" />
-													已从系统钥匙串读取到保存的密码，可以直接连接。
+													已从系统钥匙串读取到保存的密码。
 												</p>
 											)}
-											<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
-												密码只用于本次连接，保存在内存里：不写进主机库、不写进配置文件。只有勾选下面的「记住密码」时，才会额外交给操作系统钥匙串保管。
-											</p>
-
 											<div
 												className="mt-2.5 border-t border-border pt-2.5"
 												onClickCapture={(e) => {
@@ -960,14 +950,13 @@ export default function Connect() {
 													description={
 														secretUsable === false
 															? undefined
-															: "默认不勾选；勾选后密码交给 Windows 凭据管理器 / macOS 钥匙串保管，下次进入本页会预填。"
+															: "勾选后交给系统钥匙串保管，下次进入本页会预填。"
 													}
 												/>
 												{secretUsable === false && (
 													<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
 														<span className="icon-[lucide--triangle-alert] mt-px size-3 shrink-0" />
-														系统钥匙串当前不可用（浏览器预览里没有钥匙串；Linux 上缺少 Secret Service 也会这样），
-														这个选项已禁用，密码只能留在内存里。
+														系统钥匙串当前不可用，这个选项已禁用。
 													</p>
 												)}
 												{hasSavedSecret && (
@@ -1011,9 +1000,8 @@ export default function Connect() {
 											</div>
 											{registeredKey && (
 												<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
-													这台主机登记的密钥是「{registeredKey.name}」（{registeredKey.type}
-													{registeredKey.bits ? ` ${registeredKey.bits}` : ""} · {registeredKey.fingerprint}
-													）；密钥库只保存公钥元数据、不含私钥文件路径，所以本地私钥文件仍要在这里指定。
+													主机登记的密钥：{registeredKey.name}（{registeredKey.type}
+													{registeredKey.bits ? ` ${registeredKey.bits}` : ""} · {registeredKey.fingerprint}）
 												</p>
 											)}
 											{authMethod === "key-passphrase" && (
@@ -1037,14 +1025,9 @@ export default function Connect() {
 														}}
 														className="mt-2 font-mono"
 													/>
-													<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
-														口令只活在本次连接的内存里：不写配置文件，也不进系统钥匙串（钥匙串那一套只服务密码方式）。私钥没有口令就留空。
-													</p>
+													<p className="mt-1.5 text-[10.5px] leading-4 text-faint">私钥没有口令就留空。</p>
 												</div>
 											)}
-											<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
-												私钥文件路径随凭据交给本机 Rust 侧读取，不写进主机库或配置文件；私钥内容始终不出这台机器。
-											</p>
 										</div>
 									)}
 
@@ -1132,9 +1115,7 @@ export default function Connect() {
 													</ul>
 													<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-faint">
 														<span className="icon-[lucide--info] mt-px size-3 shrink-0" />
-														<span>
-															连接时将依次尝试下列身份，直到服务器接受其中一把；用哪一把由服务器说了算，界面不做选择。私钥始终留在 SSH Agent 进程里。
-														</span>
+														<span>按顺序尝试下列身份，由服务器决定接受哪一把。</span>
 													</p>
 												</div>
 											)}
@@ -1147,15 +1128,6 @@ export default function Connect() {
 											<div className="flex items-center justify-between">
 												<span className="text-[11px] font-medium text-muted">键盘交互</span>
 												<Badge className="font-mono text-[9.5px]">问答只走内存</Badge>
-											</div>
-											<div className="mt-2 rounded-control border border-border bg-surface-sunk p-2.5 text-[11px] leading-4 text-muted">
-												<p>
-													服务器会以交互方式提问（可能是密码，也可能是二次验证码 / 一次性口令）。点「连接」之后，
-													TermX 把服务器的提问原样弹成输入框，你答完点「继续」提交。
-												</p>
-												<p className="mt-1.5">
-													服务器可以连着问好几轮（例如先密码、再验证码），TermX 会一轮一轮地接着弹。这里的问答不写配置文件，也不进系统钥匙串。
-												</p>
 											</div>
 										</div>
 									)}
@@ -1178,7 +1150,7 @@ export default function Connect() {
 									{!sshReady && (
 										<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
 											<span className="icon-[lucide--laptop] mt-px size-3 shrink-0" />
-											<span>SSH 需要在桌面端运行：浏览器预览里没有原生 SSH 通道，按钮已禁用，也不会伪造连接过程。</span>
+											<span>浏览器预览里没有原生 SSH 通道，按钮已禁用。</span>
 										</div>
 									)}
 								</div>
@@ -1192,13 +1164,11 @@ export default function Connect() {
 										<span className="text-[12px] font-medium text-surface-foreground">SSH 会话已建立</span>
 									</div>
 									<p className="mt-1.5 text-[11px] leading-4 text-muted">
-										{host.username}@{host.hostname}:{host.port} 的远程 shell 已就绪，进入工作区即可看到远端输出。
+										{host.username}@{host.hostname}:{host.port} 的远程 shell 已就绪。
 									</p>
 									<FingerprintBlock value={fingerprint} verified className="mt-2.5" />
 									{!fingerprint && (
-										<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
-											这条会话是在进入本页之前建立的，本页没有握手阶段的记录，因此没有指纹可显示 —— TermX 不会补造一个。
-										</p>
+										<p className="mt-1.5 text-[10.5px] leading-4 text-faint">本页没有握手阶段的记录，因此没有指纹可显示。</p>
 									)}
 									<div className="mt-2.5 flex items-center gap-1.5">
 										<Button size="sm" variant="primary" icon="icon-[lucide--terminal]" onClick={enterWorkspace}>
@@ -1313,12 +1283,10 @@ export default function Connect() {
 					}
 				>
 					<p>
-						TermX 按 known_hosts 策略<strong className="text-surface-foreground">拒绝</strong>了这次握手：
 						<span className="font-mono text-surface-foreground">
-							{" "}
-							{host.hostname}:{host.port}{" "}
-						</span>
-						的主机密钥还没有被信任。确认之后才会写入本机的 known_hosts 并继续连接。
+							{host.hostname}:{host.port}
+						</span>{" "}
+						的主机密钥还不在本机 known_hosts 里；确认后才会写入并继续连接。
 					</p>
 					<FingerprintBlock
 						value={alert?.fingerprint ?? null}
@@ -1327,15 +1295,15 @@ export default function Connect() {
 						className="mt-2.5"
 					/>
 					<p className="mt-2.5">
-						这是服务器在本次握手中返回的真实指纹，请在服务器上核对（例如{" "}
+						请在服务器上核对指纹（例如{" "}
 						<code className="rounded border border-border bg-surface-sunk px-1 font-mono text-[10.5px] text-surface-foreground">
 							ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 						</code>
-						）后再确认。
+						）。
 					</p>
 					<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
 						<span className="icon-[lucide--triangle-alert] mt-px size-3 shrink-0" />
-						<span>指纹对不上就不要点「信任并继续」：那等于把一把来路不明的密钥记进本机。</span>
+						<span>指纹对不上就不要点「信任并继续」。</span>
 					</div>
 					{trustError && (
 						<div className="mt-2 rounded-control border border-danger/40 bg-danger/10 px-2 py-1.5 text-[10.5px] leading-4 text-danger">
@@ -1402,14 +1370,8 @@ export default function Connect() {
 								))}
 							</div>
 							<p className="mt-2.5 text-[10.5px] leading-4 text-faint">
-								回答按上面提问的顺序原样提交给服务器；这里的内容不写配置文件、也不进系统钥匙串。
+								回答按提问顺序原样提交给服务器。
 							</p>
-							{promptSubmitted && (
-								<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-success">
-									<span className="icon-[lucide--check-circle] mt-px size-3 shrink-0" />
-									<span>这一轮已提交。服务器可能接着再问一轮（会立刻换成新的输入框），也可能直接完成认证。</span>
-								</div>
-							)}
 							{promptError && (
 								<div className="mt-2 rounded-control border border-danger/40 bg-danger/10 px-2 py-1.5 text-[10.5px] leading-4 text-danger">
 									回答没能交给服务器：{promptError}
@@ -1537,7 +1499,7 @@ interface Conclusion {
 	tone: string;
 	icon: string;
 	headline: string;
-	body: string;
+	body?: string;
 }
 
 /** 顶部结论卡片的文案：优先讲真实 SSH 结果，其次讲 TCP 探测，都不伪造 */
@@ -1556,9 +1518,7 @@ function summarize(
 					tone: "border-warning/40 bg-warning/10",
 					icon: "icon-[lucide--fingerprint] text-warning",
 					headline: alert.open ? "首次连接该主机，等待你确认指纹" : "首次连接未确认指纹，连接已中止",
-					body: alert.open
-						? "TermX 按 known_hosts 策略拒绝了这次握手：核对指纹并确认之后才会继续。"
-						: "指纹没有确认，TermX 不会连接这台主机，也不会替你记下任何指纹。",
+					body: alert.open ? "核对指纹并确认后才会继续连接。" : "指纹未确认，连接保持中止。",
 				}
 			: {
 					tone: "border-danger/40 bg-danger/10",
@@ -1572,7 +1532,6 @@ function summarize(
 			tone: "border-success/40 bg-success/10",
 			icon: "icon-[lucide--check-circle] text-success",
 			headline: "SSH 会话已建立",
-			body: "远程 shell 已就绪，进入工作区即可看到远端输出；服务器返回的主机指纹在下方。",
 		};
 	}
 	if (ssh.connecting) {
@@ -1580,7 +1539,6 @@ function summarize(
 			tone: "border-primary/40 bg-primary/10",
 			icon: "icon-[lucide--circle-dashed] text-primary",
 			headline: "正在建立 SSH 会话",
-			body: `下面五步由 Rust 端真实推送的阶段驱动：${SSH_STAGES.join(" → ")}。`,
 		};
 	}
 	if (ssh.failure) {
@@ -1604,7 +1562,6 @@ function summarize(
 			tone: "border-success/40 bg-success/10",
 			icon: "icon-[lucide--check-circle] text-success",
 			headline: "TCP 可达性已确认；尚未发起 SSH 连接",
-			body: `${describeProbe(report)}。TCP 能连上并不代表 SSH 一定可用，按上面的认证方式点「连接」用真实握手确认。`,
 		};
 	}
 	if (!supported) {
@@ -1627,7 +1584,6 @@ function summarize(
 		tone: "border-border bg-surface",
 		icon: "icon-[lucide--circle-dashed] text-faint",
 		headline: probing ? "正在探测 TCP 可达性…" : "TCP 可达性尚未确认；尚未发起 SSH 连接",
-		body: probing ? "探测结果会显示在步骤条的前两步。" : "可以先探测 TCP，也可以直接按上面的认证方式发起真实 SSH 连接。",
 	};
 }
 
@@ -1667,13 +1623,13 @@ function FingerprintBlock({
 			{value && verified && (
 				<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-success">
 					<span className="icon-[lucide--shield-check] mt-px size-3 shrink-0" />
-					<span>这把主机密钥已经通过 known_hosts 校验（记录在 TermX 自己的 known_hosts 里，不改动 OpenSSH 的文件）。</span>
+					<span>已通过 known_hosts 校验。</span>
 				</div>
 			)}
 			{!value && (
 				<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-faint">
 					<span className="icon-[lucide--info] mt-px size-3 shrink-0" />
-					<span>指纹只能来自服务器在握手时真的发过来的那把密钥，TermX 不会预填、也不会推测一个出来。</span>
+					<span>指纹只能来自服务器握手时返回的密钥。</span>
 				</div>
 			)}
 		</div>

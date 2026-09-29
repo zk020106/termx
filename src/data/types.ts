@@ -5,23 +5,6 @@
  * 字段取舍依据 termx-design-brief 「05 功能清单」的 P0/P1 项。
  * ========================================================================== */
 
-/** 内置环境，带固定颜色（需求书 03-5：生产/预发/测试/开发各有固定颜色） */
-export type Env = "prod" | "stage" | "test" | "dev";
-
-export const ENV_LABEL: Record<Env, string> = {
-	prod: "PROD",
-	stage: "STG",
-	test: "TEST",
-	dev: "DEV",
-};
-
-export const ENV_NAME: Record<Env, string> = {
-	prod: "生产",
-	stage: "预发",
-	test: "测试",
-	dev: "开发",
-};
-
 /** 连接状态：标签、主机库、状态栏三处共用同一套语义（需求书 07-连接状态） */
 export type ConnectionStatus =
 	| "idle"
@@ -88,7 +71,6 @@ export interface Host {
 	hostname: string;
 	port: number;
 	username: string;
-	env: Env;
 	tags: string[];
 	favorite: boolean;
 	/** 首次连接后识别到的发行版 */
@@ -236,7 +218,6 @@ export interface SessionTab {
 	id: string;
 	hostId: string | null;
 	title: string;
-	env: Env;
 	status: ConnectionStatus;
 	latencyMs?: number;
 	layout: SplitLayout;
@@ -287,7 +268,6 @@ export interface CommandItem {
 	icon?: string;
 	shortcut?: string;
 	keywords?: string[];
-	env?: Env;
 }
 
 /* ------------------------------- 编辑器 ------------------------------- */

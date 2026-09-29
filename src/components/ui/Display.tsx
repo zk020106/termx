@@ -1,43 +1,12 @@
-import { ENV_LABEL, type ConnectionStatus, type Env } from "@/data/types";
+import type { ConnectionStatus } from "@/data/types";
 import { cn } from "@/lib/cn";
-import { connVisual, envBg } from "@/lib/status";
+import { connVisual } from "@/lib/status";
 import type { ReactNode } from "react";
 
 /* =============================================================================
- * 展示型原语：环境胶囊、状态点、进度条、空状态、面板。
- * 这些是「环境有辨识度」与「状态始终可见」两条原则的落地零件。
+ * 展示型原语：状态点、进度条、空状态、面板。
+ * 这些是「状态始终可见」原则的落地零件。
  * ========================================================================== */
-
-/** 环境文字胶囊 —— 生产标的基元，贯穿主机库、标签、状态栏、抽屉 */
-export function EnvPill({
-	env,
-	size = "sm",
-	className,
-}: {
-	env: Env;
-	size?: "xs" | "sm";
-	className?: string;
-}) {
-	return (
-		<span
-			className={cn(
-				"inline-flex shrink-0 items-center rounded-[3px] font-mono font-medium tracking-wide uppercase",
-				// 开发环境底色偏灰，用深色字保证对比度
-				env === "dev" ? "text-surface" : "text-primary-foreground",
-				envBg[env],
-				size === "xs" ? "px-1 py-px text-[9px] leading-3" : "px-1.5 py-0.5 text-[10px] leading-3.5",
-				className,
-			)}
-		>
-			{ENV_LABEL[env]}
-		</span>
-	);
-}
-
-/** 标签左侧的环境色条 */
-export function EnvStripe({ env, className }: { env: Env; className?: string }) {
-	return <span className={cn("h-3 w-[3px] shrink-0 rounded-full", envBg[env], className)} />;
-}
 
 /** 连接状态点，pulse 用于「连接中 / 重连中」 */
 export function StatusDot({

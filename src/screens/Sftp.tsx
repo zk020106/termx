@@ -64,7 +64,6 @@ export default function Sftp() {
 						empty={{
 							icon: "icon-[lucide--folder-off]",
 							title: "本地目录浏览尚未接入",
-							description: "桌面端文件系统接口还没接通，暂时读不出本地目录，也选不了要上传的文件。",
 							action: (
 								<Button
 									size="sm"
@@ -72,7 +71,6 @@ export default function Sftp() {
 									onClick={() =>
 										toast({
 											title: "本地目录浏览尚未接入",
-											description: "接入桌面端文件系统接口后，这里会列出本地目录。",
 											tone: "default",
 										})
 									}
@@ -91,12 +89,10 @@ export default function Sftp() {
 								? {
 										icon: "icon-[lucide--folder-off]",
 										title: "远程文件列表尚未接入",
-										description: `会话「${session.title}」已经打开，但 SFTP 子系统还没接入，列不出远程目录、也读不到文件属性。`,
 									}
 								: {
 										icon: "icon-[lucide--plug-zap]",
 										title: "SFTP 需要先选中一个已连接的会话",
-										description: "远程文件列表挂在 SSH 会话上：先在主机库连接一台服务器，再回到这里选会话。",
 										action: (
 											<Button
 												size="sm"
@@ -128,7 +124,7 @@ function FileColumnShell({
 	title: string;
 	icon: string;
 	side: "local" | "remote";
-	empty: { icon: string; title: string; description: string; action?: ReactNode };
+	empty: { icon: string; title: string; description?: string; action?: ReactNode };
 }) {
 	const sideLabel = side === "remote" ? "远程" : "本地";
 
@@ -154,7 +150,6 @@ function FileColumnShell({
 						onClick={() =>
 							toast({
 								title: `${sideLabel}目录列表尚未接入`,
-								description: "文件系统接口还没接通，暂时没有可刷新的目录内容。",
 								tone: "default",
 							})
 						}

@@ -1,5 +1,5 @@
-import { EnvPill, StatusDot } from "@/components/ui/Display";
-import { CONNECTION_LABEL, ENV_LABEL, type ConnectionStatus, type Host } from "@/data/types";
+import { StatusDot } from "@/components/ui/Display";
+import { CONNECTION_LABEL, type ConnectionStatus, type Host } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { describeProbe } from "@/lib/probe";
 import { connVisual } from "@/lib/status";
@@ -11,7 +11,7 @@ import { transferSummary, useTransfersStore } from "@/store/transfers";
 import { Link } from "react-router";
 
 /* 状态栏（需求书 04-⑧）：连接状态、用户@地址、延迟、编码、传输进度、转发数。
- * 每一项都可点击跳转到对应界面；生产环境额外显示 PROD 标记（03-5 / 07）。 */
+ * 每一项都可点击跳转到对应界面。 */
 
 export function StatusBar() {
 	const activeTabId = useSessionsStore((s) => s.activeTabId);
@@ -50,7 +50,7 @@ export function StatusBar() {
 			{host && (
 				<>
 					<Divider />
-					<span className={cn(host.env === "prod" && "text-env-prod")}>
+					<span>
 						{host.username}@{host.hostname}:{host.port}
 					</span>
 				</>
@@ -75,14 +75,6 @@ export function StatusBar() {
 				</>
 			)}
 
-			{/* 环境辨识：状态栏常驻 PROD 标记 */}
-			{host && host.env === "prod" && (
-				<>
-					<Divider />
-					<EnvPill env="prod" size="xs" />
-				</>
-			)}
-
 			{summary.count > 0 && (
 				<>
 					<Divider />
@@ -102,7 +94,6 @@ export function StatusBar() {
 
 			<div className="ml-auto flex items-center gap-2">
 				{host?.termType && <span className="text-[10px] text-faint">{host.termType}</span>}
-				{host && <span className="text-[10px] text-faint">{ENV_LABEL[host.env]}</span>}
 			</div>
 		</footer>
 	);
@@ -124,7 +115,6 @@ export function StatusBarForHost({ host, status }: { host: Host; status: Connect
 			</span>
 			<Divider />
 			<span className="tabular-nums text-surface-foreground">{host.latencyMs ?? "—"} ms</span>
-			{host.env === "prod" && <EnvPill env="prod" size="xs" className="ml-1" />}
 			<div className="ml-auto text-[10px] text-faint">{host.termType ?? "xterm-256color"}</div>
 		</footer>
 	);

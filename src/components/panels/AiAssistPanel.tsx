@@ -163,7 +163,7 @@ export function AiAssistPanel({ hostName }: { hostName?: string }) {
 
 				<p className="flex items-start gap-1.5 px-1 text-[10.5px] leading-4 text-faint">
 					<span className="icon-[lucide--shield-check] mt-0.5 size-3 shrink-0" />
-					对话内容直接发往你配置的 provider，不经过 TermX 的服务端；未配置时本面板不产生任何网络请求。
+					对话内容直接发往你配置的 provider，不经过 TermX 服务端。
 				</p>
 			</div>
 		</div>

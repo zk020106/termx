@@ -15,7 +15,7 @@ const STATES = [
 	{ value: "recent", label: "最近使用", query: "", hint: "空输入时默认展示最近使用" },
 	{ value: "command", label: "只搜命令", query: ">", hint: "> 前缀只搜命令片段" },
 	{ value: "empty", label: "无结果", query: "redis-cluster", hint: "搜索无结果态" },
-	{ value: "multi", label: "多分组", query: "s", hint: "同一关键词同时命中主机与命令两组（mock 数据下能同时命中多组的关键词有限）" },
+	{ value: "multi", label: "多分组", query: "s", hint: "同一关键词同时命中主机与命令两组" },
 ] as const;
 
 type PaletteState = (typeof STATES)[number]["value"];

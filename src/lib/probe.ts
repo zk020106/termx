@@ -71,16 +71,13 @@ export async function probeHost(
 	});
 }
 
-/** 把探测结果压成一句人话，供气泡与列表复用 */
+/** 把探测结果压成一句事实描述（延迟 / 抖动 / 丢包），供气泡与列表复用 */
 export function describeProbe(report: ProbeReport): string {
 	if (report.reachable) {
 		const head = `TCP ${report.avg_ms.toFixed(0)} ms（最低 ${report.min_ms.toFixed(0)} / 最高 ${report.max_ms.toFixed(0)}）`;
 		const jitter = report.jitter_ms > 0 ? ` · 抖动 ±${report.jitter_ms.toFixed(1)} ms` : "";
 		const loss = report.loss > 0 ? ` · 丢包 ${Math.round(report.loss * 100)}%` : "";
-		const note = isIntercepted(report)
-			? " · 亚毫秒往返，疑似本地代理/中间盒接管了连接，不代表真的连到了该主机"
-			: "";
-		return `${head}${jitter}${loss}${note}`;
+		return `${head}${jitter}${loss}`;
 	}
 	return report.error ?? "TCP 不可达";
 }

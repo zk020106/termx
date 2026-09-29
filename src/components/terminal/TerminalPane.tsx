@@ -11,8 +11,7 @@ import { Terminal, panePrompt, type TerminalHandle } from "./Terminal";
  * 视觉基准 = termx.vetd/frames/index.tsx 的焦点分屏格：
  *   标题行 11px（提示符主色 / 右侧副标题 faint），正文 12px 等宽，
  *   焦点格 1px 主色内描边，非焦点格文字略暗。
- * 叠加态（需求书 06-终端工作区）：广播中 / 已断开覆盖层 / 生产环境 2px 红描边。
- * ========================================================================== */
+ * 叠加态（需求书 06-终端工作区）：广播中 / 已断开覆盖层 / 生产环境 2px 红描边。 * ========================================================================== */
 
 export function TerminalPane({
 	pane,
@@ -46,8 +45,8 @@ export function TerminalPane({
 			onContextMenu={onContextMenu}
 			className={cn(
 				"relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-term",
-				// 生产环境：整格 2px 内描边，配合标签红色色条与状态栏 PROD 三处呼应
-				prod && "shadow-[inset_0_0_0_2px_var(--color-env-prod)]",
+				// 生产环境提示：整格 2px 内描边
+				prod && "shadow-[inset_0_0_0_2px_var(--color-danger)]",
 			)}
 		>
 			{/* 广播输入中：顶部 2px 警告条 + 标题行胶囊，两道标识保证一眼可见 */}

@@ -2,9 +2,8 @@ import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { type TerminalHandle, type TerminalMatchInfo } from "@/components/terminal/Terminal";
 import { TerminalPane } from "@/components/terminal/TerminalPane";
 import { Button, IconButton, Kbd } from "@/components/ui/Button";
-import { EmptyState, EnvPill, EnvStripe, MetricBar, StatusDot } from "@/components/ui/Display";
+import { EmptyState, MetricBar, StatusDot } from "@/components/ui/Display";
 import {
-	ENV_NAME,
 	type ConnectionStatus,
 	type Host,
 	type SessionTab,
@@ -12,7 +11,7 @@ import {
 	type TerminalPane as TerminalPaneModel,
 } from "@/data/types";
 import { cn } from "@/lib/cn";
-import { describeProbe, probeSupported } from "@/lib/probe";
+import { probeSupported } from "@/lib/probe";
 import { filterHosts, useHostsStore } from "@/store/hosts";
 import { useProbeStore } from "@/store/probe";
 import { paneCountFor, useSessionsStore } from "@/store/sessions";
@@ -31,7 +30,7 @@ import { Link, useNavigate } from "react-router";
  * 此时给出「去主机库」的空状态），主机来自 useHostsStore，监控面板只显示
  * useProbeStore 的实测 TCP 结果 —— 没有结果就写「未接入」，不填任何假数字。
  * 右上角的「状态」切换器是骨架期评审工具，逐个复现需求书 06-终端工作区要求的状态：
- * 单屏 / 2 格 / 4 格、搜索栏、右键菜单、广播中、重连宽限期横幅、已断开覆盖层、生产环境三重标识。
+ * 单屏 / 2 格 / 4 格、搜索栏、右键菜单、广播中、重连宽限期横幅、已断开覆盖层、生产环境提示。
  * ========================================================================== */
 
 type ReviewState = "split-1" | "split-2" | "split-4" | "search" | "menu" | "broadcast" | "reconnect" | "offline" | "prod";
@@ -45,7 +44,7 @@ const REVIEW_STATES: { value: ReviewState; label: string; title: string }[] = [
 	{ value: "broadcast", label: "广播", title: "广播输入到全部终端（被广播的终端有明显标识）" },
 	{ value: "reconnect", label: "重连", title: "断线重连宽限期：顶部横幅 + 立即重连 / 关闭" },
 	{ value: "offline", label: "断开", title: "已断开覆盖层：终端变灰，按回车重新连接" },
-	{ value: "prod", label: "生产", title: "生产环境：标签红色色条 + 终端区 2px 红描边 + 状态栏 PROD" },
+	{ value: "prod", label: "生产", title: "生产环境提示：终端区红色描边" },
 ];
 
 /** 分屏数 → 网格模板（SFTP 面板占满一行，收起时少一行） */
@@ -104,7 +103,7 @@ export default function Workspace() {
 	const gridPanes = activeTab ? panesForTab(activeTab, panes) : [];
 	const focusId = gridPanes.some((p) => p.id === focusedPaneId) ? focusedPaneId : (gridPanes[0]?.id ?? "");
 	const broadcasting = Boolean(activeTab?.broadcasting);
-	const prodGuard = review === "prod" && activeTab?.env === "prod";
+	const prodGuard = review === "prod";
 	const paneStatus: ConnectionStatus =
 		review === "offline" ? "disconnected" : review === "reconnect" ? "reconnecting" : (activeTab?.status ?? "idle");
 
@@ -134,7 +133,6 @@ export default function Workspace() {
 		}
 		toast({
 			title: summary.ok > 0 ? "TCP 可达" : "TCP 不可达",
-			description: `${activeHost.hostname}:${activeHost.port} · 这不代表 SSH 一定可用`,
 			tone: summary.ok > 0 ? "success" : "danger",
 		});
 	};
@@ -320,7 +318,6 @@ export default function Workspace() {
 		closeTab(tab.id);
 		toast({
 			title: `已关闭 ${tab.title}`,
-			description: ENV_NAME[tab.env],
 			tone: "default",
 			action: { label: "撤销", run: () => reopenTab(tab) },
 		});
@@ -332,7 +329,6 @@ export default function Workspace() {
 			id,
 			hostId: null,
 			title: "本地终端",
-			env: "dev",
 			status: "connected",
 			layout: "single",
 			broadcasting: false,
@@ -498,7 +494,7 @@ export default function Workspace() {
 
 				{/* 终端主工作区 */}
 				<section ref={sectionRef} className="relative flex min-w-0 flex-1 flex-col bg-surface">
-					{/* 标签栏：高 34px，环境色条 + 状态点 + 新建标签，右侧是布局 / 评审状态 */}
+					{/* 标签栏：高 34px，状态点 + 新建标签，右侧是布局 / 评审状态 */}
 					<div className="flex h-8.5 items-end gap-1 border-b border-border bg-surface-sunk px-2">
 						{tabs.map((tab) => (
 							<TabItem
@@ -620,7 +616,6 @@ export default function Workspace() {
 							className="min-h-0 flex-1"
 							icon="icon-[lucide--square-terminal]"
 							title="还没有打开的会话"
-							description="TermX 不会凭空造出终端。去主机库挑一台主机，点开就会建立真实会话；标签栏的 + 可以起一个本地终端。"
 							action={
 								<Button variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts")}>
 									去主机库
@@ -628,12 +623,12 @@ export default function Workspace() {
 							}
 						/>
 					) : (
-						/* 分屏网格 + 底部 SFTP 面板；生产环境下整片终端区 2px 红描边 */
+						/* 分屏网格 + 底部 SFTP 面板；生产提示下整片终端区 2px 红描边 */
 						<div
 							className={cn(
 								"grid min-h-0 flex-1 gap-px bg-border",
 								gridClass,
-								prodGuard && "shadow-[inset_0_0_0_2px_var(--color-env-prod)]",
+								prodGuard && "shadow-[inset_0_0_0_2px_var(--color-danger)]",
 							)}
 						>
 							{gridPanes.map((pane) => (
@@ -680,7 +675,6 @@ export default function Workspace() {
 										className="min-h-0 flex-1"
 										icon="icon-[lucide--folder-x]"
 										title="SFTP 面板还没有数据"
-										description="列目录与传输文件需要 SSH/SFTP 通道；会话层接入后，这里显示的就是主机上的真实文件。"
 									/>
 								</div>
 							)}
@@ -748,7 +742,6 @@ export default function Workspace() {
 									<span className="tabular-nums">{Math.round(monitorReport.loss * 100)}%</span>
 								</div>
 							</div>
-							<div className="text-[10.5px] leading-4 text-faint">{describeProbe(monitorReport)}</div>
 						</div>
 					) : (
 						<div className="mt-2.5 rounded border border-border bg-surface-raised p-2.5">
@@ -756,9 +749,7 @@ export default function Workspace() {
 								<span className="icon-[lucide--plug-zap] size-3.5 text-faint" />
 								未接入
 							</div>
-							<p className="mt-1 text-[10.5px] leading-4 text-faint">
-								CPU、内存、磁盘等系统指标需要 SSH 会话建立后才能采集，当前没有数据源。
-							</p>
+							<p className="mt-1 text-[10.5px] leading-4 text-faint">建立 SSH 会话后才能采集。</p>
 						</div>
 					)}
 
@@ -833,7 +824,6 @@ function HostItem({ host, selected, onOpen }: { host: Host; selected: boolean; o
 				title={host.reachable ? "在线" : "离线"}
 			/>
 			<span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{host.name}</span>
-			{host.env === "prod" && <span className="size-1 shrink-0 rounded-full bg-env-prod" title="生产环境" />}
 		</div>
 	);
 }
@@ -862,11 +852,8 @@ function TabItem({
 					: "border-transparent bg-transparent text-muted hover:bg-surface-raised/40 hover:text-surface-foreground",
 			)}
 		>
-			{/* 环境色条：生产红、预发橙、测试绿、开发灰（需求书 03-5） */}
-			<EnvStripe env={tab.env} />
 			<StatusDot status={tab.status} size={5} />
 			<span className="max-w-[120px] truncate">{tab.title}</span>
-			{tab.env === "prod" && <EnvPill env="prod" size="xs" />}
 			<button
 				type="button"
 				onClick={(event) => {
