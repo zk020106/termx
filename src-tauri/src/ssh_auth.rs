@@ -382,7 +382,7 @@ async fn keyboard_interactive_auth<H: russh::client::Handler>(
                     ),
                 );
 
-                let answers = ask_user(app, key, prompts, &name, &instructions, &items).await?;
+                let answers = ask_user(Some(app), key, prompts, &name, &instructions, &items).await?;
                 response = session
                     .authenticate_keyboard_interactive_respond(answers)
                     .await
@@ -392,9 +392,12 @@ async fn keyboard_interactive_auth<H: russh::client::Handler>(
     }
 }
 
-/// 把这一轮的提问发给界面，并等它回答
+/// 把这一轮的提问发给界面，并等它回答。
+///
+/// `app` 为 `None` 时不发事件 —— 只给测试用：测试直接在 registry 侧作答，
+/// 从而能验证「登记等待 → 投递提问 → 等到回答」这条往返，不需要真的起界面。
 async fn ask_user(
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     key: &str,
     prompts: &AuthPromptRegistry,
     name: &str,
@@ -415,10 +418,12 @@ async fn ask_user(
             .collect(),
     };
 
-    if let Err(error) = app.emit(&format!("ssh://auth-prompt/{key}"), payload) {
-        // 事件发不出去就没人能回答，赶紧把登记撤掉，别留下一个永远等不到的通道
-        prompts.cancel(key, "无法把输入请求发给界面");
-        return Err(format!("无法把认证输入请求发给界面：{error}"));
+    if let Some(app) = app {
+        if let Err(error) = app.emit(&format!("ssh://auth-prompt/{key}"), payload) {
+            // 事件发不出去就没人能回答，赶紧把登记撤掉，别留下一个永远等不到的通道
+            prompts.cancel(key, "无法把输入请求发给界面");
+            return Err(format!("无法把认证输入请求发给界面：{error}"));
+        }
     }
 
     match tokio::time::timeout(PROMPT_TIMEOUT, receiver).await {
@@ -917,5 +922,91 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("私钥认证未通过（{user}@{host}）：{e}"));
         eprintln!("{detail}");
+    }
+
+    /// 键盘交互的核心往返：登记等待 → 投递提问 → 等到回答。
+    ///
+    /// 这里把 `app` 传 None（不发事件），直接在 registry 侧作答 ——
+    /// 模拟的正是「界面收到事件、用户填完点提交」那一端的行为。
+    #[tokio::test]
+    async fn ask_user_round_trip_delivers_prompt_and_returns_answers() {
+        let registry = Arc::new(AuthPromptRegistry::default());
+        let key = "ki-round-trip";
+        let items = vec![
+            Prompt {
+                prompt: "Password: ".to_string(),
+                echo: false,
+            },
+            Prompt {
+                prompt: "Verification code: ".to_string(),
+                echo: true,
+            },
+        ];
+
+        let answerer = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                // 登记发生在 ask_user 内部、先于等待；这里轮询到登记完成再作答
+                for _ in 0..200 {
+                    if registry
+                        .resolve(key, vec!["hunter2".to_string(), "123456".to_string()])
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                false
+            })
+        };
+
+        let answers = ask_user(None, key, &registry, "服务器", "请输入", &items)
+            .await
+            .expect("应当拿到界面提交的回答");
+
+        assert!(answerer.await.unwrap(), "应答方没能对上注册的通道");
+        assert_eq!(answers, vec!["hunter2".to_string(), "123456".to_string()]);
+    }
+
+    /// 用户取消时要立刻被唤醒，并把取消原因如实带出来，而不是干等到超时
+    #[tokio::test]
+    async fn ask_user_surfaces_cancellation_with_reason() {
+        let registry = Arc::new(AuthPromptRegistry::default());
+        let key = "ki-cancel";
+        let items = vec![Prompt {
+            prompt: "Password: ".to_string(),
+            echo: false,
+        }];
+
+        let canceller = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                registry.cancel(key, "用户取消了这次认证");
+            })
+        };
+
+        let error = ask_user(None, key, &registry, "服务器", "请输入", &items)
+            .await
+            .expect_err("被取消时应当返回错误");
+
+        canceller.await.unwrap();
+        assert!(
+            error.contains("用户取消了这次认证"),
+            "错误里要带上取消原因，实际是：{error}"
+        );
+    }
+
+    /// 登记被撤掉之后再投递回答，必须报错而不是静默丢弃
+    #[tokio::test]
+    async fn resolving_without_waiting_request_is_rejected() {
+        let registry = AuthPromptRegistry::default();
+        let error = registry
+            .resolve("nobody-waiting", vec!["x".to_string()])
+            .expect_err("没有等待中的请求时不该接受回答");
+        assert!(
+            error.contains("没有等待输入"),
+            "错误文案要说清是没有等待中的请求，实际是：{error}"
+        );
     }
 }
