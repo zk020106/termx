@@ -75,7 +75,7 @@ export default function Updater() {
 	};
 
 	return (
-		<div className="relative flex h-full flex-col items-center justify-center overflow-hidden bg-term p-4">
+		<div className="relative flex h-full flex-col items-center justify-center overflow-y-auto bg-term p-4">
 			{/* 背景虚化的主工作台光晕（token 颜色，不硬编码） */}
 			<div aria-hidden className="pointer-events-none absolute -top-10 -left-20 size-72 rounded-full bg-primary/10 blur-3xl" />
 			<div aria-hidden className="pointer-events-none absolute -right-16 bottom-0 size-80 rounded-full bg-accent/10 blur-3xl" />
@@ -129,7 +129,7 @@ export default function Updater() {
 				</div>
 
 				{/* 弹窗主体 */}
-				<div className="max-h-[480px] space-y-4 overflow-y-auto p-4">
+				<div className="max-h-[calc(100vh-9rem)] space-y-4 overflow-y-auto p-4">
 					{state === "latest" ? (
 						/* 已是最新：成功态 */
 						<div className="flex items-center gap-2.5 rounded border border-success/40 bg-success/10 px-3 py-2.5">

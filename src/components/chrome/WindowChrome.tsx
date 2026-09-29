@@ -5,13 +5,15 @@ import { TitleBar } from "@/components/chrome/TitleBar";
 import { Toaster } from "@/components/ui/Overlay";
 import { useUiStore } from "@/store/ui";
 import { useEffect, type ReactNode } from "react";
-import { useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 
 /* 应用外壳（需求书 04）：标题栏 + 活动栏 + 内容区 + 状态栏。
  * 抽屉与模态框用 absolute 定位，所以根节点必须是定位上下文（relative）。 */
 
 export function WindowChrome({ children }: { children: ReactNode }) {
 	useGlobalShortcuts();
+	// /palette 路由自带一个打开状态的命令面板，这里不能再叠一个全局浮层
+	const onPaletteRoute = useLocation().pathname.startsWith("/palette");
 
 	return (
 		<div className="relative flex h-full flex-col overflow-hidden bg-surface text-surface-foreground antialiased">
@@ -21,7 +23,7 @@ export function WindowChrome({ children }: { children: ReactNode }) {
 				<div className="flex min-w-0 flex-1 flex-col">{children}</div>
 			</div>
 			<StatusBar />
-			<CommandPalette />
+			{!onPaletteRoute && <CommandPalette />}
 			<Toaster />
 		</div>
 	);

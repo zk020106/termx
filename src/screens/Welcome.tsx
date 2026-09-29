@@ -255,7 +255,15 @@ export default function Welcome() {
 						meta="共 14 台"
 						onClick={() => setStep(1)}
 					/>
-					<EntryRow icon="icon-[lucide--plus]" title="手动创建第一台主机" meta="最少两项" onClick={() => setStep(2)} />
+					{/* 设计帧里这一项是实心主色按钮，作为「没有现成配置」时的主动作 */}
+					<button
+						type="button"
+						onClick={() => setStep(2)}
+						className="flex h-10 w-full items-center justify-center gap-2 rounded-control bg-primary text-[12px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+					>
+						<span className="icon-[lucide--plus] size-3.5" />
+						手动创建第一台主机
+					</button>
 				</div>
 
 				<div className="mt-6 flex items-center gap-4 font-mono text-[11px] text-faint">
