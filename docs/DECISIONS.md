@@ -12,7 +12,7 @@
 
 ## Q1 · 多台电脑之间要不要同步配置？
 
-**决策：不做云端账号同步，做「加密的可移植配置包」；云同步留作可选，且必须是显式确认的计划式同步。**
+**决策：不做云同步（已移出当前范围）；只做「加密的可移植配置包」，靠文件手动在机器之间搬。**
 
 依据：
 
@@ -21,11 +21,15 @@
 | OxideTerm | 有 Cloud Sync，但定位是 **plan-and-apply**：「Sync is a plan-and-apply workflow, not silent background mutation」，同步前出预览计划、冲突由人裁决（`docs/user-guide/en/architecture.md`）。便携包 `.oxide` 用 **ChaCha20-Poly1305 + Argon2id** 加密（README），且明确规定**后台同步不得静默包含托管的 SSH 密钥**，要迁移完整凭据必须走手动导出（`docs/user-guide/zh-Hans/portable-oxide.md`）|
 | Netcatty | 可见的是本地 **Vaults**（多库切换）与 grid/list/tree 三种视图，没有账号体系；平台徽章是 macOS / Windows / Linux |
 
-落到 TermX：需求书原选项 A（加密备份导入导出）+ OxideTerm 的"可移植包"形态。**这个已经实现**——
-[`src/screens/Settings.tsx`](../src/screens/Settings.tsx) 的数据与备份分区已有 `.termx` 包导出/导入、
-AES-256-GCM 加密备份（密钥由主密码经 Argon2id 派生）、冲突按主机地址合并、凭据交系统钥匙串。
+OxideTerm 的云同步本身设计得很克制（无账号、显式确认、密钥不静默上传），但**它仍然要维护同步后端、冲突裁决与凭据边界**；
+对一个个人自用、当前优先保证基础功能可用的项目来说不划算。所以：
 
-**不做**：账号注册、把配置托管给第三方服务。与两个参考的 local-first 取向一致。
+- **做**：`.termx` 加密便携包导入导出 —— 需求书原选项 A。**这个已经实现**：
+  [`src/screens/Settings.tsx`](../src/screens/Settings.tsx) 的数据与备份分区已有 `.termx` 包导出/导入、
+  AES-256-GCM 加密备份（密钥由主密码经 Argon2id 派生）、冲突按主机地址合并、凭据交系统钥匙串。
+- **不做**（本次范围外）：账号注册、把配置托管给第三方服务的同步、以及任何需要维护后端的同步。
+
+若以后要补云同步，照 OxideTerm 的三条约束来：**先出预览计划再应用、冲突人工裁决、密钥默认不进后台同步**。
 
 ---
 

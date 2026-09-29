@@ -5,17 +5,22 @@ import { Field, Input, ReadonlyValue, Select } from "@/components/ui/Input";
 import { Drawer } from "@/components/ui/Overlay";
 import { Checkbox } from "@/components/ui/Toggle";
 import { FORWARD_LABEL, type ForwardRule, type ForwardState, type ForwardType } from "@/data/types";
-import { discoveredPorts, forwardRules, hosts } from "@/data/mock";
-import { formatBytes } from "@/lib/format";
+import { cn } from "@/lib/cn";
+import { draftForwardRule, useForwardsStore } from "@/store/forwards";
+import { useHostsStore } from "@/store/hosts";
 import { toast } from "@/store/toast";
 import { useState } from "react";
+import { useNavigate } from "react-router";
 
 /* =============================================================================
- * 端口转发（路由 /forward）
- * 覆盖状态：规则列表（名称 / 类型 / 绑定 / 目标 / 状态 / 连接数 / 流量）；
- * 三种类型的抽屉表单（本地 -L、远程反向 -R、动态 SOCKS5 -D）；
- * 运行中 / 已停止 / 启动出错（出错显示原因，可换端口重试或停止）；
- * 远程自动端口发现（一键转发到本地并在浏览器打开）。
+ * 端口转发（路由 /forward）—— 规则来自 useForwardsStore()（自动落盘），主机来自 useHostsStore()。
+ * 覆盖状态：规则列表（可空）/ 三种类型的抽屉表单（本地 -L、远程反向 -R、动态 SOCKS5 -D）/
+ * 运行中 / 已停止 / 启动出错。
+ *
+ * 诚实边界：
+ * - 规则本身能真实保存、编辑、删除、开关；
+ * - 连接数与流量需要真实的转发隧道，SSH 层接入前没有数据源，一律显示 —；
+ * - 远程监听端口发现必须先建立 SSH 连接，没有连接就没有任何端口列表。
  * ========================================================================== */
 
 const STATE_TEXT: Record<ForwardState, string> = {
@@ -30,6 +35,9 @@ const SCOPE_OPTIONS: { value: ForwardState | "new"; label: string }[] = [
 	{ value: "error", label: "出错" },
 	{ value: "new", label: "新建" },
 ];
+
+/** 没有 SSH 层就拿不到真实失败原因，不编造错误信息 */
+const UNKNOWN_ERROR = "转发隧道尚未接入 SSH 层，未收到真实失败原因";
 
 function stateVisual(state: ForwardState) {
 	if (state === "running") return { text: "text-success", dot: "bg-success" };
@@ -48,15 +56,14 @@ function targetText(rule: ForwardRule) {
 }
 
 function ruleNote(rule: ForwardRule) {
-	const traffic = formatBytes(rule.trafficIn + rule.trafficOut);
-	if (rule.state === "error") return rule.error ?? `本地端口 ${rule.bindPort} 已被占用`;
-	if (rule.state === "running") return `→ ${targetText(rule)} · ${rule.connections} 个连接 · ${traffic}`;
+	if (rule.state === "error") return rule.error ?? UNKNOWN_ERROR;
+	if (rule.state === "running") return `→ ${targetText(rule)} · 隧道状态由 SSH 层维护`;
 	if (rule.error) return `上次失败：${rule.error}`;
-	return `手动启动 · → ${targetText(rule)}`;
+	return `已停止 · → ${targetText(rule)}`;
 }
 
 interface RuleDraft {
-	id: string | null;
+	id: string;
 	name: string;
 	type: ForwardType;
 	hostId: string;
@@ -67,17 +74,19 @@ interface RuleDraft {
 	autoStart: boolean;
 }
 
-function emptyDraft(): RuleDraft {
+/** 新建骨架来自 store 的 draftForwardRule()，只补上表单需要的默认主机 */
+function freshDraft(hostId: string): RuleDraft {
+	const base = draftForwardRule();
 	return {
-		id: null,
+		id: base.id,
 		name: "",
-		type: "local",
-		hostId: hosts[0]?.id ?? "",
-		bindAddress: "127.0.0.1",
+		type: base.type,
+		hostId,
+		bindAddress: base.bindAddress,
 		bindPort: "",
 		targetHost: "",
 		targetPort: "",
-		autoStart: false,
+		autoStart: base.autoStart,
 	};
 }
 
@@ -96,113 +105,61 @@ function draftFrom(rule: ForwardRule): RuleDraft {
 }
 
 export default function Forward() {
-	const [rules, setRules] = useState<ForwardRule[]>(() => forwardRules.map((r) => ({ ...r })));
-	const [selectedId, setSelectedId] = useState<string>(forwardRules[0]?.id ?? "");
+	const navigate = useNavigate();
+	const rules = useForwardsStore((s) => s.rules);
+	const upsert = useForwardsStore((s) => s.upsert);
+	const remove = useForwardsStore((s) => s.remove);
+	const setRuleState = useForwardsStore((s) => s.setRuleState);
+	const toggleAutoStart = useForwardsStore((s) => s.toggleAutoStart);
+	const hosts = useHostsStore((s) => s.hosts);
+
+	const [selectedId, setSelectedId] = useState("");
 	const [draft, setDraft] = useState<RuleDraft | null>(null);
 	const [errors, setErrors] = useState<Record<string, string>>({});
-	const [forwarded, setForwarded] = useState<number[]>([]);
 
-	const selected = rules.find((r) => r.id === selectedId) ?? rules[0] ?? null;
+	const selected = rules.find((rule) => rule.id === selectedId) ?? rules[0] ?? null;
 	const host = hosts.find((h) => h.id === selected?.hostId) ?? null;
+	const sshHost = hosts.find((h) => h.id === draft?.hostId) ?? null;
 
-	function patchRule(id: string, patch: Partial<ForwardRule>) {
-		setRules((list) => list.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+	function openNew() {
+		setErrors({});
+		if (hosts.length === 0) {
+			toast({ title: "还没有主机", description: "转发隧道跟随 SSH 主机，先去主机库添加一台。", tone: "warning" });
+			navigate("/hosts/new");
+			return;
+		}
+		setDraft(freshDraft(hosts[0].id));
 	}
 
-	/** 状态切换器：直接改写当前选中规则的状态，评审时逐个查看 */
+	/** 状态切换器：直接改写当前选中规则的启停状态，评审时逐个查看 */
 	function applyScope(next: ForwardState | "new") {
-		if (!selected) return;
 		if (next === "new") {
-			setErrors({});
-			setDraft(emptyDraft());
+			openNew();
 			return;
 		}
+		if (!selected) return;
+		setRuleState(selected.id, next, next === "error" ? UNKNOWN_ERROR : undefined);
 		if (next === "running") {
-			patchRule(selected.id, {
-				state: "running",
-				error: undefined,
-				connections: selected.connections || 2,
-				trafficIn: selected.trafficIn || 1_284_000,
-				trafficOut: selected.trafficOut || 386_000,
+			toast({
+				title: `${selected.name} 已标记为运行中`,
+				description: `${bindText(selected)} → ${targetText(selected)} · 隧道由 SSH 层启动，当前版本只保存规则状态`,
+				tone: "success",
 			});
-			toast({ title: `${selected.name} 已启动`, description: `${bindText(selected)} → ${targetText(selected)}`, tone: "success" });
-			return;
-		}
-		if (next === "stopped") {
-			patchRule(selected.id, { state: "stopped", connections: 0 });
+		} else if (next === "stopped") {
 			toast({ title: `${selected.name} 已停止`, tone: "default" });
-			return;
 		}
-		patchRule(selected.id, {
-			state: "error",
-			error: `本地端口 ${selected.bindPort} 已被占用`,
-			connections: 0,
-		});
 	}
 
-	/** 找一个没被其它规则占用的本地端口 */
-	function nextFreePort(preferred: number) {
-		const used = new Set(rules.filter((r) => r.bindAddress === "127.0.0.1").map((r) => r.bindPort));
-		let port = preferred + 1;
-		while (used.has(port) && port < 65535) port += 1;
-		return port;
-	}
-
-	function retryWithFreePort(rule: ForwardRule) {
-		const port = nextFreePort(rule.bindPort);
-		patchRule(rule.id, {
-			state: "running",
-			error: undefined,
-			bindPort: port,
-			connections: 1,
-			trafficIn: rule.trafficIn || 64_000,
-			trafficOut: rule.trafficOut || 12_000,
-		});
-		toast({ title: `已换用端口 ${port} 并重新启动`, description: `${rule.name} · ${rule.bindAddress}:${port}`, tone: "success" });
-	}
-
-	function openInBrowser(port: number) {
-		const url = `http://127.0.0.1:${port}`;
-		try {
-			window.open(url, "_blank", "noopener");
-		} catch {
-			/* 浏览器或 WebView 拦截时忽略，地址仍展示在界面上 */
-		}
-		toast({ title: `已在浏览器打开 ${url}`, tone: "default" });
-	}
-
-	function forwardPort(entry: (typeof discoveredPorts)[number]) {
-		const localPort = nextFreePort(entry.port);
-		const rule: ForwardRule = {
-			id: `fw-${entry.port}-${rules.length + 1}`,
-			name: `${entry.proc} :${entry.port}`,
-			hostId: selected?.hostId ?? hosts[0]?.id ?? "",
-			type: "local",
-			bindAddress: "127.0.0.1",
-			bindPort: localPort,
-			targetHost: entry.bind,
-			targetPort: entry.port,
-			autoStart: false,
-			state: "running",
-			connections: 1,
-			trafficIn: 0,
-			trafficOut: 0,
-		};
-		setRules((list) => [rule, ...list]);
-		setSelectedId(rule.id);
-		setForwarded((list) => (list.includes(entry.port) ? list : [...list, entry.port]));
-		toast({
-			title: `已转发 ${entry.proc} :${entry.port}`,
-			description: `本地监听 127.0.0.1:${localPort}，可直接在浏览器打开。`,
-			tone: "success",
-			action: { label: "在浏览器打开", run: () => openInBrowser(localPort) },
-		});
+	function stopRule(rule: ForwardRule) {
+		setRuleState(rule.id, "stopped", undefined);
+		toast({ title: `${rule.name} 已停止`, tone: "default" });
 	}
 
 	function submitDraft() {
 		if (!draft) return;
 		const next: Record<string, string> = {};
 		if (!draft.name.trim()) next.name = "请填写规则名称";
+		if (!draft.hostId) next.hostId = "请选择这条隧道跟随的 SSH 主机";
 		const bindPort = Number(draft.bindPort);
 		if (!draft.bindPort.trim() || !Number.isInteger(bindPort) || bindPort < 1 || bindPort > 65535) {
 			next.bindPort = "端口需为 1-65535 的整数";
@@ -219,51 +176,40 @@ export default function Forward() {
 		setErrors(next);
 		if (Object.keys(next).length > 0) return;
 
-		const targetPort = draft.type === "dynamic" ? null : Number(draft.targetPort);
-		if (draft.id) {
-			patchRule(draft.id, {
-				name: draft.name.trim(),
-				type: draft.type,
-				hostId: draft.hostId,
-				bindAddress: draft.bindAddress.trim(),
-				bindPort,
-				targetHost: draft.type === "dynamic" ? null : draft.targetHost.trim(),
-				targetPort,
-				autoStart: draft.autoStart,
-				error: undefined,
-			});
-			toast({ title: `已保存规则 ${draft.name.trim()}`, tone: "success" });
-		} else {
-			const rule: ForwardRule = {
-				id: `fw-new-${rules.length + 1}`,
-				name: draft.name.trim(),
-				hostId: draft.hostId,
-				type: draft.type,
-				bindAddress: draft.bindAddress.trim(),
-				bindPort,
-				targetHost: draft.type === "dynamic" ? null : draft.targetHost.trim(),
-				targetPort,
-				autoStart: draft.autoStart,
-				state: draft.autoStart ? "running" : "stopped",
-				connections: draft.autoStart ? 1 : 0,
-				trafficIn: 0,
-				trafficOut: 0,
-			};
-			setRules((list) => [rule, ...list]);
-			setSelectedId(rule.id);
-			toast({ title: `已创建规则 ${rule.name}`, description: `${bindText(rule)} → ${targetText(rule)}`, tone: "success" });
-		}
+		const existing = rules.find((rule) => rule.id === draft.id);
+		const rule: ForwardRule = {
+			id: draft.id,
+			name: draft.name.trim(),
+			hostId: draft.hostId,
+			type: draft.type,
+			bindAddress: draft.bindAddress.trim() || "127.0.0.1",
+			bindPort,
+			targetHost: draft.type === "dynamic" ? null : draft.targetHost.trim(),
+			targetPort: draft.type === "dynamic" ? null : Number(draft.targetPort),
+			autoStart: draft.autoStart,
+			state: existing?.state ?? "stopped",
+			connections: existing?.connections ?? 0,
+			trafficIn: existing?.trafficIn ?? 0,
+			trafficOut: existing?.trafficOut ?? 0,
+			error: existing?.error,
+		};
+		upsert(rule);
+		setSelectedId(rule.id);
 		setDraft(null);
+		toast({
+			title: existing ? `已保存规则 ${rule.name}` : `已创建规则 ${rule.name}`,
+			description: `${bindText(rule)} → ${targetText(rule)}`,
+			tone: "success",
+		});
 	}
 
 	function removeRule(rule: ForwardRule) {
-		setRules((list) => list.filter((r) => r.id !== rule.id));
+		remove(rule.id);
 		setSelectedId((id) => (id === rule.id ? "" : id));
 		toast({ title: `已删除规则 ${rule.name}`, tone: "default" });
 	}
 
-	const visual = selected ? stateVisual(selected.state) : stateVisual("stopped");
-	const sshHost = hosts.find((h) => h.id === draft?.hostId) ?? null;
+	const visual = stateVisual(selected?.state ?? "stopped");
 
 	return (
 		<WindowChrome>
@@ -275,21 +221,13 @@ export default function Forward() {
 							<span className="icon-[lucide--waypoints] size-3.5 text-primary" />
 							<h1 className="text-[12px] font-semibold text-surface-foreground">端口转发规则</h1>
 						</div>
-						<Button
-							size="sm"
-							variant="primary"
-							icon="icon-[lucide--plus]"
-							onClick={() => {
-								setErrors({});
-								setDraft(emptyDraft());
-							}}
-						>
+						<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
 							新建
 						</Button>
 					</div>
 
 					<div className="border-b border-border/40 px-3 py-1.5 text-[10.5px] font-medium tracking-wider text-faint uppercase">
-						{host?.name ?? "未关联主机"} · 自动探测 {discoveredPorts.length} 条端口
+						{host?.name ?? "未关联主机"} · 共 {rules.length} 条规则
 					</div>
 
 					<div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2">
@@ -297,11 +235,21 @@ export default function Forward() {
 							<EmptyState
 								icon="icon-[lucide--waypoints]"
 								title="还没有转发规则"
-								description="新建一条规则，把远程端口映射到本地。"
+								description={
+									hosts.length === 0
+										? "转发隧道跟随 SSH 主机：先去主机库添加一台主机，再回来新建规则。"
+										: "新建一条规则，把远程端口映射到本地；规则会保存在本机。"
+								}
 								action={
-									<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={() => setDraft(emptyDraft())}>
-										新建规则
-									</Button>
+									hosts.length === 0 ? (
+										<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts/new")}>
+											新建主机
+										</Button>
+									) : (
+										<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
+											新建规则
+										</Button>
+									)
 								}
 							/>
 						) : (
@@ -313,18 +261,19 @@ export default function Forward() {
 										key={rule.id}
 										type="button"
 										onClick={() => setSelectedId(rule.id)}
-										className={`w-full rounded border p-2.5 text-left transition-colors ${
+										className={cn(
+											"w-full rounded border p-2.5 text-left transition-colors",
 											active && rule.state === "error"
 												? "border-danger/40 bg-surface-raised shadow-sm"
 												: active
 													? "border-border bg-surface-raised shadow-sm"
-													: "border-border bg-surface hover:border-primary/40"
-										}`}
+													: "border-border bg-surface hover:border-primary/40",
+										)}
 									>
 										<div className="flex items-center justify-between gap-2 text-[12px]">
 											<span className="truncate font-medium text-surface-foreground">{rule.name}</span>
-											<span className={`flex shrink-0 items-center gap-1 font-mono text-[10.5px] ${tone.text}`}>
-												<span className={`size-1.5 rounded-full ${tone.dot}`} />
+											<span className={cn("flex shrink-0 items-center gap-1 font-mono text-[10.5px]", tone.text)}>
+												<span className={cn("size-1.5 rounded-full", tone.dot)} />
 												{STATE_TEXT[rule.state]}
 											</span>
 										</div>
@@ -337,9 +286,10 @@ export default function Forward() {
 										</div>
 
 										<div
-											className={`mt-1 truncate text-[10.5px] ${
-												rule.state === "error" ? "text-danger" : rule.error ? "text-warning" : "text-faint"
-											}`}
+											className={cn(
+												"mt-1 truncate text-[10.5px]",
+												rule.state === "error" ? "text-danger" : rule.error ? "text-warning" : "text-faint",
+											)}
 										>
 											{ruleNote(rule)}
 										</div>
@@ -375,49 +325,50 @@ export default function Forward() {
 											{host && <EnvPill env={host.env} size="xs" />}
 										</div>
 										<div className="mt-1 flex items-center gap-2 font-mono text-[11px] text-muted">
-											<span className={`size-1.5 rounded-full ${visual.dot}`} />
+											<span className={cn("size-1.5 rounded-full", visual.dot)} />
 											<span className={visual.text}>{STATE_TEXT[selected.state]}</span>
 											<span className="text-faint">·</span>
-											<span className="truncate">
-												{host ? `${host.username}@${host.hostname}` : "未关联主机"}
-											</span>
+											<span className="truncate">{host ? `${host.username}@${host.hostname}` : "未关联主机"}</span>
 											{selected.autoStart && <span className="text-faint">· 连接后自动启动</span>}
 										</div>
 									</div>
 									<div className="flex shrink-0 items-center gap-1.5">
-										<Button size="sm" icon="icon-[lucide--edit-3]" onClick={() => setDraft(draftFrom(selected))}>
-											编辑
-										</Button>
 										<Button
 											size="sm"
-											variant="ghost"
-											icon="icon-[lucide--trash-2]"
-											onClick={() => removeRule(selected)}
+											icon="icon-[lucide--edit-3]"
+											onClick={() => {
+												setErrors({});
+												setDraft(draftFrom(selected));
+											}}
 										>
+											编辑
+										</Button>
+										<Button size="sm" variant="ghost" icon="icon-[lucide--trash-2]" onClick={() => removeRule(selected)}>
 											删除
 										</Button>
 									</div>
 								</div>
 
-								{/* 出错原因 + 换端口 / 停止 */}
+								{/* 出错原因（没有 SSH 层时如实说明） */}
 								{selected.state === "error" ? (
 									<div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-danger/30 bg-danger/10 p-2.5 text-[11.5px] text-danger">
 										<span className="icon-[lucide--alert-circle] size-4 shrink-0" />
 										<span className="min-w-0 flex-1">
-											{selected.error ?? `本地端口 ${selected.bindPort} 已被占用`}。建议换用端口{" "}
-											{nextFreePort(selected.bindPort)} 或终止占用进程。
+											{selected.error ?? UNKNOWN_ERROR}。可以改绑一个空闲端口，或先把状态切回「已停止」。
 										</span>
 										<div className="flex items-center gap-1.5">
-											<Button size="sm" variant="primary" icon="icon-[lucide--zap]" onClick={() => retryWithFreePort(selected)}>
-												改用 {nextFreePort(selected.bindPort)} 并重试启动
-											</Button>
 											<Button
 												size="sm"
+												variant="primary"
+												icon="icon-[lucide--pencil-line]"
 												onClick={() => {
-													patchRule(selected.id, { state: "stopped", connections: 0 });
-													toast({ title: `${selected.name} 已停止`, tone: "default" });
+													setErrors({});
+													setDraft(draftFrom(selected));
 												}}
 											>
+												修改绑定端口
+											</Button>
+											<Button size="sm" onClick={() => stopRule(selected)}>
 												停止规则
 											</Button>
 										</div>
@@ -425,9 +376,17 @@ export default function Forward() {
 								) : selected.error ? (
 									<div className="mt-3 flex items-center gap-2 rounded border border-warning/30 bg-warning/10 p-2.5 text-[11.5px] text-warning">
 										<span className="icon-[lucide--history] size-4 shrink-0" />
-										<span>上次启动失败：{selected.error}。可换端口后重新启动。</span>
-										<Button size="sm" variant="ghost" icon="icon-[lucide--zap]" onClick={() => retryWithFreePort(selected)}>
-											换端口重试
+										<span>上次启动失败：{selected.error}。可修改端口后重新启动。</span>
+										<Button
+											size="sm"
+											variant="ghost"
+											icon="icon-[lucide--pencil-line]"
+											onClick={() => {
+												setErrors({});
+												setDraft(draftFrom(selected));
+											}}
+										>
+											编辑规则
 										</Button>
 									</div>
 								) : null}
@@ -439,9 +398,10 @@ export default function Forward() {
 											{selected.type === "remote" ? "远程监听地址" : "本地监听地址"}
 										</label>
 										<div
-											className={`flex h-7.5 items-center rounded border bg-surface px-2.5 font-mono text-[12px] text-surface-foreground ${
-												selected.state === "error" ? "border-danger/60" : "border-border"
-											}`}
+											className={cn(
+												"flex h-7.5 items-center rounded border bg-surface px-2.5 font-mono text-[12px] text-surface-foreground",
+												selected.state === "error" ? "border-danger/60" : "border-border",
+											)}
 										>
 											{bindText(selected)}
 										</div>
@@ -454,38 +414,31 @@ export default function Forward() {
 									</div>
 								</div>
 
-								{/* 运行指标 */}
+								{/* 运行指标：没有真实隧道就没有数据源 */}
 								<div className="mt-4 grid grid-cols-3 gap-3">
-									<MetricCell label="当前连接数" value={String(selected.connections)} />
-									<MetricCell label="入站流量" value={formatBytes(selected.trafficIn)} />
-									<MetricCell label="出站流量" value={formatBytes(selected.trafficOut)} />
+									<MetricCell label="当前连接数" value="—" />
+									<MetricCell label="入站流量" value="—" />
+									<MetricCell label="出站流量" value="—" />
 								</div>
+								<p className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-faint">
+									<span className="icon-[lucide--info] size-3" />
+									连接数与流量需要真实的转发隧道；SSH 层接入前没有数据源，因此显示 —。
+								</p>
 
 								<div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-3">
 									<Checkbox
 										checked={selected.autoStart}
-										onChange={(checked) => patchRule(selected.id, { autoStart: checked })}
+										onChange={() => toggleAutoStart(selected.id)}
 										label="主机连接建立后自动启动此转发规则"
 										className="min-w-0"
 									/>
 									<div className="flex shrink-0 items-center gap-2">
 										{selected.state === "running" ? (
-											<Button
-												size="sm"
-												onClick={() => {
-													patchRule(selected.id, { state: "stopped", connections: 0 });
-													toast({ title: `${selected.name} 已停止`, tone: "default" });
-												}}
-											>
+											<Button size="sm" onClick={() => stopRule(selected)}>
 												停止转发
 											</Button>
 										) : (
-											<Button
-												size="sm"
-												variant="primary"
-												icon="icon-[lucide--play]"
-												onClick={() => applyScope("running")}
-											>
+											<Button size="sm" variant="primary" icon="icon-[lucide--play]" onClick={() => applyScope("running")}>
 												启动转发
 											</Button>
 										)}
@@ -496,10 +449,10 @@ export default function Forward() {
 							<div className="rounded-lg border border-border bg-surface-raised">
 								<EmptyState
 									icon="icon-[lucide--waypoints]"
-									title="未选择转发规则"
-									description="从左侧选择一条规则查看详情，或新建一条本地 / 远程 / 动态转发。"
+									title="还没有转发规则"
+									description="新建一条规则，把远程端口映射到本地；规则会保存到本机，随时可以编辑或删除。"
 									action={
-										<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={() => setDraft(emptyDraft())}>
+										<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
 											新建规则
 										</Button>
 									}
@@ -507,75 +460,37 @@ export default function Forward() {
 							</div>
 						)}
 
-						{/* 远程自动端口发现 */}
+						{/* 远程自动端口发现：必须先有 SSH 连接 */}
 						<div>
 							<div className="mb-2 flex items-center justify-between">
 								<div className="flex items-center gap-2">
 									<span className="icon-[lucide--radio] size-3.5 text-primary" />
 									<h3 className="text-[13px] font-semibold text-surface-foreground">远程自动端口发现</h3>
 								</div>
-								<span className="font-mono text-[11px] text-faint">检测到 {discoveredPorts.length} 个监听端口</span>
+								<span className="font-mono text-[11px] text-faint">监听端口 —</span>
 							</div>
 
 							<div className="overflow-hidden rounded-lg border border-border bg-surface">
-								<div className="grid grid-cols-[72px_120px_1fr_72px_150px] border-b border-border bg-surface-sunk/60 px-3 py-1.5 font-mono text-[10.5px] text-faint uppercase">
-									<span>端口</span>
-									<span>绑定地址</span>
-									<span>进程名称</span>
-									<span>PID</span>
-									<span className="text-right">操作</span>
-								</div>
-
-								<div className="divide-y divide-border/30 font-mono text-[11.5px]">
-									{discoveredPorts.map((entry) => {
-										const done = forwarded.includes(entry.port);
-										const localRule = rules.find((r) => r.type === "local" && r.targetPort === entry.port);
-										return (
-											<div
-												key={entry.port}
-												className="grid grid-cols-[72px_120px_1fr_72px_150px] items-center px-3 py-1.5 transition-colors hover:bg-surface-raised"
-											>
-												<span className="flex items-center gap-1 font-medium text-primary">
-													{entry.suggested && (
-														<span className="icon-[lucide--sparkles] size-3 text-warning" title="建议转发" />
-													)}
-													{entry.port}
-												</span>
-												<span className="truncate text-muted">{entry.bind}</span>
-												<span className="truncate font-sans text-surface-foreground">{entry.proc}</span>
-												<span className="text-faint">{entry.pid}</span>
-												<div className="flex items-center justify-end gap-1.5">
-													{done ? (
-														<>
-															<span className="font-sans text-[10.5px] text-success">已转发</span>
-															<Button
-																size="sm"
-																variant="ghost"
-																icon="icon-[lucide--external-link]"
-																onClick={() => openInBrowser(localRule?.bindPort ?? entry.port)}
-															>
-																浏览器打开
-															</Button>
-														</>
-													) : (
-														<Button
-															size="sm"
-															icon="icon-[lucide--waypoints]"
-															onClick={() => forwardPort(entry)}
-															className="font-sans"
-														>
-															一键转发
-														</Button>
-													)}
-												</div>
-											</div>
-										);
-									})}
-								</div>
+								<EmptyState
+									icon="icon-[lucide--radio]"
+									title="没有可发现的远程监听端口"
+									description="需要先建立 SSH 连接，TermX 才能读取远程主机上的监听端口。当前没有已连接的会话，所以这里不显示任何端口。"
+									action={
+										hosts.length === 0 ? (
+											<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts/new")}>
+												新建主机
+											</Button>
+										) : (
+											<Button size="sm" variant="primary" icon="icon-[lucide--terminal]" onClick={() => navigate("/hosts")}>
+												去打开会话
+											</Button>
+										)
+									}
+								/>
 							</div>
 
 							<p className="mt-2 text-[10.5px] text-faint">
-								转发后本地监听 127.0.0.1 上的空闲端口，点「浏览器打开」即可访问该服务。
+								连接建立后，这里会列出远程实际监听的端口，并支持一键转发到本地空闲端口。
 							</p>
 						</div>
 					</div>
@@ -587,7 +502,7 @@ export default function Forward() {
 				open={draft !== null}
 				onClose={() => setDraft(null)}
 				width={480}
-				title={draft?.id ? "编辑转发规则" : "新建转发规则"}
+				title={rules.some((rule) => rule.id === draft?.id) ? "编辑转发规则" : "新建转发规则"}
 				subtitle={
 					draft
 						? draft.type === "dynamic"
@@ -603,7 +518,7 @@ export default function Forward() {
 							取消
 						</Button>
 						<Button size="sm" variant="primary" icon="icon-[lucide--check]" onClick={submitDraft}>
-							{draft?.id ? "保存规则" : "创建规则"}
+							{rules.some((rule) => rule.id === draft?.id) ? "保存规则" : "创建规则"}
 						</Button>
 					</>
 				}
@@ -631,8 +546,9 @@ export default function Forward() {
 							/>
 						</Field>
 
-						<Field label="所属主机" hint="转发隧道跟随该 SSH 连接">
+						<Field label="所属主机" required error={errors.hostId} hint="转发隧道跟随该 SSH 连接">
 							<Select value={draft.hostId} onChange={(e) => setDraft({ ...draft, hostId: e.target.value })}>
+								<option value="">选择一台主机…</option>
 								{hosts.map((h) => (
 									<option key={h.id} value={h.id}>
 										{h.name} · {h.username}@{h.hostname}
@@ -717,7 +633,7 @@ export default function Forward() {
 														}:${draft.targetPort || "?"}`
 													: `-D ${draft.bindAddress || "127.0.0.1"}:${draft.bindPort || "?"}`
 										} ${sshHost.username}@${sshHost.hostname} -p ${sshHost.port}`
-									: "ssh -N ..."}
+									: "选择所属主机后显示等价命令"}
 							</div>
 						</Field>
 

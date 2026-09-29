@@ -1,8 +1,11 @@
 import { EnvPill, StatusDot } from "@/components/ui/Display";
 import { CONNECTION_LABEL, ENV_LABEL, type ConnectionStatus, type Host } from "@/data/types";
 import { cn } from "@/lib/cn";
+import { describeProbe } from "@/lib/probe";
 import { connVisual } from "@/lib/status";
 import { useHostsStore } from "@/store/hosts";
+import { useForwardsStore } from "@/store/forwards";
+import { useProbeStore } from "@/store/probe";
 import { useSessionsStore } from "@/store/sessions";
 import { transferSummary, useTransfersStore } from "@/store/transfers";
 import { Link } from "react-router";
@@ -16,10 +19,22 @@ export function StatusBar() {
 	const host = useHostsStore((s) => (tab?.hostId ? s.hosts.find((h) => h.id === tab.hostId) : undefined));
 	const transfers = useTransfersStore((s) => s.items);
 	const summary = transferSummary(transfers);
+	// 真实转发规则里处于 running 的条数；一条都没有就如实说「未启用」
+	const runningForwards = useForwardsStore((s) => s.rules.filter((r) => r.state === "running").length);
 
 	const status: ConnectionStatus = tab?.status ?? "idle";
 	const visual = connVisual[status];
 	const reconnecting = status === "reconnecting";
+
+	// 延迟优先用实测结果（主机库点过测速就有），否则回落到主机自身的种子数据
+	const probe = useProbeStore((s) => (host ? s.results[host.id] : undefined));
+	const latencyText = probe
+		? probe.reachable
+			? `${Math.round(probe.avg_ms)} ms`
+			: "不可达"
+		: host?.latencyMs != null
+			? `${host.latencyMs} ms`
+			: null;
 
 	return (
 		<footer className="flex h-6 shrink-0 items-center gap-2 border-t border-border bg-surface-sunk px-3 font-mono text-[11px] text-muted">
@@ -41,10 +56,15 @@ export function StatusBar() {
 				</>
 			)}
 
-			{host?.latencyMs != null && (
+			{latencyText && (
 				<>
 					<Divider />
-					<span className="tabular-nums text-surface-foreground">{host.latencyMs} ms</span>
+					<span
+						className={cn("tabular-nums", probe ? (probe.reachable ? "text-surface-foreground" : "text-danger") : "text-surface-foreground")}
+						title={probe ? describeProbe(probe) : undefined}
+					>
+						{latencyText}
+					</span>
 				</>
 			)}
 
@@ -77,7 +97,7 @@ export function StatusBar() {
 
 			<Divider />
 			<Link to="/forward" className="font-sans text-faint hover:text-surface-foreground">
-				转发 3 条活跃
+				{runningForwards > 0 ? `转发 ${runningForwards} 条活跃` : "转发未启用"}
 			</Link>
 
 			<div className="ml-auto flex items-center gap-2">

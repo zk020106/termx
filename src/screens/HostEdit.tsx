@@ -1,20 +1,21 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button } from "@/components/ui/Button";
-import { EnvPill, Segmented, SectionLabel } from "@/components/ui/Display";
+import { EmptyState, EnvPill, Segmented, SectionLabel } from "@/components/ui/Display";
 import { Field, Input, ReadonlyValue, Select, Textarea } from "@/components/ui/Input";
 import { Checkbox, Switch } from "@/components/ui/Toggle";
 import { Drawer, Modal } from "@/components/ui/Overlay";
-import { sshKeys } from "@/data/mock";
 import { ENV_NAME, type AuthMethod, type Env, type Host } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
+import { useKeysStore } from "@/store/keys";
 import { toast } from "@/store/toast";
 import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router";
 
 /* 编辑主机（对应 termx.vetd/frames/host-edit.tsx）。
  * 覆盖状态（需求书 06）：新建 / 编辑两种模式；基本信息、认证、跳板机、高级、外观五个分区；
- * 校验失败（名称 / 地址为空、端口非法）；未保存离开提示。 */
+ * 校验失败（名称 / 地址为空、端口非法）；未保存离开提示。
+ * 数据来源：主机与分组来自 useHostsStore()，可选私钥来自 useKeysStore()；保存调用 upsertHost，真实落盘。 */
 
 type TabKey = "basic" | "auth" | "jump" | "advanced" | "appearance";
 
@@ -78,19 +79,29 @@ export default function HostEdit() {
 	const { hostId } = useParams();
 	const editing = Boolean(hostId);
 
-	const [form, setForm] = useState<FormState>(() => toForm(findHost(hostId)));
-	const [initial, setInitial] = useState<FormState>(() => toForm(findHost(hostId)));
+	/* 真实数据源：主机库 / 密钥库都在 store 里，保存后自动落盘 */
+	const hosts = useHostsStore((s) => s.hosts);
+	const groups = useHostsStore((s) => s.groups);
+	const addGroup = useHostsStore((s) => s.addGroup);
+	const upsertHost = useHostsStore((s) => s.upsertHost);
+	const keys = useKeysStore((s) => s.keys);
+	const host = hosts.find((h) => h.id === hostId);
+
+	const [form, setForm] = useState<FormState>(() => toForm(host, keys[0]?.id));
+	const [initial, setInitial] = useState<FormState>(() => toForm(host, keys[0]?.id));
 	const [tab, setTab] = useState<TabKey>("basic");
 	const [errors, setErrors] = useState<Record<string, string>>({});
 	const [showErrors, setShowErrors] = useState(false);
 	const [leaveOpen, setLeaveOpen] = useState(false);
+	const [groupOpen, setGroupOpen] = useState(false);
+	const [groupName, setGroupName] = useState("");
 	const [demo, setDemo] = useState<DemoState>(editing ? "edit" : "new");
 
 	const dirty = JSON.stringify(form) !== JSON.stringify(initial);
 
 	/* 路由变化（新建 ⇄ 编辑）时重建表单 */
 	useEffect(() => {
-		const next = toForm(findHost(hostId));
+		const next = toForm(host, keys[0]?.id);
 		setForm(next);
 		setInitial(next);
 		setErrors({});
@@ -111,10 +122,27 @@ export default function HostEdit() {
 		}
 		if (next === "leave") setLeaveOpen(true);
 		if (next === "new") navigate("/hosts/new");
-		if (next === "edit") navigate(`/hosts/${useHostsStore.getState().hosts[0]?.id ?? "order-api-01"}/edit`);
+		if (next === "edit") {
+			const first = hosts[0];
+			if (!first) {
+				toast({ title: "主机库还是空的", description: "先保存一台主机，再切到编辑态。", tone: "warning" });
+				return;
+			}
+			navigate(`/hosts/${first.id}/edit`);
+		}
 	};
 
 	const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((f) => ({ ...f, [key]: value }));
+
+	/** 新建分组：真实写入主机库的 groups，并把当前表单归到新分组 */
+	const createGroup = () => {
+		const name = groupName.trim();
+		if (!name) return;
+		const created = addGroup(name);
+		set("groupId", created.id);
+		setGroupOpen(false);
+		toast({ title: `已创建分组 ${created.name}`, description: "保存主机后分组归属才会生效。" });
+	};
 
 	const handleClose = () => {
 		if (dirty) {
@@ -125,16 +153,16 @@ export default function HostEdit() {
 	};
 
 	const save = () => {
-		const next = validate(form);
-		setErrors(next);
+		const problems = validate(form);
+		setErrors(problems);
 		setShowErrors(true);
-		if (Object.keys(next).length > 0) {
+		if (Object.keys(problems).length > 0) {
 			setTab("basic");
 			setDemo("invalid");
 			return;
 		}
-		const existing = findHost(hostId);
-		const host: Host = {
+		const existing = host;
+		const record: Host = {
 			id: hostId ?? `host-${Date.now().toString(36)}`,
 			name: form.name.trim(),
 			groupId: form.groupId || null,
@@ -151,7 +179,10 @@ export default function HostEdit() {
 			spec: existing?.spec,
 			auth: {
 				method: form.authMethod,
-				keyId: form.authMethod === "key" || form.authMethod === "key-passphrase" ? form.keyId : undefined,
+				keyId:
+					form.authMethod === "key" || form.authMethod === "key-passphrase"
+						? form.keyId || keys[0]?.id
+						: undefined,
 				rememberPassword: form.rememberPassword,
 			},
 			jumpHostIds: form.jumpHostIds,
@@ -173,20 +204,18 @@ export default function HostEdit() {
 			latencyMs: existing?.latencyMs,
 			reachable: existing?.reachable ?? false,
 		};
-		useHostsStore.getState().upsertHost(host);
+		upsertHost(record);
 		setInitial(form);
 		setLeaveOpen(false);
 		toast({
-			title: hostId ? `已保存 ${host.name}` : `已新建主机 ${host.name}`,
-			description: `${host.username}@${host.hostname}:${host.port}`,
+			title: existing ? `已保存 ${record.name}` : `已新建主机 ${record.name}`,
+			description: `${record.username}@${record.hostname}:${record.port}`,
 			tone: "success",
 		});
 		navigate("/hosts");
 	};
 
 	const err = (key: string) => (showErrors ? errors[key] : undefined);
-	const hosts = useHostsStore((s) => s.hosts);
-	const groups = useHostsStore((s) => s.groups);
 	const activeGroup = groups.find((g) => g.id === form.groupId);
 	const underlying = hosts.slice(0, 6);
 	const jumpCandidates = hosts.filter((h) => h.id !== hostId && !form.jumpHostIds.includes(h.id));
@@ -204,19 +233,37 @@ export default function HostEdit() {
 					<span className="mr-[480px] font-mono text-[11px] text-faint">{hosts.length} 台节点</span>
 				</div>
 
-				<div className="grid grid-cols-3 content-start gap-3 p-4 pr-[480px]">
-					{underlying.map((h) => (
-						<div key={h.id} className="rounded-card border border-border bg-surface-raised p-3 text-[12px]">
-							<div className="flex items-center justify-between gap-2">
-								<span className="truncate font-mono font-medium text-surface-foreground">{h.name}</span>
-								<EnvPill env={h.env} size="xs" />
-							</div>
-							<div className="mt-1 truncate font-mono text-[11px] text-muted">
-								{h.username}@{h.hostname}
-							</div>
+				{underlying.length === 0 ? (
+					<div className="p-4 pr-[480px]">
+						<div className="rounded-card border border-border bg-surface-raised">
+							<EmptyState
+								icon="icon-[lucide--server-off]"
+								title="还没有主机"
+								description="主机库是空的：填好右侧表单保存第一台主机，它就会出现在这里。"
+								action={
+									<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts")}>
+										去主机库
+									</Button>
+								}
+								className="py-10"
+							/>
 						</div>
-					))}
-				</div>
+					</div>
+				) : (
+					<div className="grid grid-cols-3 content-start gap-3 p-4 pr-[480px]">
+						{underlying.map((h) => (
+							<div key={h.id} className="rounded-card border border-border bg-surface-raised p-3 text-[12px]">
+								<div className="flex items-center justify-between gap-2">
+									<span className="truncate font-mono font-medium text-surface-foreground">{h.name}</span>
+									<EnvPill env={h.env} size="xs" />
+								</div>
+								<div className="mt-1 truncate font-mono text-[11px] text-muted">
+									{h.username}@{h.hostname}
+								</div>
+							</div>
+						))}
+					</div>
+				)}
 
 				{/* 编辑抽屉 */}
 				<Drawer
@@ -261,6 +308,13 @@ export default function HostEdit() {
 							<div className="flex items-start gap-2 rounded-control border border-danger/40 bg-danger/10 px-2.5 py-2 text-[11px] text-danger">
 								<span className="icon-[lucide--circle-alert] mt-px size-3.5 shrink-0" />
 								<span>有 {Object.keys(errors).length} 处校验未通过，请修正后再保存。</span>
+							</div>
+						)}
+
+						{editing && !host && (
+							<div className="flex items-start gap-2 rounded-control border border-warning/40 bg-warning/10 px-2.5 py-2 text-[11px] text-warning">
+								<span className="icon-[lucide--triangle-alert] mt-px size-3.5 shrink-0" />
+								<span>找不到这台主机（可能已被删除）。现在保存会以同一个 id 重新创建它。</span>
 							</div>
 						)}
 
@@ -326,7 +380,7 @@ export default function HostEdit() {
 								</Group>
 
 								<div className="grid grid-cols-2 gap-2">
-									<Field label="所属分组">
+									<Field label="所属分组" hint={groups.length === 0 ? "还没有分组，点下面新建一个" : undefined}>
 										<Select value={form.groupId} onChange={(e) => set("groupId", e.target.value)}>
 											<option value="">未分组</option>
 											{groups.map((g) => (
@@ -340,6 +394,19 @@ export default function HostEdit() {
 										<Input value={form.tags} onChange={(e) => set("tags", e.target.value)} placeholder="java, 订单" />
 									</Field>
 								</div>
+
+								<Button
+									size="sm"
+									variant="ghost"
+									icon="icon-[lucide--folder-plus]"
+									className="self-start"
+									onClick={() => {
+										setGroupName("");
+										setGroupOpen(true);
+									}}
+								>
+									新建分组
+								</Button>
 							</>
 						)}
 
@@ -370,15 +437,32 @@ export default function HostEdit() {
 								)}
 
 								{(form.authMethod === "key" || form.authMethod === "key-passphrase") && (
-									<Field label="指定私钥身份">
-										<Select value={form.keyId} onChange={(e) => set("keyId", e.target.value)} className="font-mono">
-											{sshKeys.map((k) => (
-												<option key={k.id} value={k.id}>
-													{k.name} · {k.type}
-													{k.bits ? ` ${k.bits}` : ""} · {k.fingerprint}
-												</option>
-											))}
-										</Select>
+									<Field
+										label="指定私钥身份"
+										hint={keys.length === 0 ? "密钥库还是空的：先去登记一把公钥" : undefined}
+									>
+										{keys.length === 0 ? (
+											<div className="flex items-center gap-2 rounded-control border border-border bg-surface px-2.5 py-1.5 text-[11px] text-muted">
+												<span className="icon-[lucide--key-round] size-3.5 text-faint" />
+												<span className="min-w-0 flex-1">还没有可选的密钥。</span>
+												<Button size="sm" variant="ghost" icon="icon-[lucide--arrow-up-right]" onClick={() => navigate("/keys")}>
+													去密钥库
+												</Button>
+											</div>
+										) : (
+											<Select
+												value={form.keyId || keys[0].id}
+												onChange={(e) => set("keyId", e.target.value)}
+												className="font-mono"
+											>
+												{keys.map((k) => (
+													<option key={k.id} value={k.id}>
+														{k.name} · {k.type}
+														{k.bits ? ` ${k.bits}` : ""} · {k.fingerprint}
+													</option>
+												))}
+											</Select>
+										)}
 									</Field>
 								)}
 
@@ -695,6 +779,35 @@ export default function HostEdit() {
 					</div>
 				</Modal>
 
+				{/* 新建分组 */}
+				<Modal
+					open={groupOpen}
+					onClose={() => setGroupOpen(false)}
+					title="新建主机分组"
+					icon="icon-[lucide--folder-plus]"
+					width={380}
+					footer={
+						<>
+							<Button size="sm" onClick={() => setGroupOpen(false)}>
+								取消
+							</Button>
+							<Button
+								size="sm"
+								variant="primary"
+								icon="icon-[lucide--check]"
+								disabled={groupName.trim() === ""}
+								onClick={createGroup}
+							>
+								创建分组
+							</Button>
+						</>
+					}
+				>
+					<Field label="分组名称" required hint="分组会保存到主机库">
+						<Input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="例如：生产集群" />
+					</Field>
+				</Modal>
+
 				{/* 状态切换器（骨架期评审工具） */}
 				<div className="absolute bottom-3 left-3 z-50 flex items-center gap-2 rounded-card border border-border bg-surface-raised px-2 py-1.5 shadow-lg">
 					<span className="text-[10px] font-medium tracking-wider text-faint uppercase">状态</span>
@@ -743,12 +856,7 @@ function Group({ label, hint, children }: { label: string; hint?: string; childr
 
 /* ---------------------------------- 逻辑 ---------------------------------- */
 
-function findHost(hostId?: string) {
-	if (!hostId) return undefined;
-	return useHostsStore.getState().hosts.find((h) => h.id === hostId);
-}
-
-function toForm(host?: Host): FormState {
+function toForm(host?: Host, defaultKeyId?: string): FormState {
 	return {
 		name: host?.name ?? "",
 		hostname: host?.hostname ?? "",
@@ -760,7 +868,7 @@ function toForm(host?: Host): FormState {
 		authMethod: host?.auth.method ?? "key",
 		password: "",
 		rememberPassword: host?.auth.rememberPassword ?? false,
-		keyId: host?.auth.keyId ?? sshKeys[0]?.id ?? "",
+		keyId: host?.auth.keyId ?? defaultKeyId ?? "",
 		passphrase: "",
 		jumpHostIds: host?.jumpHostIds ?? [],
 		encoding: host?.encoding ?? "UTF-8",

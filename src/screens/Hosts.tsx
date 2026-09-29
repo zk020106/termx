@@ -4,10 +4,12 @@ import { EmptyState, EnvPill, EnvStripe, Segmented, StatusDot } from "@/componen
 import { Input, Select } from "@/components/ui/Input";
 import type { Host } from "@/data/types";
 import { cn } from "@/lib/cn";
+import { describeProbe, latencyTier, latencyTierClass, probeSupported } from "@/lib/probe";
 import { filterHosts, useHostsStore, type HostScope } from "@/store/hosts";
+import { useProbeStore } from "@/store/probe";
 import { toast } from "@/store/toast";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useLocation } from "react-router";
 
 /* 主机库（对应 termx.vetd/frames/hosts.tsx）。
  * 覆盖状态（需求书 06）：卡片 / 列表 / 树形三视图（保持选中项）、空状态、
@@ -30,10 +32,58 @@ const QUICK_VIEWS: { scope: HostScope; label: string; icon: string }[] = [
 	{ scope: "jump", label: "跳板节点", icon: "icon-[lucide--waypoints]" },
 ];
 
+/** 延迟单元格：有实测结果就显示实测，没有就回落到种子数据。
+ *  实测结论是「TCP 可达」，不等于 SSH 可用，所以 tooltip 里写明口径。 */
+function LatencyCell({
+	host,
+	showDot,
+	className,
+}: {
+	host: Host;
+	showDot?: boolean;
+	className?: string;
+}) {
+	const report = useProbeStore((s) => s.results[host.id]);
+	const probing = useProbeStore((s) => s.probing.includes(host.id));
+
+	const base = "flex items-center gap-1 font-mono text-[10.5px] tabular-nums";
+
+	if (probing) {
+		return (
+			<span className={cn(base, "text-primary", className)}>
+				<span className="icon-[lucide--activity] size-3 animate-pulse" />
+				测速中
+			</span>
+		);
+	}
+
+	if (report) {
+		const tier = latencyTier(report);
+		return (
+			<span className={cn(base, latencyTierClass[tier], className)} title={describeProbe(report)}>
+				{showDot && <StatusDot status={report.reachable ? "connected" : "failed"} size={6} />}
+				{tier === "intercepted" && <span className="icon-[lucide--shield-alert] size-3" />}
+				{report.reachable ? `${Math.round(report.avg_ms)} ms` : "不可达"}
+			</span>
+		);
+	}
+
+	return (
+		<span
+			className={cn(base, host.reachable ? "text-success" : "text-faint", className)}
+			title="种子数据；点「测速」获取实测延迟"
+		>
+			{showDot && <StatusDot status={host.reachable ? "connected" : "disconnected"} size={6} />}
+			{host.reachable ? `${host.latencyMs ?? "—"} ms` : "离线"}
+		</span>
+	);
+}
+
 export default function Hosts() {
 	const navigate = useNavigate();
 	const store = useHostsStore();
 	const { hosts, groups, view, query, scope, activeGroupId, selectedIds, draggingId } = store;
+	const probingAny = useProbeStore((s) => s.probing.length > 0);
 
 	const [demo, setDemo] = useState<DemoState>("default");
 	const [collapsed, setCollapsed] = useState<string[]>([]);
@@ -65,14 +115,16 @@ export default function Hosts() {
 		s.setDragging(null);
 	}, [demo]);
 
-	const shown = demo === "empty" ? [] : filterHosts(store);
-	const total = demo === "empty" ? 0 : hosts.length;
-	const online = demo === "empty" ? 0 : hosts.filter((h) => h.reachable).length;
+	// 首次启动主机库本来就是空的（没有种子数据），这时的空状态是真实状态而非演示
+	const libraryEmpty = demo === "empty" || hosts.length === 0;
+	const shown = libraryEmpty ? [] : filterHosts(store);
+	const total = libraryEmpty ? 0 : hosts.length;
+	const online = libraryEmpty ? 0 : hosts.filter((h) => h.reachable).length;
 	const dragging = hosts.find((h) => h.id === draggingId);
 
-	const groupCount = (id: string) => (demo === "empty" ? 0 : hosts.filter((h) => h.groupId === id).length);
+	const groupCount = (id: string) => (libraryEmpty ? 0 : hosts.filter((h) => h.groupId === id).length);
 	const scopeCount = (s: HostScope) => {
-		if (demo === "empty") return 0;
+		if (libraryEmpty) return 0;
 		if (s === "online") return hosts.filter((h) => h.reachable).length;
 		if (s === "favorites") return hosts.filter((h) => h.favorite).length;
 		return hosts.filter((h) => h.jumpHostIds.length === 0 && hosts.some((x) => x.jumpHostIds.includes(h.id))).length;
@@ -82,6 +134,50 @@ export default function Hosts() {
 		toast({ title: `正在连接 ${host.name}`, description: `${host.username}@${host.hostname}:${host.port}`, tone: "default" });
 		navigate(`/connect?host=${host.id}`);
 	};
+
+	/** 测速：真实的 TCP 连接延迟探测，结果进 useProbeStore 供各界面共用 */
+	const runProbe = async (targets: Host[]) => {
+		if (targets.length === 0) return;
+		if (!probeSupported()) {
+			toast({
+				title: "测速需要在桌面端运行",
+				description: "浏览器预览里没有原生网络层，跑 pnpm tauri:dev 即可。",
+				tone: "warning",
+			});
+			return;
+		}
+
+		const result = await useProbeStore
+			.getState()
+			.run(targets.map((h) => ({ id: h.id, host: h.hostname, port: h.port })), { attempts: 3, timeoutMs: 1500 });
+
+		if (!result) {
+			toast({ title: "测速失败", description: "原生探测没有返回结果。", tone: "danger" });
+			return;
+		}
+
+		toast({
+			title: `测速完成：${result.ok} 台 TCP 可达`,
+			description: [
+				result.fail > 0 ? `${result.fail} 台不可达（悬停延迟可看原因）。` : "全部 TCP 可达。",
+				result.intercepted > 0
+					? `其中 ${result.intercepted} 台往返不足 1 毫秒，疑似被本地代理/中间盒接管，不代表真的连到了那些主机。`
+					: "",
+				"口径是 TCP 连通，不等于 SSH 可用。",
+			]
+				.filter(Boolean)
+				.join(""),
+			tone: result.fail === 0 && result.intercepted === 0 ? "success" : "warning",
+		});
+	};
+
+	// 自检/深链用：带 ?probe=1 进入主机库时自动对当前筛选结果测一次速（需原生壳）
+	const { search } = useLocation();
+	useEffect(() => {
+		if (new URLSearchParams(search).get("probe") !== "1") return;
+		void runProbe(shown);
+		// 有意只依赖 search：进入时触发一次，之后由按钮驱动
+	}, [search]);
 
 	return (
 		<WindowChrome>
@@ -178,6 +274,16 @@ export default function Hosts() {
 						</div>
 
 						<div className="flex items-center gap-2">
+							<Button
+								size="sm"
+								icon="icon-[lucide--gauge]"
+								className="h-6.5 px-2.5"
+								disabled={probingAny}
+								title={probeSupported() ? "对当前筛选出的主机做 TCP 延迟探测" : "测速需在桌面端运行"}
+								onClick={() => void runProbe(shown)}
+							>
+								{probingAny ? "测速中…" : "测速"}
+							</Button>
 							<Segmented
 								value={view}
 								onChange={(v) => useHostsStore.getState().setView(v)}
@@ -194,18 +300,28 @@ export default function Hosts() {
 					</div>
 
 					{/* 主体：三视图 + 空状态 */}
-					{demo === "empty" ? (
+					{libraryEmpty ? (
 						<div className="min-h-0 flex-1">
 							<EmptyState
 								icon="icon-[lucide--server-off]"
 								title="主机库还是空的"
-								description="导入 ~/.ssh/config，或手动新建第一台主机开始管理你的服务器。"
+								description="这里的每一台主机都由你自己录入，并会保存在本地配置文件里。手动新建第一台开始吧。"
 								action={
 									<div className="flex items-center gap-2">
 										<Button variant="primary" size="sm" icon="icon-[lucide--plus]" onClick={() => navigate("/hosts/new")}>
 											新建主机
 										</Button>
-										<Button size="sm" icon="icon-[lucide--download]" onClick={() => setDemo("default")}>
+										<Button
+											size="sm"
+											icon="icon-[lucide--download]"
+											onClick={() =>
+												toast({
+													title: "尚未接入 ~/.ssh/config 解析",
+													description: "解析本机 SSH 配置需要读取文件系统，还没有实现。",
+													tone: "warning",
+												})
+											}
+										>
 											导入 ~/.ssh/config
 										</Button>
 									</div>
@@ -331,14 +447,7 @@ export default function Hosts() {
 																{h.os?.name ?? "未识别系统"} · {h.username}
 															</span>
 															<span className="flex items-center gap-2">
-																<span
-																	className={cn(
-																		"flex items-center gap-1 font-mono text-[10.5px] tabular-nums",
-																		h.reachable ? "text-success" : "text-faint",
-																	)}
-																>
-																	{h.reachable ? `${h.latencyMs} ms` : "离线"}
-																</span>
+																<LatencyCell host={h} />
 																<span className="hidden items-center gap-0.5 group-hover:flex">
 																	<IconAction icon="icon-[lucide--terminal]" label="连接" onClick={() => openHost(h)} />
 																	<IconAction icon="icon-[lucide--pencil]" label="编辑" onClick={() => navigate(`/hosts/${h.id}/edit`)} />
@@ -372,6 +481,14 @@ export default function Hosts() {
 						<span className="h-4 w-px bg-border" />
 						<Button size="sm" variant="primary" icon="icon-[lucide--terminal]" onClick={() => navigate("/connect")}>
 							批量连接
+						</Button>
+						<Button
+							size="sm"
+							icon="icon-[lucide--gauge]"
+							disabled={probingAny}
+							onClick={() => void runProbe(hosts.filter((h) => selectedIds.includes(h.id)))}
+						>
+							{probingAny ? "测速中…" : "测速选中"}
 						</Button>
 						<div className="flex items-center gap-1">
 							<Select
@@ -545,10 +662,7 @@ function HostCard({
 					</button>
 					<span className="truncate text-faint">{host.os?.name ?? "未识别系统"}</span>
 				</span>
-				<span className={cn("flex shrink-0 items-center gap-1 font-mono tabular-nums", host.reachable ? "text-success" : "text-faint")}>
-					<StatusDot status={host.reachable ? "connected" : "disconnected"} size={6} />
-					{host.reachable ? `${host.latencyMs ?? "—"} ms` : "离线"}
-				</span>
+				<LatencyCell host={host} showDot className="shrink-0" />
 			</div>
 		</div>
 	);
@@ -605,10 +719,7 @@ function HostRow({
 				{host.tags.length > 0 && <span className="mr-1.5 text-muted">{host.tags.map((t) => `#${t}`).join(" ")}</span>}
 				{host.spec}
 			</span>
-			<span className={cn("flex w-[76px] shrink-0 items-center justify-end gap-1 font-mono text-[10.5px] tabular-nums", host.reachable ? "text-success" : "text-faint")}>
-				<StatusDot status={host.reachable ? "connected" : "disconnected"} size={6} />
-				{host.reachable ? `${host.latencyMs ?? "—"} ms` : "离线"}
-			</span>
+			<LatencyCell host={host} showDot className="w-[76px] shrink-0 justify-end" />
 			<span className="flex w-[92px] shrink-0 items-center justify-end gap-0.5">
 				<span className="hidden items-center gap-0.5 group-hover:flex">
 					<IconAction icon="icon-[lucide--terminal]" label="连接" onClick={onOpen} />

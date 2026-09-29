@@ -2,24 +2,26 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { terminalPanes } from "@/data/mock";
 import { attachPty, resizePty, writePty, type PtyAttachment } from "./ptyCache";
+import {
+	attachSsh,
+	hasSshSession,
+	resizeSsh,
+	sshKeyForHost,
+	writeSsh,
+	type SshAttachment,
+} from "./sshCache";
 import { useHostsStore } from "@/store/hosts";
-import { useSessionsStore } from "@/store/sessions";
 import { useThemeStore } from "@/store/theme";
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
-import { extraScreen, renderLine, resolveVariant, SESSION_BANNER, type DemoVariant } from "./demoContent";
-import { demoEcho } from "./demoEcho";
 import { buildXtermTheme, fg, readMonoFont, readPalette } from "./terminalTheme";
 
 /* =============================================================================
  * 终端分屏格 —— xterm 6 的 React 封装。
  *
  * - Tauri 内：spawnLocalShell() 起真实 PTY，键盘输入写回 PTY，输出直接写终端。
- * - 浏览器内：spawnLocalShell() 返回 null（没有 Rust 壳），降级为演示模式 ——
- *   把 @/data/mock 里 terminalPanes 中本格的 lines 用 renderLine 上色打印，
- *   用户敲命令回车后追加一行 input 并回显一段模拟输出。这样自检截图不必启动
- *   原生壳也能看出真实观感。
+ * - 浏览器内：没有 Rust 壳也就没有 PTY。此时只打印一条诚实的说明，告诉用户
+ *   怎么拿到真实终端；不回显按键、不伪造任何命令输出。
  *
  * 颜色全部来自 terminalTheme 的 token 解析，本文件不出现任何颜色字面量。
  * ========================================================================== */
@@ -66,11 +68,9 @@ export function Terminal({
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const termRef = useRef<XTerm | null>(null);
 	const attachRef = useRef<PtyAttachment | null>(null);
-	const demoRef = useRef(false);
-	/** 演示模式下把文本塞进终端的入口（粘贴走这里） */
-	const feedRef = useRef<(data: string) => void>(() => {});
-	/** 重画提示符（清屏后用） */
-	const repromptRef = useRef<() => void>(() => {});
+	/** 当前这格没有真实 PTY（浏览器预览 / PTY 启动失败）：只显示说明，不伪造输出 */
+	const noPtyRef = useRef(false);
+	const sshRef = useRef<SshAttachment | null>(null);
 	const matchesRef = useRef<Match[]>([]);
 	const cursorRef = useRef(0);
 	const resolvedTheme = useThemeStore((s) => s.resolved);
@@ -97,15 +97,9 @@ export function Terminal({
 		term.open(container);
 		termRef.current = term;
 
-		// mock 里本格的预置输出与元信息（演示模式的素材来源）
-		const preset = terminalPanes.find((p) => p.id === paneId);
-		const variant: DemoVariant = preset ? resolveVariant(preset.subtitle) : hostId ? "deploy" : "shell";
-		const prompt = panePrompt(hostId, preset?.title);
-
 		let disposed = false;
-		let demoStarted = false;
 		let raf = 0;
-		let typed = "";
+		noPtyRef.current = false;
 
 		const fitNow = () => {
 			if (disposed || !term.element?.parentElement) return;
@@ -117,95 +111,71 @@ export function Terminal({
 		};
 
 		const writeLine = (text: string) => term.write(`${text}\r\n`);
-		const writePrompt = () => term.write(`${fg(palette.primary, prompt)} `);
+		/** 说明性文字：不带任何伪造的命令输出 */
+		const writeNote = (text: string) => writeLine(fg(palette.faint, text));
 
-		const startDemo = () => {
-			if (demoStarted || disposed) return;
-			demoStarted = true;
-			demoRef.current = true;
-			(preset?.lines ?? SESSION_BANNER).forEach((line) => writeLine(renderLine(line, palette)));
-			extraScreen(variant, palette).forEach(writeLine);
-			writeLine(fg(palette.faint, "— 演示模式（浏览器内无 Rust 壳）：直接输入命令回车，看看回显 —"));
-			writePrompt();
-			fitNow();
-		};
-
-		/** 回车：把当前输入追加为一行 input，再回显一段模拟输出 */
-		const submit = () => {
-			const command = typed;
-			typed = "";
-			term.write("\r\n");
-			if (command.trim()) {
-				useSessionsStore.getState().appendLine(paneId, { kind: "input", text: `${prompt} ${command}` });
-			}
-			if (/^(clear|cls)$/.test(command.trim())) {
-				term.clear();
-				writePrompt();
-				return;
-			}
-			demoEcho(command, palette).forEach(writeLine);
-			writePrompt();
-		};
-
-		const feed = (data: string) => {
-			if (disposed) return;
-			let text = data;
-			if (text.includes("\u001b")) {
-				// 方向键、功能键等转义序列在演示模式里没有语义，直接忽略；
-				// 但括号粘贴要放行，否则粘贴命令会没反应。
-				const paste = /\u001b\[200~([\s\S]*?)\u001b\[201~/.exec(text);
-				if (!paste) return;
-				text = paste[1];
-			}
-			for (const ch of text) {
-				if (ch === "\r" || ch === "\n") submit();
-				else if (ch === "\u007f") {
-					if (!typed) continue;
-					typed = typed.slice(0, -1);
-					term.write("\b \b");
-				} else if (ch === "\u0003") {
-					typed = "";
-					term.write(`${fg(palette.warning, "^C")}\r\n`);
-					writePrompt();
-				} else if (ch === "\u000c") {
-					term.clear();
-					writePrompt();
-				} else if ((ch.codePointAt(0) ?? 0) >= 0x20) {
-					typed += ch;
-					term.write(ch);
-				}
-			}
-		};
-
-		feedRef.current = feed;
-		repromptRef.current = writePrompt;
+		// 这一格连的是哪台主机：有真实 SSH 会话就走 SSH，否则才考虑本地 PTY
+		const sshKey = hostId ? sshKeyForHost(hostId) : null;
+		const usingSsh = Boolean(sshKey && hasSshSession(sshKey));
 
 		const dataSub = term.onData((data) => {
-			// 真实 PTY 可用就写给它，否则走演示回显
-			if (!writePty(paneId, data)) feed(data);
+			// 只有真实会话才接收按键：SSH 会话优先，其次本地 PTY；
+			// 两者都没有时既不回显也不伪造输出。
+			if (usingSsh && sshKey) {
+				writeSsh(sshKey, data);
+				return;
+			}
+			writePty(paneId, data);
 		});
-		const resizeSub = term.onResize(({ cols, rows }) => resizePty(paneId, cols, rows));
+		const resizeSub = term.onResize(({ cols, rows }) => {
+			if (usingSsh && sshKey) resizeSsh(sshKey, cols, rows);
+			else resizePty(paneId, cols, rows);
+		});
 
-		// 真实 PTY 只在原生壳里有。会话由 ptyCache 持有，独立于组件生命周期，
-		// 因此 StrictMode 的「挂载→卸载→再挂载」以及分屏重建都不会丢掉 shell 的输出。
-		const attached = attachPty(
-			paneId,
-			term.cols,
-			term.rows,
-			(chunk) => term.write(chunk),
-			(code) => writeLine(fg(palette.faint, `会话已结束（退出码 ${code ?? 0}）`)),
-		);
-		attachRef.current = attached;
-
-		if (!attached) {
-			// 浏览器内没有 Rust 壳：同步出画面，避免首帧空屏
-			startDemo();
+		if (usingSsh && sshKey) {
+			// 远端会话：会话由 sshCache 持有，这里只负责把输出接上终端
+			const attachment = attachSsh(
+				sshKey,
+				(chunk) => term.write(chunk),
+				(code) =>
+					writeLine(
+						fg(palette.faint, code === null ? "远端会话已结束" : `远端会话已结束（退出码 ${code}）`),
+					),
+			);
+			sshRef.current = attachment;
+			attachRef.current = null;
+			if (attachment?.replay) term.write(attachment.replay);
+		} else if (sshKey) {
+			// 选了主机但还没建立 SSH 会话：如实说明，**不能**偷偷开一个本地 shell
+			noPtyRef.current = true;
+			writeNote("这台主机还没有建立 SSH 会话。请在主机库对它发起连接。");
 		} else {
-			// 会话可能已经有输出（组件重建 / StrictMode 演练），先回放再接续
-			if (attached.replay) term.write(attached.replay);
-			void attached.ready.then((ok) => {
-				if (!ok && !disposed) startDemo();
-			});
+			// 本地终端：真实 PTY 只在原生壳里有。会话由 ptyCache 持有，独立于组件生命周期，
+			// 因此 StrictMode 的「挂载→卸载→再挂载」以及分屏重建都不会丢掉 shell 的输出。
+			const attached = attachPty(
+				paneId,
+				term.cols,
+				term.rows,
+				(chunk) => term.write(chunk),
+				(code) => writeLine(fg(palette.faint, `会话已结束（退出码 ${code ?? 0}）`)),
+			);
+			attachRef.current = attached;
+			sshRef.current = null;
+
+			if (!attached) {
+				// 浏览器预览：没有 Rust 壳就没有 PTY。如实说明，不打印任何假日志。
+				noPtyRef.current = true;
+				writeNote("浏览器预览下没有本地 PTY。用 pnpm tauri:dev 启动桌面端即可获得真实终端。");
+			} else {
+				// 会话可能已经有输出（组件重建 / StrictMode 演练），先回放再接续
+				if (attached.replay) term.write(attached.replay);
+				void attached.ready.then((ok) => {
+					if (!ok && !disposed) {
+						noPtyRef.current = true;
+						writeNote("本地 PTY 未能启动（spawn_local_shell 失败）。请在桌面端查看日志后重试。");
+					}
+				});
+			}
 		}
 
 		fitNow();
@@ -224,12 +194,12 @@ export function Terminal({
 			window.cancelAnimationFrame(raf);
 			dataSub.dispose();
 			resizeSub.dispose();
-			// 只解绑订阅；会话本身由 ptyCache 延迟销毁，避免误杀
+			// 只解绑订阅；会话本身由 ptyCache / sshCache 持有，避免误杀
 			attachRef.current?.detach();
 			attachRef.current = null;
-			feedRef.current = () => {};
-			repromptRef.current = () => {};
-			demoRef.current = false;
+			sshRef.current?.detach();
+			sshRef.current = null;
+			noPtyRef.current = false;
 			matchesRef.current = [];
 			cursorRef.current = 0;
 			termRef.current = null;
@@ -247,13 +217,13 @@ export function Terminal({
 		ref,
 		(): TerminalHandle => ({
 			getSelection: () => termRef.current?.getSelection() ?? "",
-			isDemo: () => demoRef.current,
+			/** true = 这格没有真实 PTY（浏览器预览），界面上只有那条说明 */
+			isDemo: () => noPtyRef.current,
 			focus: () => termRef.current?.focus(),
 			clear: () => {
 				const term = termRef.current;
 				if (!term) return;
 				term.clear();
-				if (demoRef.current) repromptRef.current();
 			},
 			copySelection: async () => {
 				const text = termRef.current?.getSelection() ?? "";
@@ -286,8 +256,9 @@ export function Terminal({
 					return false;
 				}
 				if (!text) return false;
-				if (!writePty(paneId, text)) feedRef.current(text);
-				return true;
+				// 有真实会话才谈得上粘贴：SSH 优先，其次本地 PTY；都没有就如实返回失败
+				if (hostId && writeSsh(sshKeyForHost(hostId), text)) return true;
+				return writePty(paneId, text);
 			},
 			saveScreen: () => {
 				const term = termRef.current;
@@ -331,7 +302,7 @@ export function Terminal({
 		[],
 	);
 
-	return <div ref={containerRef} className={className} data-pane={paneId} />;
+	return <div ref={containerRef} className={className} data-pane={paneId} data-host={hostId ?? undefined} />;
 }
 
 /** 提示符：优先按主机信息推导（deploy@order-api-01:~$），本地终端给 PowerShell 风格 */

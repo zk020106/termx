@@ -4,12 +4,15 @@ import { Badge, Panel, ProgressBar, Segmented } from "@/components/ui/Display";
 import { Field, Input, ReadonlyValue, Select } from "@/components/ui/Input";
 import { Drawer, Modal } from "@/components/ui/Overlay";
 import { Checkbox, SettingRow, Switch } from "@/components/ui/Toggle";
-import { updateInfo } from "@/data/mock";
 import type { ThemeMode } from "@/data/types";
 import { cn } from "@/lib/cn";
+import { detectPlatform } from "@/lib/platform";
 import { useThemeStore } from "@/store/theme";
 import { toast } from "@/store/toast";
 import { useEffect, useMemo, useState } from "react";
+
+/** 运行平台：真实探测，不再写死「Windows x64」 */
+const PLATFORM_LABEL = { windows: "Windows", macos: "macOS", linux: "Linux" }[detectPlatform()];
 import { Link } from "react-router";
 
 /* =============================================================================
@@ -204,7 +207,6 @@ export default function Settings() {
 	const [sshConfig, setSshConfig] = useState("~/.ssh/config");
 	const [dedupe, setDedupe] = useState(true);
 	const [importing, setImporting] = useState(false);
-	const [imported, setImported] = useState<{ hosts: number; keys: number } | null>(null);
 
 	const keysOf = (row: Binding) => overrides[row.id] ?? row.keys;
 
@@ -268,9 +270,13 @@ export default function Settings() {
 		setImporting(true);
 		window.setTimeout(() => {
 			setImporting(false);
-			setImported({ hosts: 9, keys: 3 });
-			toast({ title: "已导入 ~/.ssh/config", description: "解析到 9 台主机与 3 个密钥引用。", tone: "success" });
-		}, 900);
+			// 如实说明：读本机 ~/.ssh/config 需要文件系统访问，这一步还没接入
+			toast({
+				title: "尚未接入 ~/.ssh/config 解析",
+				description: "解析本机 SSH 配置需要读取文件系统，还没有实现。",
+				tone: "warning",
+			});
+		}, 600);
 	};
 
 	const cursorClass =
@@ -310,9 +316,9 @@ export default function Settings() {
 						<div className="flex items-center gap-1.5">
 							<span className="icon-[lucide--terminal] size-3.5 text-primary" />
 							<span className="text-[11.5px] font-medium text-surface-foreground">TermX Desktop</span>
-							<Badge>v{updateInfo.currentVersion}</Badge>
+							<Badge>v{__APP_VERSION__}</Badge>
 						</div>
-						<div className="mt-1 font-mono text-[10px] text-faint">Build 2026.09.24 · Windows x64</div>
+						<div className="mt-1 font-mono text-[10px] text-faint">{PLATFORM_LABEL} · 本地配置</div>
 						<Link
 							to="/updater"
 							className="mt-2 flex h-6 items-center justify-center gap-1 rounded-control border border-border bg-surface-raised text-[11px] font-medium text-muted transition-colors hover:text-surface-foreground"
@@ -855,34 +861,19 @@ export default function Settings() {
 										/>
 
 										{importing && <ProgressBar value={70} />}
-
-										{imported && !importing && (
-											<div className="flex items-center justify-between rounded border border-success/40 bg-success/10 px-2.5 py-2 text-[11px] text-success">
-												<span>
-													解析完成：{imported.hosts} 台主机 · {imported.keys} 个密钥引用 · 2 条 ProxyJump 规则
-												</span>
-												<button
-													type="button"
-													className="cursor-pointer font-mono text-[10.5px] text-success underline"
-													onClick={() => toast({ title: "已打开导入预览", description: "9 台主机等待确认写入。", tone: "default" })}
-												>
-													查看预览 &gt;
-												</button>
-											</div>
-										)}
 									</div>
 								</Panel>
 
 								<Panel title={<><span className="icon-[lucide--sparkles] size-3.5 text-primary" />关于与版本更新</>}>
-									<SettingRow title="当前版本" description={`Build 2026.09.24 · Windows x64 · ${updateInfo.channel === "stable" ? "稳定通道" : "尝鲜通道"}`}>
+									<SettingRow title="当前版本" description={`${PLATFORM_LABEL} · 更新服务尚未接入`}>
 										<div className="flex items-center gap-2">
-											<span className="font-mono text-[11.5px] text-surface-foreground">v{updateInfo.currentVersion}</span>
+											<span className="font-mono text-[11.5px] text-surface-foreground">v{__APP_VERSION__}</span>
 											<Link
 												to="/updater"
 												className="flex h-6 items-center gap-1 rounded-control bg-primary px-2 text-[11.5px] font-medium text-primary-foreground"
 											>
 												<span className="icon-[lucide--zap] size-3" />
-												v{updateInfo.latestVersion} 已就绪
+												检查更新
 											</Link>
 										</div>
 									</SettingRow>

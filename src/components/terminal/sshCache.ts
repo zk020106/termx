@@ -1,0 +1,183 @@
+import { listenSsh, sshConnect, sshDisconnect, sshResize, sshWrite, type SshPhase } from "@/lib/ssh";
+
+/* =============================================================================
+ * SSH 会话缓存：与本地终端的 ptyCache 同构，把会话挂在模块级。
+ *
+ * 为什么要有它：连接是在「连接过程」界面发起的，而终端在「工作区」里才挂载。
+ * 两者之间会有一段空窗，这段时间的输出必须先缓冲，等终端挂上来再回放，
+ * 否则登录横幅（motd）和首个提示符就丢了——那正是最能证明「真的连上了」的东西。
+ *
+ * 凭据只存在内存：密码用于建立会话，不写进配置文件、不落盘。
+ * 应用退出即消失。
+ * ========================================================================== */
+
+/** 会话键：按主机 id 派生，保证同一台主机复用同一条连接 */
+export function sshKeyForHost(hostId: string): string {
+	return `ssh:${hostId}`;
+}
+
+interface Entry {
+	buffer: string;
+	subs: Set<(chunk: string) => void>;
+	exitSubs: Set<(code: number | null) => void>;
+	phase: SshPhase | null;
+	phaseSubs: Set<(phase: SshPhase) => void>;
+	connected: boolean;
+	failed: string | null;
+	unlisten: (() => void) | null;
+}
+
+const sessions = new Map<string, Entry>();
+const MAX_BUFFER = 256 * 1024;
+
+function ensureEntry(key: string): Entry {
+	let entry = sessions.get(key);
+	if (!entry) {
+		entry = {
+			buffer: "",
+			subs: new Set(),
+			exitSubs: new Set(),
+			phase: null,
+			phaseSubs: new Set(),
+			connected: false,
+			failed: null,
+			unlisten: null,
+		};
+		sessions.set(key, entry);
+	}
+	return entry;
+}
+
+/** 会话是否已经建立（终端据此决定走 SSH 还是本地 shell） */
+export function hasSshSession(key: string): boolean {
+	return sessions.get(key)?.connected ?? false;
+}
+
+/** 上一次失败原因，用于界面提示 */
+export function sshFailure(key: string): string | null {
+	return sessions.get(key)?.failed ?? null;
+}
+
+export interface SshOpenResult {
+	ok: boolean;
+	error?: string;
+}
+
+/**
+ * 发起连接。订阅事件 → 调后端 → 等首个 success 阶段。
+ * 期间所有输出都进缓冲，终端挂上来即可回放。
+ */
+export async function openSshSession(
+	key: string,
+	options: { host: string; port: number; username: string; password: string; cols: number; rows: number },
+	onPhase?: (phase: SshPhase) => void,
+): Promise<SshOpenResult> {
+	const entry = ensureEntry(key);
+
+	if (entry.connected) return { ok: true };
+
+	// 先挂监听再发起连接：否则登录横幅会在监听就绪前发出而丢失
+	if (!entry.unlisten) {
+		entry.unlisten = await listenSsh(key, {
+			onPhase: (phase) => {
+				entry.phase = phase;
+				for (const sub of entry.phaseSubs) sub(phase);
+				onPhase?.(phase);
+				if (phase.phase === "failed") entry.failed = phase.detail;
+				if (phase.phase === "shell" && phase.ok) entry.connected = true;
+			},
+			onData: (chunk) => {
+				if (entry.subs.size === 0) {
+					entry.buffer = (entry.buffer + chunk).slice(-MAX_BUFFER);
+					return;
+				}
+				for (const sub of entry.subs) sub(chunk);
+			},
+			onExit: (code) => {
+				entry.connected = false;
+				for (const sub of entry.exitSubs) sub(code);
+			},
+		});
+	}
+
+	const failed = new Promise<string>((resolve) => {
+		const watch = (phase: SshPhase) => {
+			if (phase.phase === "failed") {
+				entry.phaseSubs.delete(watch);
+				resolve(phase.detail);
+			}
+		};
+		entry.phaseSubs.add(watch);
+	});
+
+	const ready = new Promise<string>((resolve) => {
+		const watch = (phase: SshPhase) => {
+			if (phase.phase === "shell" && phase.ok) {
+				entry.phaseSubs.delete(watch);
+				resolve("");
+			}
+		};
+		entry.phaseSubs.add(watch);
+	});
+
+	try {
+		await sshConnect({ key, ...options });
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		entry.failed = message;
+		return { ok: false, error: message };
+	}
+
+	// 认证失败等会在过程中通过 failed 事件回来，谁先到用谁
+	const outcome = await Promise.race([ready, failed]);
+	return outcome ? { ok: false, error: outcome } : { ok: true };
+}
+
+export interface SshAttachment {
+	/** 挂载前的既有输出（登录横幅 + 首个提示符） */
+	replay: string;
+	detach: () => void;
+}
+
+/** 终端挂到会话上；没有会话时返回 null，由调用方决定怎么提示 */
+export function attachSsh(
+	key: string,
+	onData: (chunk: string) => void,
+	onExit: (code: number | null) => void,
+): SshAttachment | null {
+	const entry = sessions.get(key);
+	if (!entry) return null;
+
+	entry.subs.add(onData);
+	entry.exitSubs.add(onExit);
+
+	return {
+		replay: entry.buffer,
+		detach: () => {
+			entry.subs.delete(onData);
+			entry.exitSubs.delete(onExit);
+		},
+	};
+}
+
+export function writeSsh(key: string, data: string): boolean {
+	const entry = sessions.get(key);
+	if (!entry?.connected) return false;
+	void sshWrite(key, data);
+	return true;
+}
+
+export function resizeSsh(key: string, cols: number, rows: number): void {
+	if (!sessions.get(key)?.connected) return;
+	void sshResize(key, cols, rows);
+}
+
+export async function closeSshSession(key: string): Promise<void> {
+	const entry = sessions.get(key);
+	if (!entry) return;
+	await sshDisconnect(key);
+	entry.unlisten?.();
+	entry.unlisten = null;
+	entry.connected = false;
+	sessions.delete(key);
+}

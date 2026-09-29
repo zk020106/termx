@@ -1,27 +1,33 @@
 import { EmptyState, SectionLabel } from "@/components/ui/Display";
-import { snippets } from "@/data/mock";
-import { useState } from "react";
+import { useSnippetsStore } from "@/store/snippets";
 import { toast } from "@/store/toast";
+import { useState } from "react";
 
 /* 右侧工具面板里的命令片段速用条：不离开工作区就能发一条常用命令。
+ * 数据来自用户自己的片段库（useSnippetsStore，自动落盘）。
  * 完整管理（增删改、变量填写、目标选择）在 /snippets 界面。 */
 
 export function SnippetsMiniPanel({ hostName }: { hostName?: string }) {
+	const snippets = useSnippetsStore((s) => s.snippets);
 	const [query, setQuery] = useState("");
 
-	const groups = [...new Set(snippets.map((s) => s.group))];
+	if (snippets.length === 0) {
+		return (
+			<div className="flex min-h-0 flex-1 flex-col">
+				<EmptyState
+					icon="icon-[lucide--square-terminal]"
+					title="还没有命令片段"
+					description="在「命令片段」里把常用的排查、发布命令存起来，之后不离开工作区就能一键发送。"
+				/>
+			</div>
+		);
+	}
+
 	const q = query.trim().toLowerCase();
 	const matched = q
 		? snippets.filter((s) => [s.name, s.command, s.group].some((f) => f.toLowerCase().includes(q)))
 		: snippets;
-
-	if (matched.length === 0) {
-		return (
-			<div className="flex min-h-0 flex-1 flex-col">
-				<EmptyState icon="icon-[lucide--search-x]" title="没有匹配的片段" description="换个关键词，或到「命令片段」里新建。" />
-			</div>
-		);
-	}
+	const groups = [...new Set(matched.map((s) => s.group))];
 
 	return (
 		<div className="flex min-h-0 flex-1 flex-col">
@@ -35,9 +41,10 @@ export function SnippetsMiniPanel({ hostName }: { hostName?: string }) {
 			</div>
 
 			<div className="min-h-0 flex-1 overflow-y-auto p-2">
-				{groups
-					.filter((g) => matched.some((s) => s.group === g))
-					.map((group) => (
+				{matched.length === 0 ? (
+					<EmptyState icon="icon-[lucide--search-x]" title="没有匹配的片段" description="换个关键词试试。" />
+				) : (
+					groups.map((group) => (
 						<div key={group} className="mb-2">
 							<SectionLabel className="px-1">{group}</SectionLabel>
 							<div className="space-y-0.5">
@@ -69,7 +76,8 @@ export function SnippetsMiniPanel({ hostName }: { hostName?: string }) {
 									))}
 							</div>
 						</div>
-					))}
+					))
+				)}
 			</div>
 		</div>
 	);

@@ -130,17 +130,56 @@ import { useThemeStore } from "@/store/theme";                  // mode, resolve
 import { toast } from "@/store/toast";                          // toast({title, description?, tone?, action?: {label, run}})
 ```
 
-### 4.3 类型与格式化
+### 4.3 真实数据层（**没有 mock 了**）
+
+`src/data/mock.ts` **已删除**。应用只呈现真实数据，规则如下：
+
+- **用户自己的数据**（主机、分组、密钥、片段、转发规则）来自 `@/store/*`，启动时从磁盘载入，变更后自动落盘。
+  首次启动这些列表**都是空的**，界面必须给出可用的空状态与下一步指引。
+- **未接入真实协议的能力**（会话、传输队列、SFTP 文件、编辑器内容、监控指标、进程列表、
+  连接步骤、更新信息、远程监听端口）**没有任何数据源**，一律显示空状态并说明「需要什么才能有数据」，
+  不允许再造示例数据。
+
+```ts
+// 用户数据（可增删改，会自动持久化）
+import { useHostsStore, filterHosts } from "@/store/hosts";       // hosts / groups / upsertHost / addGroup ...
+import { useSnippetsStore, extractVariables, draftSnippet } from "@/store/snippets";
+import { useKeysStore } from "@/store/keys";
+import { useForwardsStore, draftForwardRule } from "@/store/forwards";
+
+// 运行时状态
+import { useSessionsStore } from "@/store/sessions";             // tabs / panes / openSession（初始为空）
+import { useTransfersStore, transferSummary } from "@/store/transfers";  // 初始为空
+import { useProbeStore } from "@/store/probe";                   // 真实的 TCP 测速结果
+import { useUiStore } from "@/store/ui";
+import { useThemeStore } from "@/store/theme";
+import { toast } from "@/store/toast";
+
+// 持久化（一般不用直接调，store 变更已自动保存）
+import { flushNow, configLocation } from "@/lib/persist";
+```
+
+类型与格式化：
 
 ```ts
 import { ENV_LABEL, ENV_NAME, CONNECTION_LABEL, AUTH_LABEL, FORWARD_LABEL,
-         SNIPPET_TARGET_LABEL, type Env, type Host, type ConnectionStatus /* ... */ } from "@/data/types";
-import { hosts, hostGroups, sshKeys, snippets, forwardRules, discoveredPorts, transfers,
-         localFiles, remoteFiles, sessionTabs, terminalPanes, connectionSteps, metrics,
-         topProcesses, commandItems, editorTabs, updateInfo } from "@/data/mock";
+         SNIPPET_TARGET_LABEL, type Env, type Host, type ConnectionStatus } from "@/data/types";
 import { formatBytes, formatSpeed, formatDuration, formatPercent, formatRelative } from "@/lib/format";
 import { connVisual, envBg, envText, envBorder } from "@/lib/status";
 import { cn } from "@/lib/cn";
+```
+
+### 4.5 空状态的写法
+
+界面没数据时不要留白，也不要造数据，用 `EmptyState` 说清楚「现在为什么是空的、怎么才能有数据」：
+
+```tsx
+<EmptyState
+	icon="icon-[lucide--server-off]"
+	title="还没有主机"
+	description="导入 ~/.ssh/config 或手动新建一台，这里就会出现你的服务器。"
+	action={<Button variant="primary" onClick={() => navigate("/hosts/new")}>新建主机</Button>}
+/>
 ```
 
 ### 4.4 本地终端

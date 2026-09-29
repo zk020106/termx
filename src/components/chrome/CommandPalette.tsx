@@ -1,8 +1,9 @@
 import { Kbd } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/Display";
-import { commandItems } from "@/data/mock";
 import type { CommandItem } from "@/data/types";
 import { cn } from "@/lib/cn";
+import { useHostsStore } from "@/store/hosts";
+import { useSnippetsStore } from "@/store/snippets";
 import { toast } from "@/store/toast";
 import { useUiStore } from "@/store/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -11,7 +12,7 @@ import { useNavigate } from "react-router";
 /* 命令面板浮层（需求书 04-① / 06）。
  * - 真实入口：由 WindowChrome 挂载，Ctrl+K 打开、Esc 关闭，用 useUiStore().paletteOpen 控制显隐。
  * - 复用入口：/palette 设计稿比对路由直接渲染 <CommandPalettePanel>（受控）。
- * 状态覆盖：默认「最近使用」/ 搜索按主机·命令·设置分组 / `>` 前缀只搜命令 / 无结果。 */
+ * 结果集全部来自真实数据：主机库 + 片段库 + 应用真实存在的静态动作，没有任何示例条目。 */
 
 type PaletteGroupKey = "recent" | "host" | "command" | "setting";
 
@@ -21,11 +22,59 @@ interface PaletteGroup {
 }
 
 const GROUP_TITLE: Record<PaletteGroupKey, string> = {
-	recent: "最近使用",
-	host: "匹配的主机",
-	command: "命令片段",
-	setting: "快捷操作与设置",
+	recent: "最近连接",
+	host: "主机",
+	command: "命令片段与操作",
+	setting: "设置",
 };
+
+/** 应用真实存在的快捷动作与设置入口（不是示例数据，是产品自身的功能清单） */
+const STATIC_ACTIONS: CommandItem[] = [
+	{ id: "act-new-tab", group: "command", title: "新建标签", shortcut: "Ctrl Shift T", icon: "icon-[lucide--square-plus]", keywords: ["tab", "标签"] },
+	{ id: "act-split-right", group: "command", title: "向右分屏", shortcut: "Ctrl Shift D", icon: "icon-[lucide--columns-2]", keywords: ["split", "分屏"] },
+	{ id: "act-split-down", group: "command", title: "向下分屏", shortcut: "Ctrl Shift E", icon: "icon-[lucide--rows-2]" },
+	{ id: "act-toggle-sftp", group: "command", title: "显示 / 隐藏 SFTP 面板", shortcut: "Ctrl Shift S", icon: "icon-[lucide--folder-tree]", keywords: ["sftp", "文件"] },
+	{ id: "act-broadcast", group: "command", title: "广播输入到全部终端", shortcut: "Ctrl Shift I", icon: "icon-[lucide--radio]" },
+	{ id: "act-new-forward", group: "command", title: "新建端口转发规则", icon: "icon-[lucide--waypoints]", keywords: ["forward", "转发"] },
+	{ id: "act-probe", group: "command", title: "对主机库测速", icon: "icon-[lucide--gauge]", keywords: ["测速", "延迟", "ping"] },
+	{ id: "act-lock", group: "command", title: "锁定应用", shortcut: "Ctrl Shift L", icon: "icon-[lucide--lock]" },
+	{ id: "set-appearance", group: "setting", title: "外观与主题", icon: "icon-[lucide--palette]", keywords: ["主题", "深色", "浅色"] },
+	{ id: "set-terminal", group: "setting", title: "终端字体与配色", icon: "icon-[lucide--type]" },
+	{ id: "set-shortcuts", group: "setting", title: "快捷键", shortcut: "Ctrl ,", icon: "icon-[lucide--keyboard]" },
+	{ id: "set-security", group: "setting", title: "安全与应用锁", icon: "icon-[lucide--shield]" },
+	{ id: "set-data", group: "setting", title: "数据与备份", icon: "icon-[lucide--database-backup]" },
+	{ id: "set-keys", group: "setting", title: "密钥库", icon: "icon-[lucide--key-round]" },
+];
+
+/** 面板条目：主机（含真实最近连接） + 片段 + 静态动作 */
+function usePaletteItems(): CommandItem[] {
+	const hosts = useHostsStore((s) => s.hosts);
+	const snippets = useSnippetsStore((s) => s.snippets);
+
+	return useMemo(() => {
+		const hostItems: CommandItem[] = hosts.map((h) => ({
+			id: `host-${h.id}`,
+			// 有真实连接时间的主机归入「最近连接」，其余归入「主机」
+			group: h.lastConnectedAt ? "recent" : "host",
+			title: h.name,
+			subtitle: `${h.username}@${h.hostname}:${h.port}`,
+			icon: h.os?.icon ?? "icon-[lucide--server]",
+			env: h.env,
+			keywords: [h.hostname, h.username, ...h.tags],
+		}));
+
+		const snippetItems: CommandItem[] = snippets.map((s) => ({
+			id: `snippet-${s.id}`,
+			group: "command",
+			title: s.name,
+			subtitle: s.command,
+			icon: "icon-[lucide--terminal]",
+			keywords: [s.group, ...s.variables],
+		}));
+
+		return [...hostItems, ...snippetItems, ...STATIC_ACTIONS];
+	}, [hosts, snippets]);
+}
 
 /** 命中判定：标题 / 副标题 / 关键词 / 快捷键 */
 function hit(item: CommandItem, term: string) {
@@ -34,21 +83,23 @@ function hit(item: CommandItem, term: string) {
 	return hay.includes(term);
 }
 
-/** 构造分组结果：`>` 前缀只搜命令，空查询展示最近使用 */
-function buildGroups(query: string): PaletteGroup[] {
+/** 构造分组结果：`>` 前缀只搜命令，空查询展示最近连接 */
+function buildGroups(items: CommandItem[], query: string): PaletteGroup[] {
 	const raw = query.trim();
 	const commandOnly = raw.startsWith(">");
 	const term = (commandOnly ? raw.slice(1) : raw).trim().toLowerCase();
 
 	if (commandOnly) {
-		const items = commandItems.filter((item) => item.group === "command" && hit(item, term));
-		return items.length ? [{ key: "command", items }] : [];
+		const found = items.filter((item) => item.group === "command" && hit(item, term));
+		return found.length ? [{ key: "command", items: found }] : [];
 	}
 
-	// 空查询：默认展示最近使用
+	// 空查询：优先展示真实有连接记录的最近主机；一台都没有就退回全部主机
 	if (!term) {
-		const recent = commandItems.filter((item) => item.group === "recent");
-		return recent.length ? [{ key: "recent", items: recent }] : [];
+		const recent = items.filter((item) => item.group === "recent");
+		if (recent.length) return [{ key: "recent", items: recent }];
+		const hosts = items.filter((item) => item.group === "host").slice(0, 8);
+		return hosts.length ? [{ key: "host", items: hosts }] : [];
 	}
 
 	// 搜索：按 主机 / 命令 / 设置 分组（recent 本质是主机，归入主机组）
@@ -56,7 +107,7 @@ function buildGroups(query: string): PaletteGroup[] {
 	return order
 		.map((key) => ({
 			key,
-			items: commandItems.filter(
+			items: items.filter(
 				(item) => (key === "host" ? item.group === "host" || item.group === "recent" : item.group === key) && hit(item, term),
 			),
 		}))
@@ -90,7 +141,8 @@ export function CommandPalettePanel({
 	const [activeIndex, setActiveIndex] = useState(0);
 	const inputRef = useRef<HTMLInputElement>(null);
 
-	const groups = useMemo(() => buildGroups(query), [query]);
+	const items = usePaletteItems();
+	const groups = useMemo(() => buildGroups(items, query), [items, query]);
 	const flat = useMemo(() => groups.flatMap((group) => group.items), [groups]);
 	const indexOf = useMemo(() => new Map(flat.map((item, index) => [item.id, index])), [flat]);
 

@@ -1,21 +1,29 @@
 import { create } from "zustand";
-import { transfers as seedTransfers } from "@/data/mock";
 import type { Transfer } from "@/data/types";
+
+/* 传输队列：只承载真实发生的传输。
+ * SFTP 还没接入，所以这里初始为空——界面上出现的每一条都将是真实任务。 */
 
 interface TransfersState {
 	items: Transfer[];
+	upsert: (transfer: Transfer) => void;
 	setState: (id: string, state: Transfer["state"]) => void;
 	retry: (id: string) => void;
 	remove: (id: string) => void;
 	clearDone: () => void;
-	/** 状态栏摘要：进行中的数量与整体进度 */
 }
 
 export const useTransfersStore = create<TransfersState>((set) => ({
-	items: seedTransfers,
+	items: [],
 
-	setState: (id, state) =>
-		set((s) => ({ items: s.items.map((t) => (t.id === id ? { ...t, state } : t)) })),
+	upsert: (transfer) =>
+		set((s) => ({
+			items: s.items.some((t) => t.id === transfer.id)
+				? s.items.map((t) => (t.id === transfer.id ? transfer : t))
+				: [...s.items, transfer],
+		})),
+
+	setState: (id, state) => set((s) => ({ items: s.items.map((t) => (t.id === id ? { ...t, state } : t)) })),
 
 	retry: (id) =>
 		set((s) => ({

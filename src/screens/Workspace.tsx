@@ -2,26 +2,24 @@ import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { type TerminalHandle, type TerminalMatchInfo } from "@/components/terminal/Terminal";
 import { TerminalPane } from "@/components/terminal/TerminalPane";
 import { Button, IconButton, Kbd } from "@/components/ui/Button";
-import { EnvPill, EnvStripe, MetricBar, StatusDot } from "@/components/ui/Display";
-import { metrics, remoteFiles } from "@/data/mock";
+import { EmptyState, EnvPill, EnvStripe, MetricBar, StatusDot } from "@/components/ui/Display";
 import {
 	ENV_NAME,
 	type ConnectionStatus,
-	type FileEntry,
 	type Host,
-	type MetricSeries,
 	type SessionTab,
 	type SplitLayout,
 	type TerminalPane as TerminalPaneModel,
 } from "@/data/types";
 import { cn } from "@/lib/cn";
-import { formatBytes } from "@/lib/format";
+import { describeProbe, probeSupported } from "@/lib/probe";
 import { filterHosts, useHostsStore } from "@/store/hosts";
+import { useProbeStore } from "@/store/probe";
 import { paneCountFor, useSessionsStore } from "@/store/sessions";
 import { toast } from "@/store/toast";
 import { useUiStore } from "@/store/ui";
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 
 /* =============================================================================
  * 终端工作区（路由 /） —— 设计帧 termx.vetd/frames/index.tsx 的交互版。
@@ -29,10 +27,11 @@ import { Link } from "react-router";
  * 布局逐帧复刻：左侧主机库 220px · 标签栏 34px · 分屏网格 + 底部 SFTP 面板 150px
  * · 右侧主机监控 200px。终端本体见 @/components/terminal/Terminal。
  *
- * 数据全部来自 useSessionsStore（标签 / 分屏 / 焦点 / 广播）与 @/data/mock，
- * 界面内不新增领域字段。右上角的「状态」切换器是骨架期评审工具，逐个复现需求书
- * 06-终端工作区要求的状态：单屏 / 2 格 / 4 格、搜索栏、右键菜单、广播中、
- * 重连宽限期横幅、已断开覆盖层、生产环境三重标识。
+ * 只呈现真实数据：标签 / 分屏 / 焦点 / 广播来自 useSessionsStore（首次启动为空，
+ * 此时给出「去主机库」的空状态），主机来自 useHostsStore，监控面板只显示
+ * useProbeStore 的实测 TCP 结果 —— 没有结果就写「未接入」，不填任何假数字。
+ * 右上角的「状态」切换器是骨架期评审工具，逐个复现需求书 06-终端工作区要求的状态：
+ * 单屏 / 2 格 / 4 格、搜索栏、右键菜单、广播中、重连宽限期横幅、已断开覆盖层、生产环境三重标识。
  * ========================================================================== */
 
 type ReviewState = "split-1" | "split-2" | "split-4" | "search" | "menu" | "broadcast" | "reconnect" | "offline" | "prod";
@@ -84,6 +83,8 @@ export default function Workspace() {
 	const openSession = useSessionsStore((s) => s.openSession);
 
 	const hostStore = useHostsStore();
+	const probeStore = useProbeStore();
+	const navigate = useNavigate();
 	const embeddedSftpOpen = useUiStore((s) => s.embeddedSftpOpen);
 	const toggleEmbeddedSftp = useUiStore((s) => s.toggleEmbeddedSftp);
 
@@ -112,6 +113,31 @@ export default function Workspace() {
 		.filter((h) => h.lastConnectedAt)
 		.sort((a, b) => (b.lastConnectedAt ?? "").localeCompare(a.lastConnectedAt ?? ""))
 		.slice(0, 2);
+	/** 不属于任何现有分组的主机（新建主机的默认状态就是没有分组） */
+	const groupedIds = new Set(hostStore.groups.map((g) => g.id));
+	const ungroupedHosts = hostStore.hosts.filter((h) => !h.groupId || !groupedIds.has(h.groupId));
+
+	/** 监控面板唯一的数据源：本机对该主机的实测 TCP 结果（没有就是没有） */
+	const monitorReport = activeHost ? probeStore.results[activeHost.id] : undefined;
+	const probingActiveHost = activeHost ? probeStore.probing.includes(activeHost.id) : false;
+
+	const runProbe = async () => {
+		if (!activeHost) return;
+		if (!probeSupported()) {
+			toast({ title: "浏览器内无法测速", description: "TCP 探测走 Rust 端，请在桌面端运行 pnpm tauri:dev", tone: "warning" });
+			return;
+		}
+		const summary = await probeStore.run([{ id: activeHost.id, host: activeHost.hostname, port: activeHost.port }]);
+		if (!summary) {
+			toast({ title: "测速没有返回结果", description: "探测被中断，请稍后重试", tone: "danger" });
+			return;
+		}
+		toast({
+			title: summary.ok > 0 ? "TCP 可达" : "TCP 不可达",
+			description: `${activeHost.hostname}:${activeHost.port} · 这不代表 SSH 一定可用`,
+			tone: summary.ok > 0 ? "success" : "danger",
+		});
+	};
 
 	/** 终端实例的命令式句柄登记表：右键菜单 / 搜索栏 / 快捷键都从这里取 */
 	const registerTerminal = useCallback((paneId: string, handle: TerminalHandle | null) => {
@@ -131,8 +157,9 @@ export default function Workspace() {
 		setQuery(next === "search" ? "redis" : "");
 		setReview(next);
 
-		const primary = store.tabs.find((t) => t.hostId === "order-api-01") ?? store.tabs[0];
-		const stage = store.tabs.find((t) => t.hostId === "order-stage") ?? primary;
+		// 评审状态只切换真实会话的布局；没有会话时什么都不做（界面会走空状态）
+		const primary = store.tabs[0];
+		const stage = store.tabs[1] ?? primary;
 
 		if (next === "reconnect" || next === "offline") {
 			setGrace(18);
@@ -161,7 +188,7 @@ export default function Workspace() {
 		if (review !== "reconnect") return;
 		if (grace <= 0) {
 			applyReview("split-2");
-			toast({ title: "已重新连接", description: "order-stage · 会话已恢复，历史输出保留", tone: "success" });
+			toast({ title: "重连宽限期结束", description: "评审状态演示：真实重连由会话层决定", tone: "default" });
 			return;
 		}
 		const timer = window.setTimeout(() => setGrace((value) => value - 1), 1000);
@@ -209,17 +236,18 @@ export default function Workspace() {
 
 	const reconnectNow = () => {
 		applyReview("split-2");
-		toast({ title: "已重新连接", description: "order-stage · 会话已恢复，历史输出保留", tone: "success" });
+		toast({ title: "已离开重连宽限期", description: "评审状态演示：会话是否恢复由真实存储层决定", tone: "default" });
 	};
 
 	const startReconnect = () => {
+		if (!activeTab) return;
 		applyReview("reconnect");
-		toast({ title: "正在重新建立连接…", description: "宽限期内会保留终端内容", tone: "warning" });
+		toast({ title: "重连宽限期", description: "评审状态演示：终端内容保留与否由真实会话决定", tone: "warning" });
 	};
 
 	const dropToOffline = () => {
 		applyReview("offline");
-		toast({ title: "已放弃自动重连", description: "会话保持断开，可随时手动重连", tone: "danger" });
+		toast({ title: "已断开覆盖层", description: "评审状态演示：真实连接状态由会话层决定", tone: "danger" });
 	};
 
 	const toggleBroadcastNow = () => {
@@ -337,7 +365,7 @@ export default function Workspace() {
 		toast(
 			ok
 				? { title: "已粘贴到终端", tone: "success" }
-				: { title: "剪贴板不可用", description: "浏览器未授权读取剪贴板，或内容为空", tone: "warning" },
+				: { title: "没有可粘贴的终端", description: "剪贴板为空，或当前这格没有真实 PTY 会话", tone: "warning" },
 		);
 	};
 
@@ -362,7 +390,7 @@ export default function Workspace() {
 
 	const gridClass = activeTab ? (embeddedSftpOpen ? GRID_CLASS[activeTab.layout].sftp : GRID_CLASS[activeTab.layout].bare) : GRID_CLASS.single.bare;
 	const layoutChip = LAYOUT_CHIP[activeTab?.layout ?? "single"];
-	const files = remoteFiles.slice(0, 4);
+	const activeHostLabel = activeHost ? `${activeHost.username}@${activeHost.name}` : "本地终端";
 
 	return (
 		<WindowChrome>
@@ -411,7 +439,7 @@ export default function Workspace() {
 							</>
 						) : (
 							<>
-								<GroupLabel label="最近连接" />
+								{recentHosts.length > 0 && <GroupLabel label="最近连接" />}
 								{recentHosts.map((host) => (
 									<HostItem
 										key={`recent-${host.id}`}
@@ -438,6 +466,31 @@ export default function Workspace() {
 										</div>
 									);
 								})}
+
+								{/* 没有分组的主机也必须列出来，否则新建的主机在工作区里会凭空消失 */}
+								{ungroupedHosts.length > 0 && (
+									<div>
+										<GroupLabel label="未分组" />
+										{ungroupedHosts.map((host) => (
+											<HostItem
+												key={host.id}
+												host={host}
+												selected={host.id === activeTab?.hostId}
+												onOpen={() => onOpenHost(host)}
+											/>
+										))}
+									</div>
+								)}
+
+								{hostStore.hosts.length === 0 && (
+									<div className="px-2 py-3 text-[11px] leading-4 text-faint">
+										主机库还是空的。去
+										<Link to="/hosts" className="mx-0.5 text-primary hover:underline">
+											主机库
+										</Link>
+										新建或导入主机，它们会出现在这里。
+									</div>
+								)}
 							</>
 						)}
 					</div>
@@ -505,7 +558,7 @@ export default function Workspace() {
 							<span className="text-surface-foreground">
 								连接已中断，正在重连（剩 <span className="font-mono tabular-nums">{grace}</span> 秒）
 							</span>
-							<span className="text-faint">order-stage · 第 2 次尝试 · 终端内容已保留</span>
+							<span className="text-faint">{activeHostLabel} · 评审状态演示：重连宽限期</span>
 							<div className="ml-auto flex items-center gap-1.5">
 								<Button size="sm" variant="primary" icon="icon-[lucide--zap]" onClick={reconnectNow}>
 									立即重连
@@ -553,7 +606,7 @@ export default function Workspace() {
 								className="size-5.5"
 								onClick={() => setMatch(handleFor(focusId)?.stepMatch(1) ?? { index: -1, count: 0 })}
 							/>
-							<span className="text-[10px] text-faint">{activeHost ? activeHost.name : "本地终端"} · 当前分屏格</span>
+							<span className="text-[10px] text-faint">{activeHostLabel} · 当前分屏格</span>
 							<div className="ml-auto flex items-center gap-2">
 								<Kbd>Ctrl Shift F</Kbd>
 								<IconButton icon="icon-[lucide--x]" label="关闭搜索 (Esc)" className="size-5.5" onClick={closeSearch} />
@@ -561,68 +614,78 @@ export default function Workspace() {
 						</div>
 					)}
 
-					{/* 分屏网格 + 底部 SFTP 面板；生产环境下整片终端区 2px 红描边 */}
-					<div
-						className={cn(
-							"grid min-h-0 flex-1 gap-px bg-border",
-							gridClass,
-							prodGuard && "shadow-[inset_0_0_0_2px_var(--color-env-prod)]",
-						)}
-					>
-						{gridPanes.map((pane) => (
-							<TerminalPane
-								key={pane.id}
-								pane={pane}
-								focused={pane.id === focusId}
-								broadcasting={broadcasting}
-								offline={review === "offline"}
-								prod={prodGuard}
-								status={paneStatus}
-								registerTerminal={registerTerminal}
-								onFocus={() => focusPane(pane.id)}
-								onContextMenu={(event) => openMenuAt(event, pane.id)}
-								onReconnect={startReconnect}
-							/>
-						))}
+					{/* 没有会话时不留白、也不造假终端：说清怎么才能有会话 */}
+					{!activeTab ? (
+						<EmptyState
+							className="min-h-0 flex-1"
+							icon="icon-[lucide--square-terminal]"
+							title="还没有打开的会话"
+							description="TermX 不会凭空造出终端。去主机库挑一台主机，点开就会建立真实会话；标签栏的 + 可以起一个本地终端。"
+							action={
+								<Button variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts")}>
+									去主机库
+								</Button>
+							}
+						/>
+					) : (
+						/* 分屏网格 + 底部 SFTP 面板；生产环境下整片终端区 2px 红描边 */
+						<div
+							className={cn(
+								"grid min-h-0 flex-1 gap-px bg-border",
+								gridClass,
+								prodGuard && "shadow-[inset_0_0_0_2px_var(--color-env-prod)]",
+							)}
+						>
+							{gridPanes.map((pane) => (
+								<TerminalPane
+									key={pane.id}
+									pane={pane}
+									focused={pane.id === focusId}
+									broadcasting={broadcasting}
+									offline={review === "offline"}
+									prod={prodGuard}
+									status={paneStatus}
+									registerTerminal={registerTerminal}
+									onFocus={() => focusPane(pane.id)}
+									onContextMenu={(event) => openMenuAt(event, pane.id)}
+									onReconnect={startReconnect}
+								/>
+							))}
 
-						{embeddedSftpOpen && (
-							<div className="col-span-full flex min-h-0 flex-col bg-surface">
-								<div className="flex h-7 shrink-0 items-center justify-between border-b border-border bg-surface-raised px-3 text-[11px]">
-									<div className="flex items-center gap-2 font-mono">
-										<span className="icon-[lucide--folder] size-3.5 text-primary" />
-										<span className="text-surface-foreground">/home/deploy/app</span>
-										<span className="text-border">·</span>
-										<span className="font-sans text-faint">跟随终端</span>
+							{embeddedSftpOpen && (
+								<div className="col-span-full flex min-h-0 flex-col bg-surface">
+									<div className="flex h-7 shrink-0 items-center justify-between border-b border-border bg-surface-raised px-3 text-[11px]">
+										<div className="flex items-center gap-2 font-mono">
+											<span className="icon-[lucide--folder] size-3.5 text-primary" />
+											<span className="text-surface-foreground">{activeHostLabel}</span>
+											<span className="text-border">·</span>
+											<span className="font-sans text-faint">远程目录未知</span>
+										</div>
+										<div className="flex items-center gap-3 text-muted">
+											<span>SFTP 尚未接入</span>
+											<Link to="/sftp" className="flex items-center gap-1 text-primary hover:underline">
+												<span>展开双栏模式</span>
+												<span className="icon-[lucide--external-link] size-3" />
+											</Link>
+											<IconButton
+												icon="icon-[lucide--chevron-down]"
+												label="收起 SFTP 面板 (Ctrl Shift S)"
+												className="size-5"
+												onClick={toggleEmbeddedSftp}
+											/>
+										</div>
 									</div>
-									<div className="flex items-center gap-3 text-muted">
-										<span>{files.length} 个项目</span>
-										<Link to="/sftp" className="flex items-center gap-1 text-primary hover:underline">
-											<span>展开双栏模式</span>
-											<span className="icon-[lucide--external-link] size-3" />
-										</Link>
-										<IconButton
-											icon="icon-[lucide--chevron-down]"
-											label="收起 SFTP 面板 (Ctrl Shift S)"
-											className="size-5"
-											onClick={toggleEmbeddedSftp}
-										/>
-									</div>
-								</div>
 
-								<div className="grid shrink-0 grid-cols-[1fr_90px_130px_70px] border-b border-border/40 px-3 py-1 font-sans text-[11px] text-faint">
-									<span>名称</span>
-									<span className="text-right">大小</span>
-									<span className="text-right">修改时间</span>
-									<span className="text-right">权限</span>
+									<EmptyState
+										className="min-h-0 flex-1"
+										icon="icon-[lucide--folder-x]"
+										title="SFTP 面板还没有数据"
+										description="列目录与传输文件需要 SSH/SFTP 通道；会话层接入后，这里显示的就是主机上的真实文件。"
+									/>
 								</div>
-								<div className="min-h-0 flex-1 overflow-y-auto">
-									{files.map((file) => (
-										<FileRow key={file.name} file={file} />
-									))}
-								</div>
-							</div>
-						)}
-					</div>
+							)}
+						</div>
+					)}
 
 					{/* 终端右键菜单：复制 / 粘贴 / 分屏 / 清屏 / 保存屏幕内容 */}
 					{menu && (
@@ -660,34 +723,66 @@ export default function Workspace() {
 						</Link>
 					</div>
 
-					<div className="mt-2.5 space-y-3">
-						{metrics.slice(0, 4).map((series, index) => (
+					{/* 只有实测 TCP 结果才算数据；系统指标没有来源，一律写「未接入」 */}
+					{monitorReport ? (
+						<div className="mt-2.5 space-y-3">
 							<MetricBar
-								key={series.label}
-								label={MONITOR_LABELS[index] ?? series.label}
-								value={monitorValue(series, index)}
-								progress={series.max > 0 ? (series.value / series.max) * 100 : 0}
-								warn={series.threshold != null && series.value >= series.threshold}
+								label="TCP 延迟（实测）"
+								value={`${Math.round(monitorReport.avg_ms)} ms`}
+								progress={Math.min(100, (monitorReport.avg_ms / 300) * 100)}
+								warn={!monitorReport.reachable || monitorReport.avg_ms > 150}
 							/>
-						))}
-					</div>
-
-					<div className="mt-4 border-t border-border pt-3">
-						<div className="font-sans text-[10px] font-medium tracking-wider text-faint uppercase">实时网络吞吐</div>
-						<div className="mt-2 space-y-1.5 font-mono text-[11px]">
-							<NetRow icon="icon-[lucide--arrow-down]" tone="text-success" label="下行" value="2.1 MB/s" />
-							<NetRow icon="icon-[lucide--arrow-up]" tone="text-primary" label="上行" value="0.4 MB/s" />
+							<div className="space-y-1 font-mono text-[10.5px] text-muted">
+								<div className="flex justify-between">
+									<span className="text-faint">最低 / 最高</span>
+									<span className="tabular-nums">
+										{Math.round(monitorReport.min_ms)} / {Math.round(monitorReport.max_ms)} ms
+									</span>
+								</div>
+								<div className="flex justify-between">
+									<span className="text-faint">抖动</span>
+									<span className="tabular-nums">±{monitorReport.jitter_ms.toFixed(1)} ms</span>
+								</div>
+								<div className="flex justify-between">
+									<span className="text-faint">丢包</span>
+									<span className="tabular-nums">{Math.round(monitorReport.loss * 100)}%</span>
+								</div>
+							</div>
+							<div className="text-[10.5px] leading-4 text-faint">{describeProbe(monitorReport)}</div>
 						</div>
-					</div>
+					) : (
+						<div className="mt-2.5 rounded border border-border bg-surface-raised p-2.5">
+							<div className="flex items-center gap-1.5 text-[11px] font-medium text-muted">
+								<span className="icon-[lucide--plug-zap] size-3.5 text-faint" />
+								未接入
+							</div>
+							<p className="mt-1 text-[10.5px] leading-4 text-faint">
+								CPU、内存、磁盘等系统指标需要 SSH 会话建立后才能采集，当前没有数据源。
+							</p>
+						</div>
+					)}
+
+					{activeHost && (
+						<Button
+							className="mt-2"
+							size="sm"
+							variant="ghost"
+							icon="icon-[lucide--gauge]"
+							disabled={probingActiveHost}
+							onClick={() => void runProbe()}
+						>
+							{probingActiveHost ? "正在测速…" : "测一次 TCP 延迟"}
+						</Button>
+					)}
 
 					<div className="mt-auto rounded border border-border bg-surface-raised p-2 font-mono text-[10px] text-muted">
 						<div className="flex justify-between">
-							<span className="text-faint">运行时间</span>
-							<span>41 天 6 小时</span>
+							<span className="text-faint">远端系统</span>
+							<span>未接入</span>
 						</div>
 						<div className="mt-1 flex justify-between">
-							<span className="text-faint">OS 核心</span>
-							<span>Linux 5.15</span>
+							<span className="text-faint">运行时间</span>
+							<span>未接入</span>
 						</div>
 					</div>
 				</aside>
@@ -698,38 +793,21 @@ export default function Workspace() {
 
 /* ============================== 局部零件 ============================== */
 
-/** 分屏格：优先取本标签主机名下的真实分屏，不够则补空分屏格（骨架期不改 store 结构） */
+/** 分屏格：优先取本标签主机名下的真实分屏；布局要求更多格时补出空位（不编造提示符文案） */
 function panesForTab(tab: SessionTab, panes: TerminalPaneModel[]): TerminalPaneModel[] {
 	const count = paneCountFor(tab.layout);
 	const owned = panes.filter((p) => p.hostId === tab.hostId);
 	const list = owned.slice(0, count);
 	while (list.length < count) {
-		const index = list.length;
 		list.push({
-			id: `${tab.id}-split-${index}`,
+			id: `${tab.id}-split-${list.length}`,
 			hostId: tab.hostId,
 			title: "",
-			subtitle: index === 0 ? "bash · 交互" : "bash · 空闲",
 			status: tab.status,
 			lines: [],
 		});
 	}
 	return list;
-}
-
-const MONITOR_LABELS = ["CPU 使用率", "内存 (RAM)", "根磁盘 /", "系统负载 (1m)"];
-
-function monitorValue(series: MetricSeries, index: number): string {
-	switch (index) {
-		case 0:
-			return `${series.value}%`;
-		case 1:
-			return `${series.value} / ${series.max} G`;
-		case 2:
-			return `${series.value}%`;
-		default:
-			return `${series.value}`;
-	}
 }
 
 function GroupLabel({ label }: { label: string }) {
@@ -801,35 +879,6 @@ function TabItem({
 			>
 				<span className="icon-[lucide--x] size-3" />
 			</button>
-		</div>
-	);
-}
-
-function FileRow({ file }: { file: FileEntry }) {
-	const folder = file.kind === "dir";
-	return (
-		<div className="grid h-7 grid-cols-[1fr_90px_130px_70px] items-center px-3 text-[12px] transition-colors hover:bg-surface-raised">
-			<span className="flex min-w-0 items-center gap-2">
-				<span className={cn(folder ? "icon-[lucide--folder] text-primary" : "icon-[lucide--file-text] text-faint", "size-3.5")} />
-				<span className="truncate font-mono text-[11.5px] text-surface-foreground">{file.name}</span>
-			</span>
-			<span className="text-right font-mono text-[11px] tabular-nums text-muted">
-				{folder ? "—" : formatBytes(file.size, file.size >= 1024 * 1024 ? 1 : 0)}
-			</span>
-			<span className="text-right font-mono text-[11px] text-faint">{file.mtime}</span>
-			<span className="text-right font-mono text-[10px] text-faint">{file.mode}</span>
-		</div>
-	);
-}
-
-function NetRow({ icon, tone, label, value }: { icon: string; tone: string; label: string; value: string }) {
-	return (
-		<div className="flex items-center justify-between">
-			<span className="flex items-center gap-1 text-muted">
-				<span className={cn(icon, "size-3", tone)} />
-				{label}
-			</span>
-			<span className="tabular-nums text-surface-foreground">{value}</span>
 		</div>
 	);
 }

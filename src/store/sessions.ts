@@ -1,7 +1,9 @@
 import { create } from "zustand";
-import { sessionTabs, terminalPanes } from "@/data/mock";
 import type { SessionTab, SplitLayout, TerminalLine, TerminalPane } from "@/data/types";
 import { useHostsStore } from "./hosts";
+
+/* 会话：只承载真实打开的标签与分屏格。
+ * 首次启动没有任何会话——工作区会显示空状态并引导去主机库挑一台。 */
 
 interface SessionsState {
 	tabs: SessionTab[];
@@ -22,13 +24,13 @@ interface SessionsState {
 	closePane: (paneId: string) => void;
 }
 
-let paneSeq = 100;
+let seq = 0;
 
 export const useSessionsStore = create<SessionsState>((set, get) => ({
-	tabs: sessionTabs,
-	panes: terminalPanes,
-	activeTabId: sessionTabs[0]?.id ?? "",
-	focusedPaneId: terminalPanes[0]?.id ?? "",
+	tabs: [],
+	panes: [],
+	activeTabId: "",
+	focusedPaneId: "",
 
 	openSession: (hostId) => {
 		const existing = get().tabs.find((t) => t.hostId === hostId);
@@ -36,8 +38,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 			set({ activeTabId: existing.id });
 			return existing.id;
 		}
+
 		const host = useHostsStore.getState().hosts.find((h) => h.id === hostId);
-		const id = `tab-${++paneSeq}`;
+		const id = `tab-${++seq}`;
+		const paneId = `pane-${++seq}`;
+
 		const tab: SessionTab = {
 			id,
 			hostId,
@@ -47,15 +52,28 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 			layout: "single",
 			broadcasting: false,
 		};
-		set((s) => ({ tabs: [...s.tabs, tab], activeTabId: id }));
+
+		const pane: TerminalPane = {
+			id: paneId,
+			hostId,
+			title: host ? `${host.username}@${host.name}` : "本地终端",
+			subtitle: host ? `${host.username}@${host.hostname}:${host.port}` : "本地 shell",
+			status: "connecting",
+			lines: [],
+		};
+
+		set((s) => ({ tabs: [...s.tabs, tab], panes: [...s.panes, pane], activeTabId: id, focusedPaneId: paneId }));
 		return id;
 	},
 
 	closeTab: (tabId) =>
 		set((s) => {
 			const tabs = s.tabs.filter((t) => t.id !== tabId);
+			const closed = s.tabs.find((t) => t.id === tabId);
+			// 关标签要把这一格对应的 pane 也一起清掉，避免残留
+			const panes = s.panes.filter((p) => (closed?.hostId ? p.hostId !== closed.hostId : true));
 			const activeTabId = s.activeTabId === tabId ? (tabs[0]?.id ?? "") : s.activeTabId;
-			return { tabs, activeTabId };
+			return { tabs, panes, activeTabId };
 		}),
 
 	reopenTab: (tab) => set((s) => ({ tabs: [...s.tabs, tab] })),
@@ -76,12 +94,14 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 		set((s) => ({ panes: s.panes.map((p) => (p.id === paneId ? { ...p, lines: [...p.lines, line] } : p)) })),
 
 	splitPane: () =>
-		set((s) => {			const current = s.panes.find((p) => p.id === s.focusedPaneId);
-			const id = `pane-${++paneSeq}`;
+		set((s) => {
+			const current = s.panes.find((p) => p.id === s.focusedPaneId);
+			const id = `pane-${++seq}`;
 			const pane: TerminalPane = {
 				id,
 				hostId: current?.hostId ?? null,
 				title: current?.title ?? "新分屏",
+				subtitle: current?.subtitle,
 				status: current?.status ?? "connected",
 				lines: [],
 			};
