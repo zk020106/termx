@@ -104,11 +104,13 @@ termx/
 4. **界面数据来自 mock**。真实 SSH / SFTP / 端口转发 / 指标采集都还没接入；**本地终端已经是真实 PTY**（原生壳里跑 PowerShell）。
 5. **命令面板的 `/palette` 路由套了应用外壳**，为了对齐设计帧；已避免与全局浮层叠加成两个面板。
 
-## 待确认问题
+## 待确认问题的处置
 
-来自设计需求书第 10 节，会影响信息架构，动手做 P1 之前需要定下来：
+设计需求书第 10 节留了四个问题。不等待拍板，已按需求书点名的两个参考产品（[Netcatty](https://github.com/binaricat/Netcatty)、[OxideTerm](https://github.com/AnalyseDeCircuit/oxideterm)）**已经验证过的做法**定下来，依据与出处见 **[docs/DECISIONS.md](docs/DECISIONS.md)**：
 
-1. 多台电脑之间要不要同步配置？（不做 / 同步到自己的 WebDAV、S3、Gist / 延后）
-2. AI 助手是否进入规划？（目前按 P2 只预留右侧面板入口）
-3. 主要使用 Windows 还是 macOS？决定标题栏与窗口控件的主次
-4. 是否需要对接公司堡垒机（如 JumpServer）？
+| 问题 | 决策 |
+| --- | --- |
+| 多台电脑之间要不要同步配置 | 不做账号同步；做加密可移植包（`.termx`）+ 可选云同步，且云同步必须显式确认、密钥默认不进后台同步 |
+| AI 助手是否进入规划 | 进入规划，按 **BYOK** 模型：用户自带 provider，不内置 AI 服务，动作必须用户批准 |
+| 主要用什么系统 | 三平台为目标、Windows 为主设计；窗口控件按平台分支（macOS 在左） |
+| 是否对接堡垒机（JumpServer） | 不对接厂商 API；用 SSH 原生多跳表达跳板链，UI 参考 OxideTerm 的「钻入下一跳」 |

@@ -1,4 +1,6 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
+import { AiAssistPanel } from "@/components/panels/AiAssistPanel";
+import { SnippetsMiniPanel } from "@/components/panels/SnippetsMiniPanel";
 import { Button, IconButton } from "@/components/ui/Button";
 import { Badge, EmptyState, EnvPill, MetricBar, ProgressBar, StatusDot, StatusText } from "@/components/ui/Display";
 import { Input } from "@/components/ui/Input";
@@ -8,7 +10,9 @@ import type { MetricSeries, ProcessRow } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { formatSpeed } from "@/lib/format";
 import { toast } from "@/store/toast";
-import { useState, type ReactNode } from "react";
+import { useUiStore, type RightPanelTab } from "@/store/ui";
+import { useEffect, useState, type ReactNode } from "react";
+import { useLocation } from "react-router";
 
 /* =============================================================================
  * 主机监控 —— 设计帧 termx.vetd/frames/monitor.tsx 的交互版。
@@ -26,6 +30,19 @@ const STATE_OPTIONS: { value: MonitorState; label: string }[] = [
 ];
 
 const SORT_LABEL: Record<SortKey, string> = { pid: "PID", cpu: "CPU", mem: "内存" };
+
+/** 右侧工具面板的三个页签（需求书 04-⑦：主机监控 / 命令片段 / AI 预留） */
+const PANEL_TABS: { id: RightPanelTab; label: string }[] = [
+	{ id: "monitor", label: "监控" },
+	{ id: "snippets", label: "片段" },
+	{ id: "ai", label: "AI 助手" },
+];
+
+const PANEL_TITLE: Record<RightPanelTab, string> = {
+	monitor: "实时指标",
+	snippets: "命令片段",
+	ai: "AI 助手",
+};
 
 const GRID_COLS = "grid-cols-[72px_minmax(0,1fr)_96px_84px_80px_40px]";
 
@@ -161,6 +178,14 @@ export default function Monitor() {
 	const [killTarget, setKillTarget] = useState<ProcessRow | null>(null);
 	const [retrying, setRetrying] = useState(false);
 	const [lastSampleAt, setLastSampleAt] = useState("10:14:28");
+	const tab = useUiStore((s) => s.rightPanelTab);
+	const setRightPanelTab = useUiStore((s) => s.setRightPanelTab);
+
+	// 深链：#/monitor?panel=ai|snippets，便于直接切到某个页签核对
+	const panelParam = new URLSearchParams(useLocation().search).get("panel") as RightPanelTab | null;
+	useEffect(() => {
+		if (panelParam && PANEL_TABS.some((t) => t.id === panelParam)) setRightPanelTab(panelParam);
+	}, [panelParam, setRightPanelTab]);
 
 	const down = state === "unavailable";
 	const alert = state === "alert";
@@ -464,20 +489,32 @@ export default function Monitor() {
 				<aside className="flex w-[340px] shrink-0 flex-col border-l border-border bg-surface-sunk">
 					<div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3 text-[12px]">
 						<div className="flex items-center gap-2">
-							<span className="font-medium text-surface-foreground">实时指标</span>
+							<span className="font-medium text-surface-foreground">{PANEL_TITLE[tab]}</span>
 							<span className="text-border">/</span>
 							<span className="font-mono text-[11px] text-muted">{MONITORED_HOST.name}</span>
 						</div>
+						{/* 可切换的右侧工具面板，不再只是装饰标签 */}
 						<div className="flex items-center gap-1">
-							<span className="rounded border border-border bg-surface-raised px-2 py-0.5 text-[11px] font-medium text-primary">
-								监控
-							</span>
-							<span className="px-2 py-0.5 text-[11px] text-muted hover:text-surface-foreground">片段</span>
-							<span className="px-2 py-0.5 text-[11px] text-faint">AI 助手</span>
+							{PANEL_TABS.map((t) => (
+								<button
+									key={t.id}
+									type="button"
+									onClick={() => setRightPanelTab(t.id)}
+									className={cn(
+										"rounded px-2 py-0.5 text-[11px] transition-colors",
+										tab === t.id
+											? "border border-border bg-surface-raised font-medium text-primary"
+											: "text-muted hover:bg-surface-raised hover:text-surface-foreground",
+									)}
+								>
+									{t.label}
+								</button>
+							))}
 						</div>
 					</div>
 
-					<div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
+					{/* 遥测内容：切到别的页签时隐藏而不卸载，保留滚动位置与采样状态 */}
+					<div className={cn("min-h-0 flex-1 space-y-4 overflow-y-auto p-3", tab !== "monitor" && "hidden")}>
 						{down ? (
 							<>
 								<div className="rounded border border-danger/40 bg-danger/10 p-3">
@@ -660,10 +697,16 @@ export default function Monitor() {
 						)}
 					</div>
 
-					<div className="flex shrink-0 justify-between border-t border-border bg-surface-raised px-3 py-2 font-mono text-[10.5px] text-faint">
-						<span>采样周期: 2.0s</span>
-						<span>Agentless SSH</span>
-					</div>
+					{/* 另两个页签各自的内容 */}
+					{tab === "snippets" && <SnippetsMiniPanel hostName={MONITORED_HOST.name} />}
+					{tab === "ai" && <AiAssistPanel hostName={MONITORED_HOST.name} />}
+
+					{tab === "monitor" && (
+						<div className="flex shrink-0 justify-between border-t border-border bg-surface-raised px-3 py-2 font-mono text-[10.5px] text-faint">
+							<span>采样周期: 2.0s</span>
+							<span>Agentless SSH</span>
+						</div>
+					)}
 				</aside>
 
 				{/* 结束进程确认 */}
