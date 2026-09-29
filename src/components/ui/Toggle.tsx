@@ -43,20 +43,29 @@ export function Checkbox({
 	onChange,
 	label,
 	description,
+	disabled,
 	className,
 }: {
 	checked: boolean;
 	onChange: (checked: boolean) => void;
 	label?: ReactNode;
 	description?: string;
+	disabled?: boolean;
 	className?: string;
 }) {
 	return (
-		<label className={cn("flex cursor-pointer items-start gap-2", className)}>
+		<label
+			className={cn(
+				"flex items-start gap-2",
+				disabled ? "cursor-not-allowed opacity-45" : "cursor-pointer",
+				className,
+			)}
+		>
 			<button
 				type="button"
 				role="checkbox"
 				aria-checked={checked}
+				disabled={disabled}
 				onClick={() => onChange(!checked)}
 				className={cn(
 					"mt-0.5 flex size-3.5 shrink-0 items-center justify-center rounded-[4px] border transition-colors",

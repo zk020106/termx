@@ -4,10 +4,12 @@ import { Button } from "@/components/ui/Button";
 import { Badge, EmptyState, StatusDot } from "@/components/ui/Display";
 import { Input } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Overlay";
+import { Checkbox } from "@/components/ui/Toggle";
 import { AUTH_LABEL, type ConnectionStatus, type Host } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { describeProbe, probeSupported, type ProbeReport } from "@/lib/probe";
-import { sshSupported, type SshPhase } from "@/lib/ssh";
+import { secretAvailable, secretDelete, secretLoad, secretSave } from "@/lib/secret";
+import { sshReplaceHostKey, sshSupported, sshTrustHost, type SshPhase } from "@/lib/ssh";
 import { useHostsStore } from "@/store/hosts";
 import { useProbeStore } from "@/store/probe";
 import { useSessionsStore } from "@/store/sessions";
@@ -23,11 +25,15 @@ import { useNavigate, useSearchParams } from "react-router";
  *    （浏览器内没有探测能力，如实标注「需桌面端」）。
  *  - 点「连接」之后，五步全部由 Rust 端推送的真实 SSH 阶段驱动：
  *    resolve → tcp → handshake → auth → shell，失败时收到 failed + 中文原因。
- *  - 指纹取握手阶段的真实 detail；但 known_hosts 校验与首次连接人工确认尚未实现，
- *    界面必须同时说明「当前不会阻止你连接」，不许假装校验过。
- *  - 二次验证（键盘交互）与指纹变化警告仍未接入，保留骨架并标 unwired。
+ *  - known_hosts 校验已由 Rust 侧接管：首次连接这台主机会**拒绝**握手并要求用户核对
+ *    指纹（kind = host_unknown），指纹与已保存记录不一致会**拒绝并告警**（kind = host_changed）。
+ *    本页负责把这两种情况引导成「确认并继续」或「取消」，绝不静默放行。
+ *  - 指纹一律取 Rust 事件的真实值（phase.fingerprint / 结果里的 fingerprint），
+ *    界面不预填、不推测、不补造。
+ *  - 仍未接入：键盘交互（多因素 / 二次验证）、非密码认证方式。这两条保留骨架并标 unwired。
  *
- * 密码只活在内存里：用来建立会话，不进主机库、不写配置文件，应用退出即消失。
+ * 密码默认只活在内存里：用来建立会话，不进主机库、不写配置文件，应用退出即消失；
+ * 只有用户在本页明确勾选「记住密码（存入系统钥匙串）」时，才额外交给操作系统钥匙串保管。
  * ========================================================================== */
 
 /** 步骤状态：unwired = 能力确实尚未接入（既非成功也非失败） */
@@ -65,6 +71,8 @@ const ESTABLISHED_DETAIL: Record<SshStage, string> = {
 interface StageResult {
 	ok: boolean;
 	detail: string;
+	/** Rust 事件里直接带的指纹；有就不必从 detail 文本里解析 */
+	fingerprint: string | null;
 }
 
 interface SshProgress {
@@ -88,14 +96,25 @@ const EMPTY_PROGRESS: SshProgress = {
 	failure: null,
 };
 
-/** 仍未接入、只能预览骨架的能力 */
-type PreviewState = "2fa" | "fingerprint" | "changed";
+/** 仍未接入、只能预览骨架的能力（真实流程触发不到，留一个入口给评审） */
+type PreviewState = "2fa";
 
-const PREVIEW_OPTIONS: { value: PreviewState; label: string }[] = [
-	{ value: "2fa", label: "二次验证" },
-	{ value: "fingerprint", label: "首次指纹" },
-	{ value: "changed", label: "指纹变化" },
-];
+const PREVIEW_OPTIONS: { value: PreviewState; label: string }[] = [{ value: "2fa", label: "二次验证" }];
+
+/**
+ * 主机密钥需要用户决策的两种情况：
+ *  - host_unknown：首次连接这台主机，Rust 已拒绝握手，等用户核对指纹；
+ *  - host_changed：指纹与已保存记录不一致，Rust 已拒绝并告警。
+ * detail 一律用 Rust 给的中文说明，界面不自己编原因。
+ */
+interface HostAlert {
+	kind: "host_unknown" | "host_changed";
+	/** 本次握手返回的真实指纹（SHA256:…）；Rust 没给就是 null，界面如实说没有 */
+	fingerprint: string | null;
+	detail: string;
+	/** 确认弹窗 / 告警操作区是否还开着；用户取消后置 false，但告警本身留在页面上 */
+	open: boolean;
+}
 
 export default function Connect() {
 	const navigate = useNavigate();
@@ -117,6 +136,20 @@ export default function Connect() {
 	const [preview, setPreview] = useState<PreviewState | null>(null);
 	/** 桌面端探测本身失败（Rust 端没返回结果）：既不是可达也不是不可达，如实标出来 */
 	const [probeError, setProbeError] = useState<string | null>(null);
+	/** 主机密钥需要用户决策时的告警（首次连接确认 / 指纹变化） */
+	const [alert, setAlert] = useState<HostAlert | null>(null);
+	/** 正在把确认结果写回 known_hosts（信任或替换），期间按钮禁用，防重复提交 */
+	const [trusting, setTrusting] = useState(false);
+	/** known_hosts 写回失败的真实原因 */
+	const [trustError, setTrustError] = useState<string | null>(null);
+	/** 记住密码：默认不勾选，只有用户自己勾了才写钥匙串（需求书 07） */
+	const [remember, setRemember] = useState(false);
+	/** 系统钥匙串是否可用；null = 还没问出来，先不吓唬用户 */
+	const [secretUsable, setSecretUsable] = useState<boolean | null>(null);
+	/** 钥匙串里当前是否存着这台主机的密码（决定要不要给「删除已保存的密码」入口） */
+	const [hasSavedSecret, setHasSavedSecret] = useState(false);
+	/** 本次进页面时从钥匙串读到了密码：给一行提示，没保存过的用户不被打扰 */
+	const [loadedFromKeychain, setLoadedFromKeychain] = useState(false);
 	const codeRef = useRef<HTMLInputElement>(null);
 
 	const supported = probeSupported();
@@ -133,6 +166,29 @@ export default function Connect() {
 			setProbeError(summary ? null : "探测未能完成：Rust 端没有返回结果");
 		});
 	}, [hostId, hostname, port, supported, runProbe]);
+
+	// 进页面时问一次系统钥匙串：可用才去读；读到了就预填密码并勾上「记住密码」，
+	// 读不到就什么都不做（不打扰没保存过的用户）。密码只在这里过一下内存。
+	const storedHostId = host?.id ?? null;
+	useEffect(() => {
+		let alive = true;
+		if (!storedHostId) return; // 类型守卫：没有主机就不问钥匙串
+		void (async () => {
+			const available = await secretAvailable();
+			if (!alive) return;
+			setSecretUsable(available);
+			if (!available) return;
+			const saved = await secretLoad(storedHostId);
+			if (!alive || !saved) return;
+			setPassword(saved);
+			setRemember(true);
+			setHasSavedSecret(true);
+			setLoadedFromKeychain(true);
+		})();
+		return () => {
+			alive = false;
+		};
+	}, [storedHostId]);
 
 	if (!host) {
 		return (
@@ -160,17 +216,21 @@ export default function Connect() {
 	// 本页之前就已建立、且还活着的会话（从工作区点回连接页时会走到这里）
 	const sessionKey = sshKeyForHost(host.id);
 	const alreadyConnected = hasSshSession(sessionKey);
-	const ssh: SshProgress = alreadyConnected && !progress.connected ? { ...progress, connected: true } : progress;
+	const base: SshProgress = alreadyConnected && !progress.connected ? { ...progress, connected: true } : progress;
+	// 主机密钥被拦下时，Rust 紧接着还会补发一条笼统的 failed；展示上只用带 kind 的那条说明，
+	// 并把失败阶段钉在「SSH 握手」—— 密钥校验本来就发生在握手阶段，不是 TCP 那一步。
+	const ssh: SshProgress =
+		alert && !base.connected ? { ...base, failure: alert.detail, failedStage: "handshake" } : base;
 
 	const connecting = ssh.connecting;
 	const connected = ssh.connected;
-	/** 真实指纹：只从握手阶段的 detail 里取，取不到就不显示 */
-	const fingerprint = fingerprintOf(progress.stages.handshake?.detail);
+	/** 真实指纹：优先用 Rust 事件里直接带的 fingerprint，其次从握手 detail 里取；都没有就不显示 */
+	const fingerprint = progress.stages.handshake?.fingerprint || fingerprintOf(progress.stages.handshake?.detail);
 	/** 服务器要求多因素时，界面要说明键盘交互尚未接入，而不是假装能继续 */
 	const needsInteractiveAuth = Boolean(ssh.failure && ssh.failedStage === "auth" && /多因素|继续验证/.test(ssh.failure));
 
-	const steps = buildSteps(host, report, supported, isProbing, probeError, ssh);
-	const conclusion = summarize(report, supported, isProbing, probeError, ssh);
+	const steps = buildSteps(host, report, supported, isProbing, probeError, ssh, alert !== null);
+	const conclusion = summarize(report, supported, isProbing, probeError, ssh, alert);
 	const tabStatus: ConnectionStatus = connected
 		? "connected"
 		: connecting
@@ -188,17 +248,24 @@ export default function Connect() {
 		? "SSH 已连接"
 		: connecting
 			? "SSH 连接中…"
-			: ssh.failure
-				? "SSH 连接失败"
-				: report
-					? report.reachable
-						? "TCP 已确认"
-						: "TCP 不可达"
-					: probeError
-						? "探测失败"
-						: isProbing
-							? "探测中…"
-							: "未探测";
+			: // 主机密钥被拦下不是「连接失败」这么简单：要么等你确认指纹，要么是危险的指纹变化
+				alert
+				? alert.kind === "host_unknown"
+					? alert.open
+						? "等待确认指纹"
+						: "指纹未确认"
+					: "指纹变化，已拒绝"
+				: ssh.failure
+					? "SSH 连接失败"
+					: report
+						? report.reachable
+							? "TCP 已确认"
+							: "TCP 不可达"
+						: probeError
+							? "探测失败"
+							: isProbing
+								? "探测中…"
+								: "未探测";
 
 	const copy = (text: string, title: string) => {
 		void navigator.clipboard
@@ -235,6 +302,42 @@ export default function Connect() {
 		navigate("/");
 	};
 
+	/**
+	 * 连接成功之后才处理「记住密码」：勾了就写钥匙串，没勾而钥匙串里有旧密码就删掉。
+	 * 这里出错只提示，绝不影响已经建立的会话，也不改「连接成功」这个事实。
+	 */
+	const persistSecret = async () => {
+		if (remember && secretUsable === false) {
+			toast({
+				title: "系统钥匙串不可用，密码没有保存",
+				description: "密码仍只在本次会话的内存里，连接不受影响",
+				tone: "warning",
+			});
+			return;
+		}
+		if (remember) {
+			try {
+				await secretSave(host.id, password);
+				setHasSavedSecret(true);
+				setLoadedFromKeychain(false);
+				toast({ title: "密码已存入系统钥匙串", description: `${host.name} 的登录密码已交给操作系统保管`, tone: "success" });
+			} catch (error) {
+				toast({ title: "密码未能存入系统钥匙串", description: messageOf(error), tone: "danger" });
+			}
+			return;
+		}
+		// 没勾选，但钥匙串里还有旧密码：如实删掉，别让「不记住」变成一句空话
+		if (!hasSavedSecret) return;
+		try {
+			await secretDelete(host.id);
+			setHasSavedSecret(false);
+			setLoadedFromKeychain(false);
+			toast({ title: "已删除保存的密码", description: `${host.name} 在系统钥匙串里不再有密码`, tone: "default" });
+		} catch (error) {
+			toast({ title: "删除已保存的密码失败", description: messageOf(error), tone: "danger" });
+		}
+	};
+
 	/** 主按钮：发起真实连接。密码只在这次调用里用一次。 */
 	const startConnect = async () => {
 		if (connecting) return;
@@ -252,6 +355,8 @@ export default function Connect() {
 		}
 
 		setPreview(null);
+		setAlert(null);
+		setTrustError(null);
 		setProgress({ ...EMPTY_PROGRESS, started: true, connecting: true });
 
 		let result: SshOpenResult;
@@ -263,7 +368,7 @@ export default function Connect() {
 			);
 		} catch (error) {
 			// 例如原生通道不可用：如实报出，不伪造阶段
-			result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+			result = { ok: false, error: messageOf(error) };
 		}
 
 		setProgress((prev) => ({
@@ -274,10 +379,27 @@ export default function Connect() {
 		}));
 
 		if (!result.ok) {
+			const kind = result.kind;
+			// 主机密钥没过校验：这不是普通失败，要引导用户去确认或处理指纹，而不是弹个「连接失败」了事
+			if (kind === "host_unknown" || kind === "host_changed") {
+				setAlert({
+					kind,
+					fingerprint: result.fingerprint ?? null,
+					detail:
+						result.error ??
+						(kind === "host_unknown"
+							? "首次连接这台主机，需要你确认服务器指纹"
+							: "主机指纹与已保存的记录不一致，已拒绝连接"),
+					open: true,
+				});
+				return;
+			}
 			toast({ title: "SSH 连接失败", description: result.error ?? "请查看失败原因", tone: "danger" });
 			return;
 		}
 
+		// 会话已经建立：先按用户的选择处理钥匙串（失败只提示），再进工作区
+		await persistSecret();
 		toast({
 			title: "SSH 会话已建立",
 			description: `${host.username}@${host.hostname}:${host.port}`,
@@ -286,8 +408,64 @@ export default function Connect() {
 		enterWorkspace();
 	};
 
+	/** 首次连接确认指纹：把待确认的密钥写进 known_hosts，然后自动重连 */
+	const trustAndRetry = async () => {
+		if (trusting) return;
+		setTrusting(true);
+		setTrustError(null);
+		try {
+			const written = await sshTrustHost(host.hostname, host.port);
+			setTrusting(false);
+			setAlert(null);
+			toast({ title: "已信任这台主机的指纹，正在重新连接", description: written, tone: "success" });
+			await startConnect();
+		} catch (error) {
+			// 例如 Rust 报「没有待确认的主机密钥，请重新发起连接」：如实显示，不假装记下了
+			setTrustError(messageOf(error));
+			setTrusting(false);
+		}
+	};
+
+	/** 指纹变化、且用户人工核对后决定替换旧记录：危险操作，只由用户显式点击触发 */
+	const replaceHostKeyAndRetry = async () => {
+		if (trusting) return;
+		setTrusting(true);
+		setTrustError(null);
+		try {
+			const note = await sshReplaceHostKey(host.hostname, host.port);
+			setTrusting(false);
+			setAlert(null);
+			toast({ title: "已替换保存的主机指纹，正在重新连接", description: note, tone: "warning" });
+			await startConnect();
+		} catch (error) {
+			setTrustError(messageOf(error));
+			setTrusting(false);
+		}
+	};
+
+	/** 关闭确认弹窗 / 收起告警操作区：连接保持中止，known_hosts 一个字节都不改 */
+	const dismissAlert = () => {
+		setAlert((current) => (current ? { ...current, open: false } : current));
+		setTrustError(null);
+	};
+
+	/** 小入口：用户主动删掉钥匙串里保存的密码 */
+	const forgetSavedSecret = async () => {
+		try {
+			await secretDelete(host.id);
+			setHasSavedSecret(false);
+			setLoadedFromKeychain(false);
+			setRemember(false);
+			toast({ title: "已删除保存的密码", description: `${host.name} 在系统钥匙串里不再有密码`, tone: "default" });
+		} catch (error) {
+			toast({ title: "删除已保存的密码失败", description: messageOf(error), tone: "danger" });
+		}
+	};
+
 	const disconnect = async () => {
 		setProgress({ ...EMPTY_PROGRESS });
+		setAlert(null);
+		setTrustError(null);
 		setPassword("");
 		await closeSshSession(sessionKey);
 		toast({ title: "已断开 SSH 会话", description: `${host.username}@${host.hostname}`, tone: "default" });
@@ -402,14 +580,96 @@ export default function Connect() {
 								</div>
 							</div>
 
+							{/* 首次连接确认被取消：指纹没被确认，连接保持中止 */}
+							{alert?.kind === "host_unknown" && !alert.open && (
+								<div className="mt-4 rounded-control border border-warning/40 bg-warning/10 p-3">
+									<div className="flex items-center gap-2">
+										<span className="icon-[lucide--fingerprint] size-3.5 shrink-0 text-warning" />
+										<span className="text-[11.5px] font-medium text-surface-foreground">首次连接未确认指纹，连接已中止</span>
+									</div>
+									<p className="mt-1.5 text-[11px] leading-4 text-muted">
+										Rust 端按 known_hosts 策略拒绝了这次握手：这台主机的密钥还没有被信任。你没确认之前不会建立连接，TermX 也不会替你记下任何指纹。
+									</p>
+									<FingerprintBlock value={alert.fingerprint} className="mt-2.5" />
+									<div className="mt-2.5 flex items-center gap-1.5">
+										<Button
+											size="sm"
+											variant="primary"
+											icon="icon-[lucide--fingerprint]"
+											disabled={connecting || !sshReady}
+											onClick={() => setAlert({ ...alert, open: true })}
+										>
+											重新核对指纹
+										</Button>
+									</div>
+									{trustError && <p className="mt-2 text-[10.5px] leading-4 text-danger">{trustError}</p>}
+								</div>
+							)}
+
+							{/* 指纹变化：Rust 已拒绝连接，这里只负责把风险和两条出路讲清楚 */}
+							{alert?.kind === "host_changed" && (
+								<div className="mt-4 rounded-control border border-danger/50 bg-danger/10 p-3">
+									<div className="flex items-start gap-2">
+										<span className="icon-[lucide--shield-alert] mt-px size-4 shrink-0 text-danger" />
+										<div className="min-w-0 flex-1">
+											<div className="text-[12px] font-semibold text-danger">主机指纹变化警告 · 连接已被拒绝</div>
+											<p className="mt-1.5 text-[11px] leading-4 text-muted">
+												主机指纹与已保存的记录不一致。可能是服务器重装过，也可能是中间人攻击。
+												在你人工核对之前，TermX 不会用这把密钥继续连接。
+											</p>
+											<FingerprintBlock
+												value={alert.fingerprint}
+												label="本次握手返回的指纹（与已保存的记录不一致）"
+												className="mt-2.5"
+											/>
+											{alert.detail && (
+												<div className="selectable mt-2 rounded border border-border bg-term px-2 py-1.5 font-mono text-[10.5px] leading-4 break-all text-term-ink">
+													{alert.detail}
+												</div>
+											)}
+											{trustError && <p className="mt-2 text-[10.5px] leading-4 text-danger">{trustError}</p>}
+											{alert.open ? (
+												<div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+													{/* 默认出路：不替换、不连接。危险操作放在最右侧，拉开距离，避免误点 */}
+													<Button size="sm" variant="primary" icon="icon-[lucide--x]" disabled={trusting} onClick={dismissAlert}>
+														取消连接
+													</Button>
+													<span className="min-w-4 flex-1" />
+													<Button
+														size="sm"
+														variant="danger"
+														icon="icon-[lucide--triangle-alert]"
+														disabled={trusting || !sshReady}
+														onClick={() => void replaceHostKeyAndRetry()}
+													>
+														{trusting ? "正在替换…" : "我已人工核对，替换已保存的指纹"}
+													</Button>
+												</div>
+											) : (
+												<div className="mt-2.5 flex items-center gap-1.5">
+													<span className="text-[10.5px] leading-4 text-faint">
+														你已取消这次连接：TermX 没有改动 known_hosts，连接保持断开。
+													</span>
+													<Button size="sm" icon="icon-[lucide--rotate-cw]" onClick={() => setAlert({ ...alert, open: true })}>
+														重新查看
+													</Button>
+												</div>
+											)}
+										</div>
+									</div>
+								</div>
+							)}
+
 							{/* 认证：真实密码输入 + 主连接按钮 */}
-							{!preview && !connected && !ssh.failure && (
+							{!preview && !connected && (
 								<div className="mt-4 rounded-control border border-border bg-surface p-3">
 									<div className="flex items-center justify-between">
 										<label htmlFor="ssh-password" className="text-[11px] font-medium text-muted">
 											输入 {host.username}@{host.hostname} 的登录密码
 										</label>
-										<Badge className="font-mono text-[9.5px]">只存内存</Badge>
+										<Badge className="font-mono text-[9.5px]">
+											{remember ? "将存入钥匙串" : "只存内存"}
+										</Badge>
 									</div>
 									<Input
 										id="ssh-password"
@@ -425,9 +685,60 @@ export default function Connect() {
 										}}
 										className="mt-2 font-mono"
 									/>
+									{/* 从钥匙串读到了才提示，没保存过的用户不被打扰 */}
+									{loadedFromKeychain && (
+										<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-success">
+											<span className="icon-[lucide--key-round] mt-px size-3 shrink-0" />
+											已从系统钥匙串读取到保存的密码，可以直接连接。
+										</p>
+									)}
 									<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
-										密码只用于本次连接，保存在内存里：不写进主机库、不写进配置文件，应用退出即消失。写入系统钥匙串的密码持久化尚未接入。
+										密码只用于本次连接，保存在内存里：不写进主机库、不写进配置文件。只有勾选下面的「记住密码」时，才会额外交给操作系统钥匙串保管。
 									</p>
+
+									<div
+										className="mt-2.5 border-t border-border pt-2.5"
+										onClickCapture={(e) => {
+											// Checkbox 本身没有 disabled 属性（本次写入范围只允许改本文件），
+											// 所以在捕获阶段就把点击拦住：钥匙串不可用时这个勾选框真的改不动，
+											// 并且明确告诉用户为什么，而不是让他点了没反应。
+											if (secretUsable !== false) return;
+											e.preventDefault();
+											e.stopPropagation();
+											toast({
+												title: "系统钥匙串不可用，密码无法保存",
+												description: "密码只能留在内存里；请用桌面端，或先修好系统的钥匙串服务",
+												tone: "warning",
+											});
+										}}
+									>
+										<Checkbox
+											checked={remember}
+											onChange={setRemember}
+											className={secretUsable === false ? "cursor-not-allowed opacity-45" : undefined}
+											label="记住密码（存入系统钥匙串）"
+											description={
+												secretUsable === false
+													? undefined
+													: "默认不勾选；勾选后密码交给 Windows 凭据管理器 / macOS 钥匙串保管，下次进入本页会预填。"
+											}
+										/>
+										{secretUsable === false && (
+											<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
+												<span className="icon-[lucide--triangle-alert] mt-px size-3 shrink-0" />
+												系统钥匙串当前不可用（浏览器预览里没有钥匙串；Linux 上缺少 Secret Service 也会这样），
+												这个选项已禁用，密码只能留在内存里。
+											</p>
+										)}
+										{hasSavedSecret && (
+											<div className="mt-1.5 flex flex-wrap items-center gap-2">
+												<Button size="sm" variant="ghost" icon="icon-[lucide--trash-2]" onClick={() => void forgetSavedSecret()}>
+													删除已保存的密码
+												</Button>
+												<span className="text-[10.5px] text-faint">系统钥匙串里已存有这台主机的密码</span>
+											</div>
+										)}
+									</div>
 									{host.auth.method !== "password" && (
 										<p className="mt-1 text-[10.5px] leading-4 text-warning">
 											这台主机登记的是「{AUTH_LABEL[host.auth.method]}」认证；Rust 侧目前只实现了密码认证，本次会用密码尝试。
@@ -466,7 +777,7 @@ export default function Connect() {
 									<p className="mt-1.5 text-[11px] leading-4 text-muted">
 										{host.username}@{host.hostname}:{host.port} 的远程 shell 已就绪，进入工作区即可看到远端输出。
 									</p>
-									<FingerprintBlock value={fingerprint} className="mt-2.5" />
+									<FingerprintBlock value={fingerprint} verified className="mt-2.5" />
 									{!fingerprint && (
 										<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
 											这条会话是在进入本页之前建立的，本页没有握手阶段的记录，因此没有指纹可显示 —— TermX 不会补造一个。
@@ -486,8 +797,9 @@ export default function Connect() {
 								</div>
 							)}
 
-							{/* 失败态：只展示 Rust 端真实返回的原因 */}
-							{!preview && !connected && ssh.failure && (
+							{/* 普通失败态（认证失败、TCP 不通等）：只展示 Rust 端真实返回的原因；
+							    主机密钥被拦下的情况由上面的告警卡片负责，不在这里重复 */}
+							{!preview && !connected && ssh.failure && !alert && (
 								<div className="mt-4 rounded-control border border-danger/40 bg-danger/10 p-3">
 									<div className="flex items-start gap-2">
 										<span className="icon-[lucide--circle-x] mt-px size-3.5 shrink-0 text-danger" />
@@ -538,42 +850,6 @@ export default function Connect() {
 								<TwoFactorCard code={code} onChange={setCode} inputRef={codeRef} className="mt-4" />
 							)}
 
-							{/* 首次指纹预览：有真实指纹就显示真值，没有就说没有 */}
-							{preview === "fingerprint" && (
-								<div className="mt-4 rounded-control border border-warning/40 bg-warning/10 p-3">
-									<div className="flex items-center gap-2">
-										<span className="icon-[lucide--fingerprint] size-3.5 shrink-0 text-warning" />
-										<span className="text-[11.5px] font-medium text-surface-foreground">首次连接该主机，请确认指纹</span>
-									</div>
-									<FingerprintBlock value={fingerprint} className="mt-2" />
-									<p className="mt-2 text-[10.5px] leading-4 text-muted">
-										{fingerprint
-											? "上面是本次连接握手阶段服务器真实返回的值，可对照服务器上的 ssh-keygen -lf 结果。"
-											: "还没有握手，因此没有指纹可显示 —— 指纹只能来自服务器，TermX 不会预填或推测任何指纹值。"}
-									</p>
-								</div>
-							)}
-
-							{/* 指纹变化：检查逻辑尚未接入，说明清楚但不伪造任何历史记录 */}
-							{preview === "changed" && (
-								<div className="mt-4 rounded-control border border-danger/50 bg-danger/10 p-3">
-									<div className="flex items-center gap-2">
-										<span className="icon-[lucide--shield-alert] size-4 shrink-0 text-danger" />
-										<span className="text-[12px] font-semibold text-danger">主机指纹变化警告</span>
-										<StepMark state="unwired" />
-									</div>
-									<p className="mt-1.5 text-[11px] leading-4 text-muted">
-										真实实现会拿服务器返回的指纹与 known_hosts 记录比对，不一致时在这里给出已记录值、本次值与上次成功连接时间。
-										Rust 侧当前接受任何指纹、还没有 known_hosts 校验，所以这条警告不会触发，本页也不显示任何已记录值。
-									</p>
-									<div className="mt-2 flex items-center gap-2">
-										<Button size="sm" variant="danger" icon="icon-[lucide--triangle-alert]" onClick={() => navigate("/hosts")}>
-											中止并回到主机库
-										</Button>
-									</div>
-								</div>
-							)}
-
 							{/* 操作按钮栏 */}
 							<div className="mt-4 flex items-center justify-end gap-2">
 								<Button
@@ -600,33 +876,65 @@ export default function Connect() {
 					</div>
 				</div>
 
-				{/* 首次连接确认指纹：有真实指纹就显示真值，没有就如实说明 */}
+				{/* 首次连接确认指纹：Rust 已经拒绝这次握手，只有用户核对并确认后才会写入 known_hosts 并重连 */}
 				<Modal
-					open={preview === "fingerprint"}
-					onClose={() => setPreview(null)}
+					open={alert?.kind === "host_unknown" && alert.open}
+					onClose={dismissAlert}
 					title="首次连接该主机，请确认指纹"
 					icon="icon-[lucide--fingerprint]"
-					width={430}
+					width={470}
 					footer={
-						<Button size="sm" onClick={() => setPreview(null)}>
-							关闭
-						</Button>
+						<>
+							<Button size="sm" disabled={trusting} onClick={dismissAlert}>
+								取消
+							</Button>
+							<Button
+								size="sm"
+								variant="primary"
+								icon="icon-[lucide--fingerprint]"
+								disabled={trusting || !sshReady}
+								onClick={() => void trustAndRetry()}
+							>
+								{trusting ? "正在记录信任…" : "信任并继续"}
+							</Button>
+						</>
 					}
 				>
 					<p>
-						TermX 会在 SSH 握手时拿到 <span className="font-mono text-surface-foreground">{host.hostname}</span> 的主机密钥，
-						把 SHA256 指纹显示在这里。
+						TermX 按 known_hosts 策略<strong className="text-surface-foreground">拒绝</strong>了这次握手：
+						<span className="font-mono text-surface-foreground">
+							{" "}
+							{host.hostname}:{host.port}{" "}
+						</span>
+						的主机密钥还没有被信任。确认之后才会写入本机的 known_hosts 并继续连接。
 					</p>
-					<FingerprintBlock value={fingerprint} className="mt-2" />
-					<div className="mt-2.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
+					<FingerprintBlock
+						value={alert?.fingerprint ?? null}
+						label="服务器在本次握手中返回的真实指纹"
+						size="large"
+						className="mt-2.5"
+					/>
+					<p className="mt-2.5">
+						这是服务器在本次握手中返回的真实指纹，请在服务器上核对（例如{" "}
+						<code className="rounded border border-border bg-surface-sunk px-1 font-mono text-[10.5px] text-surface-foreground">
+							ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+						</code>
+						）后再确认。
+					</p>
+					<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
 						<span className="icon-[lucide--triangle-alert] mt-px size-3 shrink-0" />
-						指纹只能来自服务器，TermX 不会预填或推测任何指纹值。
+						<span>指纹对不上就不要点「信任并继续」：那等于把一把来路不明的密钥记进本机。</span>
 					</div>
+					{trustError && (
+						<div className="mt-2 rounded-control border border-danger/40 bg-danger/10 px-2 py-1.5 text-[10.5px] leading-4 text-danger">
+							没能在 known_hosts 里记录这把密钥：{trustError}
+						</div>
+					)}
 				</Modal>
 
 				{/* 未接入能力预览：真实流程走不到的状态，保留骨架以便逐条评审 */}
 				<div className="absolute right-3 bottom-3 z-[60] flex items-center gap-2 rounded-card border border-border bg-surface-raised px-2 py-1.5 shadow-lg">
-					<span className="text-[10px] font-medium tracking-wider text-faint uppercase">未接入能力</span>
+					<span className="text-[10px] font-medium tracking-wider text-faint uppercase">尚未接入</span>
 					<div className="flex items-center gap-0.5">
 						{PREVIEW_OPTIONS.map((o) => (
 							<button
@@ -654,6 +962,11 @@ function isSshStage(phase: string): phase is SshStage {
 	return (SSH_STAGES as readonly string[]).includes(phase);
 }
 
+/** 把任意抛出物转成能展示的文案：Tauri 的 invoke 失败直接抛字符串，不一定是 Error */
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
 /** 失败落在哪一步：优先取自带 ok:false 的阶段，否则是最后一个成功阶段的下一步 */
 function stageOfFailure(stages: Record<string, StageResult>): SshStage | null {
 	for (const stage of SSH_STAGES) {
@@ -667,7 +980,10 @@ function stageOfFailure(stages: Record<string, StageResult>): SshStage | null {
 
 /** 把一条真实阶段事件并入进度 */
 function applyPhase(progress: SshProgress, phase: SshPhase): SshProgress {
-	const stages = { ...progress.stages, [phase.phase]: { ok: phase.ok, detail: phase.detail } };
+	const stages = {
+		...progress.stages,
+		[phase.phase]: { ok: phase.ok, detail: phase.detail, fingerprint: phase.fingerprint ?? null },
+	};
 	if (phase.phase === "failed") {
 		return { ...progress, stages, failure: phase.detail, failedStage: stageOfFailure(stages) };
 	}
@@ -697,6 +1013,7 @@ function buildSteps(
 	probing: boolean,
 	probeError: string | null,
 	ssh: SshProgress,
+	hostKeyRefused: boolean,
 ): Step[] {
 	const sshDriven = ssh.started || ssh.connected;
 	const probeDetail = !supported ? "需桌面端" : probing ? "正在探测…" : probeError ? "探测失败" : "等待探测";
@@ -732,13 +1049,21 @@ function buildSteps(
 				: { id: "tcp", label: STAGE_LABEL.tcp, state: "failed", detail: report.error ?? "TCP 不可达" }
 			: { id: "tcp", label: STAGE_LABEL.tcp, state: probeState, detail: probeDetail };
 
-	return [
+	const steps: Step[] = [
 		resolve,
 		tcp,
 		sshStep("handshake", STAGE_LABEL.handshake),
 		sshStep("auth", `认证 · ${AUTH_LABEL[host.auth.method]}`),
 		sshStep("shell", STAGE_LABEL.shell),
 	];
+
+	// 主机密钥被拦下时，TCP 其实已经通了 —— 服务器都把主机密钥发过来了，只是 Rust 没有单独
+	// 推送 tcp 阶段。如实说明这一点，免得这一行读起来像「TCP 都没连上」。
+	if (hostKeyRefused && steps[1].state === "pending") {
+		steps[1] = { id: "tcp", label: STAGE_LABEL.tcp, state: "done", detail: "已连通（握手时收到了服务器的主机密钥）" };
+	}
+
+	return steps;
 }
 
 interface Conclusion {
@@ -755,7 +1080,26 @@ function summarize(
 	probing: boolean,
 	probeError: string | null,
 	ssh: SshProgress,
+	alert: HostAlert | null,
 ): Conclusion {
+	// 主机密钥没过校验不是普通失败：文案要说清「是 TermX 主动拦下的」，以及下一步该做什么
+	if (alert && !ssh.connected) {
+		return alert.kind === "host_unknown"
+			? {
+					tone: "border-warning/40 bg-warning/10",
+					icon: "icon-[lucide--fingerprint] text-warning",
+					headline: alert.open ? "首次连接该主机，等待你确认指纹" : "首次连接未确认指纹，连接已中止",
+					body: alert.open
+						? "TermX 按 known_hosts 策略拒绝了这次握手：核对指纹并确认之后才会继续。"
+						: "指纹没有确认，TermX 不会连接这台主机，也不会替你记下任何指纹。",
+				}
+			: {
+					tone: "border-danger/40 bg-danger/10",
+					icon: "icon-[lucide--shield-alert] text-danger",
+					headline: "主机指纹与已保存的记录不一致，已拒绝连接",
+					body: alert.detail,
+				};
+	}
 	if (ssh.connected) {
 		return {
 			tone: "border-success/40 bg-success/10",
@@ -837,25 +1181,49 @@ function UnwiredNote({ children, className }: { children: ReactNode; className?:
 	);
 }
 
-/** 真实指纹 + 未实现的信任策略：两者必须一起出现，否则会让人以为做过校验 */
-function FingerprintBlock({ value, className }: { value: string | null; className?: string }) {
+/**
+ * 真实指纹区块：值只可能来自服务器（Rust 侧握手时算出来的 SHA256）。
+ * verified 表示这条连接确实通过了 known_hosts 校验，才敢在界面上说「已校验」。
+ */
+function FingerprintBlock({
+	value,
+	label = "服务器返回的主机指纹",
+	size = "normal",
+	verified = false,
+	className,
+}: {
+	value: string | null;
+	label?: string;
+	size?: "normal" | "large";
+	verified?: boolean;
+	className?: string;
+}) {
 	return (
 		<div className={cn("rounded-control border border-border bg-surface-sunk p-2.5", className)}>
 			<div className="flex items-center gap-1.5 text-[10.5px] font-medium text-muted">
 				<span className="icon-[lucide--fingerprint] size-3 shrink-0" />
-				服务器返回的主机指纹
+				{label}
 			</div>
-			<div className="mt-1.5 font-mono text-[11px] leading-4 break-all text-surface-foreground">
+			<div
+				className={cn(
+					"selectable mt-1.5 font-mono break-all text-surface-foreground",
+					size === "large" ? "text-[13px] leading-5" : "text-[11px] leading-4",
+				)}
+			>
 				{value ?? "尚未握手，没有指纹可显示"}
 			</div>
-			<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
-				<span className="icon-[lucide--triangle-alert] mt-px size-3 shrink-0" />
-				<span>
-					{value
-						? "已显示服务器返回的真实指纹；known_hosts 校验与首次连接人工确认尚未实现，当前不会阻止你连接。"
-						: "还没有握手，所以这里没有指纹；known_hosts 校验与首次连接的人工确认尚未实现，TermX 也不会预填任何指纹值。"}
-				</span>
-			</div>
+			{value && verified && (
+				<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-success">
+					<span className="icon-[lucide--shield-check] mt-px size-3 shrink-0" />
+					<span>这把主机密钥已经通过 known_hosts 校验（记录在 TermX 自己的 known_hosts 里，不改动 OpenSSH 的文件）。</span>
+				</div>
+			)}
+			{!value && (
+				<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-faint">
+					<span className="icon-[lucide--info] mt-px size-3 shrink-0" />
+					<span>指纹只能来自服务器在握手时真的发过来的那把密钥，TermX 不会预填、也不会推测一个出来。</span>
+				</div>
+			)}
 		</div>
 	);
 }

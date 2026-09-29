@@ -8,6 +8,10 @@ export interface SshPhase {
 	phase: string;
 	ok: boolean;
 	detail: string;
+	/** 需要界面引导动作的失败类型：host_unknown（首次连接需确认指纹）/ host_changed（指纹变了，已拒绝） */
+	kind: string | null;
+	/** 服务器返回的主机指纹（SHA256:…）；有则直接用，不必从 detail 里解析 */
+	fingerprint: string | null;
 }
 
 export interface SshConnectOptions {
@@ -56,6 +60,18 @@ export async function sshDisconnect(key: string): Promise<void> {
 	if (!isTauri()) return;
 	const { invoke } = await import("@tauri-apps/api/core");
 	await invoke("ssh_disconnect", { key });
+}
+
+/** 首次连接确认后记录信任（密钥材料留在 Rust 侧，不经过前端）。返回写入后的指纹。 */
+export async function sshTrustHost(host: string, port: number): Promise<string> {
+	const { invoke } = await import("@tauri-apps/api/core");
+	return invoke<string>("ssh_trust_host", { host, port });
+}
+
+/** 服务器确实重装过、人工核对之后替换旧记录；返回结果说明 */
+export async function sshReplaceHostKey(host: string, port: number): Promise<string> {
+	const { invoke } = await import("@tauri-apps/api/core");
+	return invoke<string>("ssh_replace_host_key", { host, port });
 }
 
 /** 订阅一个会话的事件流，返回取消订阅的函数 */

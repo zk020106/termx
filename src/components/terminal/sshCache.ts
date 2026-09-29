@@ -61,6 +61,10 @@ export function sshFailure(key: string): string | null {
 export interface SshOpenResult {
 	ok: boolean;
 	error?: string;
+	/** host_unknown：首次连接需确认指纹；host_changed：指纹变化已被拒绝 */
+	kind?: string;
+	/** 服务器返回的指纹，界面直接展示 */
+	fingerprint?: string;
 }
 
 /**
@@ -100,21 +104,22 @@ export async function openSshSession(
 		});
 	}
 
-	const failed = new Promise<string>((resolve) => {
-		const watch = (phase: SshPhase) => {
-			if (phase.phase === "failed") {
-				entry.phaseSubs.delete(watch);
-				resolve(phase.detail);
-			}
-		};
-		entry.phaseSubs.add(watch);
-	});
-
-	const ready = new Promise<string>((resolve) => {
+	// 先建好「终局」监听，再发起连接：否则首个阶段事件可能在监听就绪前发出
+	const outcome = new Promise<{ ok: boolean; detail?: string; kind?: string; fingerprint?: string }>((resolve) => {
 		const watch = (phase: SshPhase) => {
 			if (phase.phase === "shell" && phase.ok) {
 				entry.phaseSubs.delete(watch);
-				resolve("");
+				resolve({ ok: true });
+				return;
+			}
+			if (phase.phase === "failed") {
+				entry.phaseSubs.delete(watch);
+				resolve({
+					ok: false,
+					detail: phase.detail,
+					kind: phase.kind ?? undefined,
+					fingerprint: phase.fingerprint ?? undefined,
+				});
 			}
 		};
 		entry.phaseSubs.add(watch);
@@ -128,9 +133,10 @@ export async function openSshSession(
 		return { ok: false, error: message };
 	}
 
-	// 认证失败等会在过程中通过 failed 事件回来，谁先到用谁
-	const outcome = await Promise.race([ready, failed]);
-	return outcome ? { ok: false, error: outcome } : { ok: true };
+	// 认证失败、指纹未确认等都会以 failed 阶段回来
+	const result = await outcome;
+	if (result.ok) return { ok: true };
+	return { ok: false, error: result.detail, kind: result.kind, fingerprint: result.fingerprint };
 }
 
 export interface SshAttachment {

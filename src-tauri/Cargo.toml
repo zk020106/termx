@@ -21,6 +21,7 @@ portable-pty = "0.9"
 # 用 ring 做密码学后端：默认的 aws-lc-rs 需要 C 工具链与 NASM，在 Windows 上构建不可靠
 russh = { version = "0.63", default-features = false, features = ["flate2", "ring", "rsa"] }
 tokio = { version = "1", features = ["sync", "time", "io-util", "net"] }
+keyring = "4"
 
 [dev-dependencies]
 # 仅测试用：给 #[tokio::test] 提供运行时

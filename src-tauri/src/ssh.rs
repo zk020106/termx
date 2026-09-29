@@ -9,8 +9,9 @@
 //! - 主机指纹会被回报并在界面上展示；但**信任策略（known_hosts / 首次连接人工确认）尚未实现**，
 //!   当前是接受任何指纹。这一点在界面上必须如实标注，不能假装已经校验过。
 
+use crate::known_hosts::{self, Verdict};
 use russh::client::{self, AuthResult};
-use russh::keys::{HashAlg, PublicKeyOrCertificate};
+use russh::keys::{PublicKey, PublicKeyOrCertificate};
 use russh::ChannelMsg;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -28,6 +29,13 @@ enum SshCommand {
 #[derive(Default)]
 pub struct SshState {
     sessions: Arc<Mutex<HashMap<String, UnboundedSender<SshCommand>>>>,
+    /// 等待用户确认的主机密钥：host:port -> 公钥。
+    /// 存在这里而不是走 IPC 传递密钥材料，用户确认后由 Rust 自己写盘。
+    pending_keys: Arc<Mutex<HashMap<String, PublicKey>>>,
+}
+
+fn host_port_key(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
 }
 
 /// 连接阶段事件：phase 取 resolve / tcp / handshake / auth / shell / failed
@@ -36,15 +44,34 @@ pub struct SshPhase {
     phase: String,
     ok: bool,
     detail: String,
+    /// 供界面判断该引导什么动作：host_unknown（首次连接，需确认指纹）/
+    /// host_changed（指纹变了，默认拒绝）；普通阶段为 null
+    kind: Option<String>,
+    /// 主机指纹：有就带上，界面直接展示，不用从 detail 里猜
+    fingerprint: Option<String>,
 }
 
 fn emit_phase(app: &AppHandle, key: &str, phase: &str, ok: bool, detail: impl Into<String>) {
+    emit_phase_full(app, key, phase, ok, detail, None, None);
+}
+
+fn emit_phase_full(
+    app: &AppHandle,
+    key: &str,
+    phase: &str,
+    ok: bool,
+    detail: impl Into<String>,
+    kind: Option<&str>,
+    fingerprint: Option<&str>,
+) {
     let _ = app.emit(
         &format!("ssh://state/{key}"),
         SshPhase {
             phase: phase.to_string(),
             ok,
             detail: detail.into(),
+            kind: kind.map(str::to_string),
+            fingerprint: fingerprint.map(str::to_string),
         },
     );
 }
@@ -52,7 +79,12 @@ fn emit_phase(app: &AppHandle, key: &str, phase: &str, ok: bool, detail: impl In
 struct ClientHandler {
     app: AppHandle,
     key: String,
+    host: String,
+    port: u16,
     fingerprint: Arc<Mutex<Option<String>>>,
+    /// 信任判定的结果（放行以外的两种情况要回报给用户）
+    verdict: Arc<Mutex<Option<(String, String)>>>,
+    pending: Arc<Mutex<HashMap<String, PublicKey>>>,
 }
 
 impl client::Handler for ClientHandler {
@@ -63,14 +95,23 @@ impl client::Handler for ClientHandler {
         server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         // 对公钥与证书都取底层公钥算指纹，形状统一
-        let fingerprint = format!(
-            "{}",
-            server_public_key.public_key().fingerprint(HashAlg::Sha256)
-        );
-        *self.fingerprint.lock().unwrap() = Some(fingerprint);
-        // 尚未实现 known_hosts 校验：这里先接受，由界面把指纹展示给用户
-        let _ = (&self.app, &self.key);
-        Ok(true)
+        let key = server_public_key.public_key();
+        *self.fingerprint.lock().unwrap() = Some(known_hosts::fingerprint_of(&key));
+
+        let verdict = known_hosts::verify(&self.app, &self.host, self.port, &key);
+        if matches!(verdict, Verdict::Trusted) {
+            return Ok(true);
+        }
+
+        // 首次连接或指纹变化：拒绝这次握手，把待确认的密钥留给用户决策
+        let kind = verdict.kind().unwrap_or("host_unknown").to_string();
+        let fingerprint = verdict.fingerprint().unwrap_or_default().to_string();
+        self.pending
+            .lock()
+            .unwrap()
+            .insert(host_port_key(&self.host, self.port), key);
+        *self.verdict.lock().unwrap() = Some((kind, fingerprint));
+        Ok(false)
     }
 }
 
@@ -86,19 +127,54 @@ async fn run_session(
     cols: u32,
     rows: u32,
     rx: &mut UnboundedReceiver<SshCommand>,
+    pending_keys: &Arc<Mutex<HashMap<String, PublicKey>>>,
 ) -> Result<(), String> {
     emit_phase(app, key, "resolve", true, format!("{host}:{port}"));
 
     let fingerprint = Arc::new(Mutex::new(None));
+    let verdict: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
     let handler = ClientHandler {
         app: app.clone(),
         key: key.to_string(),
+        host: host.to_string(),
+        port,
         fingerprint: fingerprint.clone(),
+        verdict: verdict.clone(),
+        pending: pending_keys.clone(),
     };
 
-    let mut session = client::connect(Arc::new(client::Config::default()), (host, port), handler)
-        .await
-        .map_err(|e| format!("建立 TCP 连接失败：{e}"))?;
+    let mut session = match client::connect(
+        Arc::new(client::Config::default()),
+        (host, port),
+        handler,
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(error) => {
+            // 握手被我们自己拦下来时，要告诉用户该怎么办，而不是回一句笼统的失败
+            if let Some((kind, fingerprint)) = verdict.lock().unwrap().clone() {
+                let detail = match kind.as_str() {
+                    "host_unknown" => format!("首次连接这台主机，需要你确认服务器指纹 {fingerprint}"),
+                    "host_changed" => format!(
+                        "主机指纹与已保存的记录不一致（{fingerprint}）。可能是服务器重装，也可能是中间人攻击，已拒绝连接。"
+                    ),
+                    _ => format!("握手失败：{error}"),
+                };
+                emit_phase_full(
+                    app,
+                    key,
+                    "failed",
+                    false,
+                    detail,
+                    Some(&kind),
+                    Some(&fingerprint),
+                );
+                return Err("主机密钥未通过校验".to_string());
+            }
+            return Err(format!("建立 TCP 连接失败：{error}"));
+        }
+    };
     emit_phase(app, key, "tcp", true, format!("已连接到 {host}:{port}"));
 
     let fp = fingerprint
@@ -106,7 +182,15 @@ async fn run_session(
         .unwrap()
         .clone()
         .unwrap_or_else(|| "未能取得指纹".to_string());
-    emit_phase(app, key, "handshake", true, format!("主机指纹 {fp}"));
+    emit_phase_full(
+        app,
+        key,
+        "handshake",
+        true,
+        format!("主机指纹 {fp}（已通过 known_hosts 校验）"),
+        None,
+        Some(&fp),
+    );
 
     let auth = session
         .authenticate_password(username, password)
@@ -211,25 +295,76 @@ pub async fn ssh_connect(
     }
 
     let sessions = state.sessions.clone();
+    let pending = state.pending_keys.clone();
     let task_key = key.clone();
 
     tauri::async_runtime::spawn(async move {
         let result = run_session(
-            &app, &task_key, &host, port, &username, &password, cols, rows, &mut rx,
+            &app, &task_key, &host, port, &username, &password, cols, rows, &mut rx, &pending,
         )
         .await;
+
+        // 先清掉会话条目再报失败：否则界面立刻重试（例如用户刚确认完指纹）会撞上「会话已存在」
+        if let Ok(mut map) = sessions.lock() {
+            map.remove(&task_key);
+        }
 
         if let Err(message) = result {
             emit_phase(&app, &task_key, "failed", false, message);
             let _ = app.emit(&format!("ssh://exit/{task_key}"), None::<i32>);
         }
-
-        if let Ok(mut map) = sessions.lock() {
-            map.remove(&task_key);
-        }
     });
 
     Ok(())
+}
+
+/// 用户确认首次连接的指纹后调用：把待确认的密钥写进 known_hosts。
+/// 密钥材料一直留在 Rust 侧，不经过前端。
+#[tauri::command]
+pub fn ssh_trust_host(
+    app: AppHandle,
+    state: State<'_, SshState>,
+    host: String,
+    port: u16,
+) -> Result<String, String> {
+    let key = take_pending(&state, &host, port)?;
+    known_hosts::trust(&app, &host, port, &key)?;
+    Ok(known_hosts::fingerprint_of(&key))
+}
+
+/// 服务器确实重装过、用户已人工核对后调用：替换掉旧记录
+#[tauri::command]
+pub fn ssh_replace_host_key(
+    app: AppHandle,
+    state: State<'_, SshState>,
+    host: String,
+    port: u16,
+) -> Result<String, String> {
+    let key = take_pending(&state, &host, port)?;
+    let removed = known_hosts::replace(&app, &host, port, &key)?;
+
+    // 替换后复查：旧指纹也可能来自 OpenSSH 的 ~/.ssh/known_hosts，而我们不写那个文件。
+    // 不复查的话用户会陷入「替换了却还是连不上」的死胡同。
+    match known_hosts::verify(&app, &host, port, &key) {
+        Verdict::Trusted => Ok(format!(
+            "已替换 {removed} 条记录，新指纹 {}",
+            known_hosts::fingerprint_of(&key)
+        )),
+        Verdict::Changed { .. } => Err(format!(
+            "已在 TermX 的记录里替换 {removed} 条，但旧指纹仍然存在于 OpenSSH 的 ~/.ssh/known_hosts 中。\
+             请自行删除那一行（或改成该主机的真实公钥）后再连接 —— TermX 不会去改你自己的 OpenSSH 配置。"
+        )),
+        Verdict::Unknown { .. } => Err("替换后仍未生效，请重试".to_string()),
+    }
+}
+
+fn take_pending(state: &State<'_, SshState>, host: &str, port: u16) -> Result<PublicKey, String> {
+    state
+        .pending_keys
+        .lock()
+        .map_err(|_| "待确认密钥表已损坏".to_string())?
+        .remove(&host_port_key(host, port))
+        .ok_or_else(|| "没有待确认的主机密钥，请重新发起连接".to_string())
 }
 
 /// 键盘输入 → 远端
@@ -267,6 +402,7 @@ pub fn ssh_disconnect(state: State<'_, SshState>, key: String) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::keys::HashAlg;
     use std::time::Duration;
 
     /// 测试用 handler：只记录指纹，不需要 AppHandle
