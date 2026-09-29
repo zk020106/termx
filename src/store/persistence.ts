@@ -3,6 +3,7 @@ import { useForwardsStore } from "./forwards";
 import { useHostsStore } from "./hosts";
 import { useKeysStore } from "./keys";
 import { useSnippetsStore } from "./snippets";
+import { useThemeStore } from "./theme";
 
 /* =============================================================================
  * 把「磁盘上的配置」和「内存里的 store」接起来。
@@ -19,6 +20,7 @@ function snapshot(): PersistedConfig {
 		keys: useKeysStore.getState().keys,
 		snippets: useSnippetsStore.getState().snippets,
 		forwards: useForwardsStore.getState().rules,
+		preferences: { accent: useThemeStore.getState().accent },
 	};
 }
 
@@ -31,6 +33,8 @@ export async function hydrateStores(): Promise<void> {
 		useKeysStore.getState().setAll(config.keys);
 		useSnippetsStore.getState().setAll(config.snippets);
 		useForwardsStore.getState().setAll(config.forwards);
+		// 强调色来自配置文件，渲染前先落到 <html data-accent>，首帧就是用户选的那套
+		useThemeStore.getState().setAccent(config.preferences.accent);
 		// 立刻把规范化后的配置写回一次：
 		// 首次启动会因此创建配置文件，老文件缺字段也会被补齐。
 		await saveConfig(config);
@@ -65,6 +69,7 @@ export function startAutosave(): () => void {
 		useKeysStore.subscribe(schedule),
 		useSnippetsStore.subscribe(schedule),
 		useForwardsStore.subscribe(schedule),
+		useThemeStore.subscribe(schedule),
 	];
 
 	return () => {

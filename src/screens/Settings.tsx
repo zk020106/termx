@@ -4,7 +4,7 @@ import { Badge, Panel, ProgressBar, Segmented } from "@/components/ui/Display";
 import { Field, Input, ReadonlyValue, Select } from "@/components/ui/Input";
 import { Drawer, Modal } from "@/components/ui/Overlay";
 import { Checkbox, SettingRow, Switch } from "@/components/ui/Toggle";
-import type { ThemeMode } from "@/data/types";
+import type { Accent, ThemeMode } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { detectPlatform } from "@/lib/platform";
 import { useThemeStore } from "@/store/theme";
@@ -18,7 +18,7 @@ import { Link } from "react-router";
 /* =============================================================================
  * 设置 —— 设计帧 termx.vetd/frames/settings.tsx 的交互版。
  * 左侧分区导航（外观 / 终端 / 快捷键 / 安全 / 数据）+ 右侧内容区。
- * 主题与密度写回 useThemeStore（真的生效），其余偏好用界面内局部 state。
+ * 主题、强调色与密度写回 useThemeStore（真的生效），其余偏好用界面内局部 state。
  * ========================================================================== */
 
 type Section = "appearance" | "terminal" | "shortcuts" | "security" | "data";
@@ -57,14 +57,15 @@ const THEME_CARDS: { id: ThemeMode; label: string; desc?: string }[] = [
 	{ id: "system", label: "跟随系统 (Auto)", desc: "自动同步操作系统外观偏好" },
 ];
 
-/** 强调色只取 token 色板，禁止写死十六进制 */
-const ACCENTS: { id: string; name: string; dot: string }[] = [
-	{ id: "indigo", name: "Linear 经典靛蓝", dot: "bg-primary" },
-	{ id: "cyan", name: "电光青", dot: "bg-accent" },
-	{ id: "emerald", name: "翡翠绿", dot: "bg-success" },
-	{ id: "amber", name: "琥珀金", dot: "bg-warning" },
-	{ id: "rose", name: "玫瑰粉", dot: "bg-danger" },
-	{ id: "steel", name: "金属银灰", dot: "bg-muted" },
+/** 强调色只取 token 色板，禁止写死十六进制；
+ *  dot 用各自的色板 token，六个点才各显本色，而不是当前选中色。 */
+const ACCENTS: { id: Accent; name: string; dot: string }[] = [
+	{ id: "indigo", name: "Linear 经典靛蓝", dot: "bg-swatch-indigo" },
+	{ id: "cyan", name: "电光青", dot: "bg-swatch-cyan" },
+	{ id: "emerald", name: "翡翠绿", dot: "bg-swatch-emerald" },
+	{ id: "amber", name: "琥珀金", dot: "bg-swatch-amber" },
+	{ id: "rose", name: "玫瑰粉", dot: "bg-swatch-rose" },
+	{ id: "steel", name: "金属银灰", dot: "bg-swatch-steel" },
 ];
 
 /* ------------------------------- 终端 ------------------------------- */
@@ -167,13 +168,14 @@ export default function Settings() {
 	const [section, setSection] = useState<Section>("shortcuts");
 	const [demo, setDemo] = useState<DemoState>("conflict");
 
-	/* 外观：主题与密度走 store，切换后立即生效 */
+	/* 外观：主题、强调色与密度都走 store，切换后立即生效并写入配置文件 */
 	const mode = useThemeStore((s) => s.mode);
 	const resolved = useThemeStore((s) => s.resolved);
 	const setMode = useThemeStore((s) => s.setMode);
 	const density = useThemeStore((s) => s.density);
 	const setDensity = useThemeStore((s) => s.setDensity);
-	const [accent, setAccent] = useState("indigo");
+	const accent = useThemeStore((s) => s.accent);
+	const setAccent = useThemeStore((s) => s.setAccent);
 
 	/* 终端 */
 	const [font, setFont] = useState(FONTS[0]);
@@ -382,7 +384,7 @@ export default function Settings() {
 								</div>
 
 								<div className="border-t border-border pt-4">
-									<h3 className="text-[12.5px] font-semibold text-surface-foreground">系统强调色 (Accent Color)</h3>
+									<h3 className="text-[12.5px] font-semibold text-surface-foreground">强调色</h3>
 									<div className="mt-3 grid grid-cols-6 gap-2">
 										{ACCENTS.map((a) => (
 											<button
@@ -390,11 +392,11 @@ export default function Settings() {
 												type="button"
 												onClick={() => {
 													setAccent(a.id);
-													toast({ title: `强调色已切换为「${a.name}」`, description: "语法高亮与图标着色会在下次启动时完全生效。", tone: "default" });
+													toast({ title: `强调色已切换为「${a.name}」`, tone: "default" });
 												}}
 												className={cn(
 													"flex cursor-pointer flex-col items-center gap-1.5 rounded border p-2 transition-colors",
-													accent === a.id ? "border-primary bg-surface-raised shadow-sm" : "border-border bg-surface hover:border-muted/40",
+													accent === a.id ? "border-accent bg-surface-raised shadow-sm" : "border-border bg-surface hover:border-muted/40",
 												)}
 											>
 												<span className={cn("size-5 rounded-full", a.dot)} />

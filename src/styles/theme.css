@@ -7,10 +7,11 @@
  * 来源：termx.vetd/theme.css（Vetta 设计画布）与 termx.vetd/DESIGN.md（Linear 体系）
  * 结构：
  *   1) :root / [data-theme] 定义 --tx-* 原始语义变量（可随主题切换）
- *   2) @theme 把 --tx-* 映射为 Tailwind 的 --color-*，从而生成 bg-surface /
+ *   2) [data-accent] 在六套强调色色板之间切换 --tx-accent（默认 indigo）
+ *   3) @theme 把 --tx-* 映射为 Tailwind 的 --color-*，从而生成 bg-surface /
  *      text-muted / border-border 等工具类
  *
- * 注意：主题属性必须挂在 <html> 上，--color-* 的 var 引用才解析到正确的主题值。
+ * 注意：主题与强调色属性必须挂在 <html> 上，--color-* 的 var 引用才解析到正确的值。
  * 规则：帧里禁止硬编码 hex，一律使用 token。
  * ========================================================================== */
 
@@ -29,9 +30,24 @@
 	--tx-faint: oklch(46% 0.01 260);
 	--tx-border: oklch(24% 0.008 260);
 
-	/* 强调与语义信号 */
-	--tx-accent: oklch(76% 0.12 205);
-	--tx-accent-soft: oklch(22% 0.04 205);
+	/* 强调色色板：六套预置（深色一套，浅色在下方覆盖）。
+	 * --tx-swatch-* 只描述色板本身，--tx-accent 始终指向「当前选中」的那套。 */
+	--tx-swatch-indigo: oklch(68% 0.16 274);
+	--tx-swatch-indigo-soft: oklch(23% 0.06 274);
+	--tx-swatch-cyan: oklch(76% 0.12 205);
+	--tx-swatch-cyan-soft: oklch(22% 0.04 205);
+	--tx-swatch-emerald: oklch(72% 0.15 155);
+	--tx-swatch-emerald-soft: oklch(23% 0.04 155);
+	--tx-swatch-amber: oklch(76% 0.14 65);
+	--tx-swatch-amber-soft: oklch(24% 0.05 65);
+	--tx-swatch-rose: oklch(70% 0.17 25);
+	--tx-swatch-rose-soft: oklch(23% 0.06 25);
+	--tx-swatch-steel: oklch(74% 0.02 260);
+	--tx-swatch-steel-soft: oklch(24% 0.01 260);
+
+	/* 默认强调色：Linear 经典靛蓝 */
+	--tx-accent: var(--tx-swatch-indigo);
+	--tx-accent-soft: var(--tx-swatch-indigo-soft);
 	--tx-danger: oklch(62% 0.21 25);
 	--tx-danger-soft: oklch(22% 0.06 25);
 	--tx-warning: oklch(74% 0.15 65);
@@ -58,14 +74,55 @@
 	--tx-faint: oklch(62% 0.01 260);
 	--tx-border: oklch(88% 0.004 260);
 
-	--tx-accent: oklch(55% 0.11 205);
-	--tx-accent-soft: oklch(93% 0.035 205);
+	--tx-swatch-indigo: oklch(52% 0.19 274);
+	--tx-swatch-indigo-soft: oklch(93% 0.035 274);
+	--tx-swatch-cyan: oklch(55% 0.11 205);
+	--tx-swatch-cyan-soft: oklch(93% 0.035 205);
+	--tx-swatch-emerald: oklch(53% 0.14 155);
+	--tx-swatch-emerald-soft: oklch(94% 0.04 155);
+	--tx-swatch-amber: oklch(56% 0.13 65);
+	--tx-swatch-amber-soft: oklch(94% 0.05 65);
+	--tx-swatch-rose: oklch(53% 0.19 25);
+	--tx-swatch-rose-soft: oklch(94% 0.04 25);
+	--tx-swatch-steel: oklch(48% 0.02 260);
+	--tx-swatch-steel-soft: oklch(93% 0.008 260);
+
+	/* 默认强调色：Linear 经典靛蓝 */
+	--tx-accent: var(--tx-swatch-indigo);
+	--tx-accent-soft: var(--tx-swatch-indigo-soft);
 	--tx-danger: oklch(55% 0.2 25);
 	--tx-danger-soft: oklch(94% 0.04 25);
 	--tx-warning: oklch(60% 0.14 65);
 	--tx-warning-soft: oklch(94% 0.05 65);
 	--tx-success: oklch(53% 0.14 155);
 	--tx-success-soft: oklch(94% 0.04 155);
+}
+
+/* 强调色切换：data-accent 也挂在 <html> 上，和 data-theme 叠加生效。
+ * 这一段必须排在两个主题块之后：选择器特异性相同，靠顺序盖过主题块里的默认值。 */
+:root[data-accent="indigo"] {
+	--tx-accent: var(--tx-swatch-indigo);
+	--tx-accent-soft: var(--tx-swatch-indigo-soft);
+}
+:root[data-accent="cyan"] {
+	--tx-accent: var(--tx-swatch-cyan);
+	--tx-accent-soft: var(--tx-swatch-cyan-soft);
+}
+:root[data-accent="emerald"] {
+	--tx-accent: var(--tx-swatch-emerald);
+	--tx-accent-soft: var(--tx-swatch-emerald-soft);
+}
+:root[data-accent="amber"] {
+	--tx-accent: var(--tx-swatch-amber);
+	--tx-accent-soft: var(--tx-swatch-amber-soft);
+}
+:root[data-accent="rose"] {
+	--tx-accent: var(--tx-swatch-rose);
+	--tx-accent-soft: var(--tx-swatch-rose-soft);
+}
+:root[data-accent="steel"] {
+	--tx-accent: var(--tx-swatch-steel);
+	--tx-accent-soft: var(--tx-swatch-steel-soft);
 }
 
 /* 把原始变量映射为 Tailwind token。用普通 @theme（非 inline），
@@ -88,6 +145,14 @@
 
 	--color-accent: var(--tx-accent);
 	--color-accent-soft: var(--tx-accent-soft);
+
+	/* 色板预览用：设置页的六个圆点各显本色，不跟随当前选中色 */
+	--color-swatch-indigo: var(--tx-swatch-indigo);
+	--color-swatch-cyan: var(--tx-swatch-cyan);
+	--color-swatch-emerald: var(--tx-swatch-emerald);
+	--color-swatch-amber: var(--tx-swatch-amber);
+	--color-swatch-rose: var(--tx-swatch-rose);
+	--color-swatch-steel: var(--tx-swatch-steel);
 	--color-danger: var(--tx-danger);
 	--color-danger-soft: var(--tx-danger-soft);
 	--color-warning: var(--tx-warning);

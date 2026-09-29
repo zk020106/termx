@@ -74,6 +74,7 @@ export function Terminal({
 	const matchesRef = useRef<Match[]>([]);
 	const cursorRef = useRef(0);
 	const resolvedTheme = useThemeStore((s) => s.resolved);
+	const accent = useThemeStore((s) => s.accent);
 
 	useEffect(() => {
 		const container = containerRef.current;
@@ -207,11 +208,12 @@ export function Terminal({
 		};
 	}, [paneId, hostId]);
 
-	// 主题切换时重取 token（设计 token 挂在 <html data-theme> 上，必须重新解析）
+	// 主题或强调色切换时重取 token（设计 token 挂在 <html data-theme data-accent> 上，
+	// 必须重新解析，xterm 才会拿到新的语法高亮 / 图标着色）
 	useEffect(() => {
 		const term = termRef.current;
 		if (term) term.options.theme = buildXtermTheme(readPalette());
-	}, [resolvedTheme]);
+	}, [resolvedTheme, accent]);
 
 	useImperativeHandle(
 		ref,

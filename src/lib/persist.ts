@@ -1,4 +1,5 @@
-import type { ForwardRule, Host, HostGroup, Snippet, SshKey } from "@/data/types";
+import type { Accent, ForwardRule, Host, HostGroup, Snippet, SshKey } from "@/data/types";
+import { isAccent } from "@/data/types";
 import { isTauri } from "./tauri";
 
 /* =============================================================================
@@ -8,9 +9,14 @@ import { isTauri } from "./tauri";
  *         %APPDATA%\dev.termx.app\termx.json），由 Rust 侧原子写入。
  * 浏览器：退化为 localStorage，语义一致（同样是本机持久化），便于纯前端调试。
  *
- * 只存用户自己的东西：主机、分组、密钥、片段、转发规则。
+ * 只存用户自己的东西：主机、分组、密钥、片段、转发规则、界面偏好。
  * 凭据类机密（密码、私钥口令）不进这个文件，交操作系统钥匙串。
  * ========================================================================== */
+
+/** 界面偏好：与主题同属本机配置，跟着配置文件一起走 */
+export interface UiPreferences {
+	accent: Accent;
+}
 
 export interface PersistedConfig {
 	version: 1;
@@ -19,10 +25,19 @@ export interface PersistedConfig {
 	keys: SshKey[];
 	snippets: Snippet[];
 	forwards: ForwardRule[];
+	preferences: UiPreferences;
 }
 
 export function emptyConfig(): PersistedConfig {
-	return { version: 1, hosts: [], groups: [], keys: [], snippets: [], forwards: [] };
+	return {
+		version: 1,
+		hosts: [],
+		groups: [],
+		keys: [],
+		snippets: [],
+		forwards: [],
+		preferences: { accent: "indigo" },
+	};
 }
 
 const LS_KEY = "termx.config";
@@ -31,6 +46,7 @@ const LS_KEY = "termx.config";
 function normalize(raw: Partial<PersistedConfig> | null): PersistedConfig {
 	const base = emptyConfig();
 	if (!raw) return base;
+	const accent = raw.preferences?.accent;
 	return {
 		version: 1,
 		hosts: Array.isArray(raw.hosts) ? raw.hosts : [],
@@ -38,6 +54,7 @@ function normalize(raw: Partial<PersistedConfig> | null): PersistedConfig {
 		keys: Array.isArray(raw.keys) ? raw.keys : [],
 		snippets: Array.isArray(raw.snippets) ? raw.snippets : [],
 		forwards: Array.isArray(raw.forwards) ? raw.forwards : [],
+		preferences: { accent: isAccent(accent) ? accent : base.preferences.accent },
 	};
 }
 
