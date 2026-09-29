@@ -33,11 +33,15 @@ let keySeq = 0;
  * 还活着，只有随机段才能保证重载后不会生成一个已经被占用的键。
  * 键里保留 hostId 只是为了可读性（排查问题时一眼看出是哪台主机），
  * 它不参与任何身份判定。
+ *
+ * 注意分隔符只能用 `-` `/` `:` `_` 与字母数字：这个键会被拼进 Tauri 事件名
+ * （ssh://state/<key> 等），而 Tauri 对事件名做字符校验，其它字符会被
+ * `listen` 直接拒掉（曾用 `#` 分隔，导致连接时报 invalid args `event`）。
  */
 export function newSshSessionKey(hostId: string): string {
 	keySeq += 1;
 	const rand = Math.random().toString(36).slice(2, 8);
-	return `ssh:${hostId}#${keySeq}-${rand}`;
+	return `ssh:${hostId}:${keySeq}-${rand}`;
 }
 
 interface Entry {
