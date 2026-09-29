@@ -277,6 +277,19 @@ export default function Connect() {
 		setPromptError(null);
 	}, [authPrompt, promptFinished]);
 
+	// 自检/深链用：带 ?autoconnect=1 进入时直接发起连接。
+	// 只对「不需要先输入东西」的方式自动触发（Agent / 键盘交互）；
+	// 密码与私钥必须由人来填，绝不自动连。
+	useEffect(() => {
+		if (params.get("autoconnect") !== "1") return;
+		if (authMethod !== "agent" && authMethod !== "keyboard-interactive") return;
+		if (!sshReady) return;
+		const timer = window.setTimeout(() => void startConnect(), 900);
+		return () => window.clearTimeout(timer);
+		// 有意只在挂载时触发一次
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
 	// 选中 SSH Agent 时枚举一次身份：一条都没有要如实说出来，别让用户白点连接
 	useEffect(() => {
 		if (authMethod !== "agent" || !sshReady) return;

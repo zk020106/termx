@@ -337,10 +337,20 @@ async fn keyboard_interactive_auth<H: russh::client::Handler>(
                 remaining_methods,
                 ..
             } => {
-                return Err(format!(
-                    "键盘交互认证被拒绝：输入不正确或已过期。服务器接受的方式：{}",
-                    methods_text(&remaining_methods)
-                ));
+                // round == 0 表示服务器自始至终没发过一次提问：那不是「输入错了」，
+                // 而是它压根没启用键盘交互这种方式。归因写反会把用户引到错误的方向。
+                return Err(if round == 0 {
+                    format!(
+                        "服务器没有发起任何交互提问，说明它未启用键盘交互认证（sshd 侧 KbdInteractiveAuthentication）。\
+                         本次连接没有向服务器提交过任何输入。它接受的方式：{}",
+                        methods_text(&remaining_methods)
+                    )
+                } else {
+                    format!(
+                        "键盘交互认证被拒绝：第 {round} 轮的回答没通过。服务器接受的方式：{}",
+                        methods_text(&remaining_methods)
+                    )
+                });
             }
             KeyboardInteractiveAuthResponse::InfoRequest {
                 name,
