@@ -1,19 +1,17 @@
-import { activities, settingsActivity, type ActivityId } from "@/components/chrome/activities";
+import { activities, activityFromPath, settingsActivity } from "@/components/chrome/activities";
 import { cn } from "@/lib/cn";
 import { useUiStore } from "@/store/ui";
 import { Link, useLocation } from "react-router";
 
 /** 活动栏（需求书 04-②）：44px 宽，主机库/文件/转发/片段/密钥/传输，设置固定底部 */
-export function ActivityBar({ current }: { current?: ActivityId }) {
+export function ActivityBar() {
 	const { pathname } = useLocation();
 	const setActivity = useUiStore((s) => s.setActivity);
 	const sidebarOpen = useUiStore((s) => s.sidebarOpen);
 	const toggleSidebar = useUiStore((s) => s.toggleSidebar);
 
-	const active: ActivityId | undefined =
-		current ??
-		(activities.find((a) => a.to === pathname)?.id ??
-			(pathname.startsWith("/settings") || pathname.startsWith("/updater") ? "settings" : undefined));
+	// 高亮按**前缀**匹配：/hosts/new、/workspace、/editor 这类子路径要归到对应项
+	const active = activityFromPath(pathname);
 
 	return (
 		<nav className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-surface-sunk py-2">

@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $routes = [ordered]@{
-	"workspace"      = ""
+	"workspace"      = "workspace"
 	"hosts"          = "hosts"
 	"host-edit"      = "hosts/new"
 	"connect"        = "connect"

@@ -42,8 +42,8 @@ termx/
 
 | 界面文件 | 设计帧 | 路由 |
 | --- | --- | --- |
-| `src/screens/Workspace.tsx` | `frames/index.tsx` | `/` |
-| `src/screens/Hosts.tsx` | `frames/hosts.tsx` | `/hosts` |
+| `src/screens/Workspace.tsx` | `frames/index.tsx` | `/workspace`（首页是主机库；`/` 与未知路径都重定向到 `/hosts`） |
+| `src/screens/Hosts.tsx` | `frames/hosts.tsx` | `/hosts`（首页） |
 | `src/screens/HostEdit.tsx` | `frames/host-edit.tsx` | `/hosts/new`, `/hosts/:hostId/edit` |
 | `src/screens/Connect.tsx` | `frames/connect.tsx` | `/connect` |
 | `src/screens/Sftp.tsx` | `frames/sftp.tsx` | `/sftp` |

@@ -461,7 +461,7 @@ export default function Connect() {
 		// 走到这里说明 shell 已经起来了，标签与分屏格的状态要跟着变成「已连接」，
 		// 否则状态栏与标签会一直停在「连接中」。
 		useSessionsStore.getState().setStatus(tabId, "connected");
-		navigate("/");
+		navigate("/workspace");
 	};
 
 	/**
@@ -719,9 +719,10 @@ export default function Connect() {
 	return (
 		<WindowChrome>
 			<div className="flex min-h-0 flex-1 flex-col bg-surface">
-				{/* 顶置标签：进度显示在标签内部，不弹窗（需求书 07） */}
+				{/* 顶置标签：进度显示在标签内部，不弹窗（需求书 07）。
+				    底色与工作区的活动标签一致（应用表面色），不用终端画布色 —— 标签是外壳 */}
 				<div className="flex h-8.5 shrink-0 items-end border-b border-border bg-surface-sunk px-2">
-					<div className="flex h-7.5 items-center gap-2 rounded-t border-t border-x border-border bg-term px-3 text-[12px] text-surface-foreground">
+					<div className="flex h-7.5 items-center gap-2 rounded-t border-t border-x border-border bg-surface-raised px-3 text-[12px] text-surface-foreground">
 						<StatusDot status={tabStatus} size={6} />
 						<span className="font-mono">{host.name}</span>
 						<span

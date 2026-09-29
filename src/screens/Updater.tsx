@@ -37,7 +37,8 @@ export default function Updater() {
 	};
 
 	return (
-		<div className="relative flex h-full flex-col items-center justify-center overflow-y-auto bg-term p-4">
+		/* 整页浮层：底色用应用表面色（跟主题走），不用终端画布色 */
+		<div className="relative flex h-full flex-col items-center justify-center overflow-y-auto bg-surface-sunk p-4">
 			{/* 背景虚化的主工作台光晕（token 颜色，不硬编码） */}
 			<div aria-hidden className="pointer-events-none absolute -top-10 -left-20 size-72 rounded-full bg-primary/10 blur-3xl" />
 			<div aria-hidden className="pointer-events-none absolute -right-16 bottom-0 size-80 rounded-full bg-accent/10 blur-3xl" />
@@ -59,7 +60,7 @@ export default function Updater() {
 					<div className="flex items-center gap-2">
 						<span className="font-mono text-[10.5px] text-faint">当前版本信息未接入</span>
 						<Link
-							to="/"
+							to="/settings"
 							className="flex size-6 items-center justify-center rounded text-muted transition-colors hover:bg-surface-raised hover:text-surface-foreground"
 							aria-label="关闭"
 						>
@@ -131,12 +132,13 @@ export default function Updater() {
 					/>
 
 					<div className="flex shrink-0 items-center gap-2">
-						<Button onClick={() => navigate("/")}>关闭</Button>
+						{/* 更新页只从设置页进，关闭就回设置页（首页是主机库，不该把人丢到那里） */}
+						<Button onClick={() => navigate("/settings")}>关闭</Button>
 					</div>
 				</div>
 			</div>
 
-			<div className="relative z-10 mt-3 font-mono text-[10.5px] text-term-ink/50">TermX Desktop · Windows x64</div>
+			<div className="relative z-10 mt-3 font-mono text-[10.5px] text-faint">TermX Desktop · Windows x64</div>
 		</div>
 	);
 }

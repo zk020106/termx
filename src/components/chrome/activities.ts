@@ -29,7 +29,8 @@ export const settingsActivity: ActivityDef = {
 
 /** 路由 → 活动栏高亮项 */
 export function activityFromPath(pathname: string): ActivityId | undefined {
-	if (pathname === "/" || pathname.startsWith("/hosts")) return "hosts";
+	// 工作区自带主机侧栏，跟主机库算同一项
+	if (pathname.startsWith("/hosts") || pathname.startsWith("/workspace")) return "hosts";
 	if (pathname.startsWith("/sftp") || pathname.startsWith("/editor")) return "sftp";
 	if (pathname.startsWith("/forward")) return "forward";
 	if (pathname.startsWith("/snippets")) return "snippets";

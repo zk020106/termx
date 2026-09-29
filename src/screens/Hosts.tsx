@@ -147,7 +147,7 @@ export default function Hosts() {
 				description: "这台主机已经有会话，没有新开连接 · 要再开一条用「连接」",
 				tone: "default",
 			});
-			navigate("/");
+			navigate("/workspace");
 			return;
 		}
 		toast({ title: `正在连接 ${host.name}`, description: `${host.username}@${host.hostname}:${host.port}`, tone: "default" });

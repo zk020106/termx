@@ -1,11 +1,16 @@
 import { Component, lazy, Suspense, type ErrorInfo, type ReactNode } from "react";
-import { HashRouter, Route, Routes } from "react-router";
+import { HashRouter, Navigate, Route, Routes } from "react-router";
 import { LockGate } from "@/components/chrome/LockGate";
 
 /* 路由与 termx-design-brief「06 设计交付清单」的 16 个界面一一对应。
  * 其中 /welcome、/palette、/updater 是整页或浮层，不套应用外壳；
  * 锁屏不是路由：它由 LockGate 以覆盖层形式盖在整棵界面之上（见该文件），
  * 这样锁屏不会卸载终端，SSH 会话得以保留。
+ *
+ * 首页是**主机库**（/ 与未知路径都重定向过去）：冷启动没有任何会话，
+ * 落在工作区只会看到一个空壳，用户还得自己再找去主机库的路。工作区因此
+ * 有独立路径 /workspace，只有「连上以后进入」「点已有会话」「命令面板切会话」
+ * 这类**手里已经有会话**的动作才会过去。
  *
  * 桌面端用 HashRouter：打包后由自定义协议加载，无需服务端改写路由。
  * 16 个界面全部按路由懒加载 —— 既让首屏只装载当前界面，也让单个界面的
@@ -36,7 +41,9 @@ export default function App() {
 						<Routes>
 							<Route path="/welcome" element={<Welcome />} />
 
-							<Route path="/" element={<Workspace />} />
+							{/* 首页 = 主机库；工作区只从「已经有会话」的入口进 */}
+							<Route path="/" element={<Navigate to="/hosts" replace />} />
+							<Route path="/workspace" element={<Workspace />} />
 							<Route path="/hosts" element={<Hosts />} />
 							<Route path="/hosts/new" element={<HostEdit />} />
 							<Route path="/hosts/:hostId/edit" element={<HostEdit />} />
@@ -52,7 +59,8 @@ export default function App() {
 							<Route path="/palette" element={<Palette />} />
 							<Route path="/updater" element={<Updater />} />
 
-							<Route path="*" element={<Workspace />} />
+							{/* 未知路径同样回到首页，而不是丢给用户一个空工作区 */}
+							<Route path="*" element={<Navigate to="/hosts" replace />} />
 						</Routes>
 					</Suspense>
 				</ScreenBoundary>

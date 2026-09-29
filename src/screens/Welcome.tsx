@@ -56,7 +56,8 @@ export default function Welcome() {
 	const toggleSource = (id: string) =>
 		setPicked((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
 
-	const finish = () => navigate("/");
+	// 引导结束后回首页（主机库）：那里才有「连哪台」的下一步
+	const finish = () => navigate("/hosts");
 
 	const next = () => {
 		if (step === 2) {

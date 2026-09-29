@@ -62,7 +62,7 @@ export default function Monitor() {
 					icon="icon-[lucide--activity]"
 					title="指标采集尚未接入"
 					action={
-						<Button size="sm" variant="primary" icon="icon-[lucide--layout-dashboard]" onClick={() => navigate("/")}>
+						<Button size="sm" variant="primary" icon="icon-[lucide--layout-dashboard]" onClick={() => navigate("/workspace")}>
 							返回工作台
 						</Button>
 					}

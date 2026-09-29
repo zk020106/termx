@@ -15,7 +15,8 @@ export default function Editor() {
 
 	return (
 		<WindowChrome>
-			<div className="relative flex min-h-0 flex-1 flex-col bg-term">
+			{/* 编辑器框架跟主题走：正文是 bg-surface，外壳不能垫终端画布色（浅色下会透出黑边） */}
+			<div className="relative flex min-h-0 flex-1 flex-col bg-surface">
 				{/* 编辑器标签栏（Linear 极简风）：当前没有任何标签 */}
 				<div className="flex h-8.5 shrink-0 items-end justify-between border-b border-border bg-surface-sunk px-2">
 					<div className="flex min-w-0 items-center gap-1 pb-1">

@@ -78,7 +78,8 @@ termx/
 
 约定：
 
-- **颜色零硬编码**。所有颜色来自 [`src/styles/theme.css`](src/styles/theme.css) 的 token，用法是 `bg-surface`、`text-muted`、`border-border`、`text-env-prod` 这类工具类。
+- **颜色零硬编码**。所有颜色来自 [`src/styles/theme.css`](src/styles/theme.css) 的 token，用法是 `bg-surface`、`text-muted`、`border-border`、`text-env-prod` 这类工具类。`bg-term` / `text-term-ink` 是**终端画布**专用色（深浅主题下都恒为近黑，终端配色另走 scheme 色板），应用外壳 UI 一律不用它们。
+- **首页是主机库**。`/` 与未知路径都重定向到 `/hosts`；工作区在 `/workspace`，只从「连上以后进入」「点已有会话」这类已经有会话的动作过去。从任何地方点一台主机都会进 `/connect?host=` 走连接流程，不会就地开一个没有连接的标签。
 - **深色为默认，浅色可切换**。主题属性写在 `<html data-theme>`，由 `useThemeStore` 维护。
 - **环境辨识贯穿全局**。生产 / 预发 / 测试 / 开发有固定颜色，在主机库、标签、终端边框、状态栏四处的表现由 `EnvPill` / `EnvStripe` 统一提供。
 

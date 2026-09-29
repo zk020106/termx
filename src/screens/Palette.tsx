@@ -32,8 +32,8 @@ export default function Palette() {
 
 	return (
 		<WindowChrome>
-			{/* 工作区背景：终端底色被遮罩压暗，与设计帧一致 */}
-			<div className="relative flex min-h-0 flex-1 flex-col items-center justify-start bg-term/90 p-4">
+			{/* 工作区背景：底色跟主题走，压暗交给面板自带的半透明遮罩（与全局面板一致） */}
+			<div className="relative flex min-h-0 flex-1 flex-col items-center justify-start bg-surface p-4">
 				{open ? (
 					// key 让切换状态时重新挂载面板，输入框回到该状态的初始查询；
 					// 这里的面板挂在内容区（标题栏之下），所以顶部留白比全局浮层略小
@@ -44,7 +44,7 @@ export default function Palette() {
 						className="pt-[7.5vh]"
 					/>
 				) : (
-					<div className="flex h-full flex-col items-center justify-center gap-2 text-term-ink/70">
+					<div className="flex h-full flex-col items-center justify-center gap-2 text-muted">
 						<span className="icon-[lucide--command] size-6" />
 						<span className="text-[12px]">命令面板已关闭，可按 Ctrl+K 重新打开</span>
 						<Button size="sm" icon="icon-[lucide--command]" onClick={() => setOpen(true)} className="mt-1">

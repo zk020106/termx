@@ -23,7 +23,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouse
 import { Link, useNavigate } from "react-router";
 
 /* =============================================================================
- * 终端工作区（路由 /） —— 设计帧 termx.vetd/frames/index.tsx 的交互版。
+ * 终端工作区（路由 /workspace） —— 设计帧 termx.vetd/frames/index.tsx 的交互版。
  *
  * 布局逐帧复刻：左侧主机库 220px · 标签栏 34px · 分屏网格 + 底部 SFTP 面板 150px
  * · 右侧主机监控 200px。终端本体见 @/components/terminal/Terminal。
@@ -80,7 +80,6 @@ export default function Workspace() {
 	const toggleBroadcast = useSessionsStore((s) => s.toggleBroadcast);
 	const closeTab = useSessionsStore((s) => s.closeTab);
 	const reopenTab = useSessionsStore((s) => s.reopenTab);
-	const openSession = useSessionsStore((s) => s.openSession);
 
 	const hostStore = useHostsStore();
 	const probeStore = useProbeStore();
@@ -352,9 +351,11 @@ export default function Workspace() {
 
 	/**
 	 * 点主机库里的主机：
-	 *  - 这台主机已经有活着的会话 → **聚焦**到那个标签（不再默默多开一条）
-	 *  - 没有 → 按老规矩开一格（没有凭据就建立不了会话，终端会如实说明）
-	 * 想明确再开一条连接的，走主机库里的「连接」动作（每次一个新会话键）。
+	 *  - 这台主机已经有活着的会话 → **聚焦**到那个标签（已经在这一屏里，就地切）
+	 *  - 没有 → 进连接流程（与主机库的双击行为完全一致），由连接页建立会话后回工作区
+	 *
+	 * 这里**不再**就地开一个空标签：没有凭据就建立不了会话，那种标签只会永远停在
+	 * 「连接中」，终端里写着「这条会话还没有建立」——等于让用户自己再找一次连接入口。
 	 */
 	const onOpenHost = (host: Host) => {
 		const live = liveTabForHost(host.id);
@@ -365,10 +366,8 @@ export default function Workspace() {
 			toast({ title: `已切到 ${host.name} 的会话`, description: "这台主机已有会话，没有新开连接", tone: "default" });
 			return;
 		}
-		const tabId = openSession(host.id);
-		setActiveTab(tabId);
-		const owned = panesOfTab(tabId)[0];
-		if (owned) focusPane(owned.id);
+		toast({ title: `正在连接 ${host.name}`, description: `${host.username}@${host.hostname}:${host.port}`, tone: "default" });
+		navigate(`/connect?host=${host.id}`);
 	};
 
 	/* 真实会话的生命周期 → 标签状态：按**会话键**找标签，
@@ -943,8 +942,11 @@ function TabItem({
 			onKeyDown={(event) => event.key === "Enter" && onSelect()}
 			className={cn(
 				"flex h-7.5 cursor-pointer items-center gap-1.5 rounded-t border-x border-t px-2 text-[12px] transition-colors",
+				// 活动标签用**应用表面色**（与主机列表选中项、活动栏选中项同一枚 token），
+				// 不用 bg-term —— 那是终端画布色，深浅两套主题下都恒为近黑，
+				// 浅色主题里会变成浅色标签栏上的一块黑。标签是外壳，必须跟主题走。
 				active
-					? "border-border bg-term font-medium text-surface-foreground shadow-sm"
+					? "border-border bg-surface-raised font-medium text-surface-foreground shadow-sm"
 					: "border-transparent bg-transparent text-muted hover:bg-surface-raised/40 hover:text-surface-foreground",
 			)}
 		>

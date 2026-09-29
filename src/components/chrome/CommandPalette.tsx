@@ -182,7 +182,7 @@ export function CommandPalettePanel({
 				if (live) {
 					useSessionsStore.getState().setActiveTab(live.id);
 					toast({ title: `已切到 ${item.title} 的会话`, description: "这台主机已经有会话，没有新开连接", tone: "default" });
-					navigate("/");
+					navigate("/workspace");
 					return;
 				}
 				navigate(`/connect?host=${encodeURIComponent(hostId)}`);
