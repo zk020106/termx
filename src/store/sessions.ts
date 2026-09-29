@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { SessionTab, SplitLayout, TerminalLine, TerminalPane } from "@/data/types";
+import type { ConnectionStatus, SessionTab, SplitLayout, TerminalLine, TerminalPane } from "@/data/types";
 import { useHostsStore } from "./hosts";
 
 /* 会话：只承载真实打开的标签与分屏格。
@@ -16,6 +16,8 @@ interface SessionsState {
 	reopenTab: (tab: SessionTab) => void;
 	setActiveTab: (tabId: string) => void;
 	setTabTitle: (tabId: string, title: string) => void;
+	/** 会话建立/断开后同步标签与分屏格的状态（状态始终可见是需求书原则 3） */
+	setStatus: (tabId: string, status: ConnectionStatus) => void;
 	setLayout: (tabId: string, layout: SplitLayout) => void;
 	toggleBroadcast: (tabId: string) => void;
 	focusPane: (paneId: string) => void;
@@ -82,6 +84,17 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 
 	setTabTitle: (tabId, title) =>
 		set((s) => ({ tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, title } : t)) })),
+
+	setStatus: (tabId, status) =>
+		set((s) => {
+			const tab = s.tabs.find((t) => t.id === tabId);
+			if (!tab) return {};
+			return {
+				tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, status } : t)),
+				// 同一主机的分屏格一起更新，避免标签显示已连接而格子里还写着连接中
+				panes: s.panes.map((p) => (tab.hostId && p.hostId === tab.hostId ? { ...p, status } : p)),
+			};
+		}),
 
 	setLayout: (tabId, layout) => set((s) => ({ tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, layout } : t)) })),
 

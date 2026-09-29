@@ -228,7 +228,10 @@ export default function Connect() {
 
 	/** 会话标签 + 进入工作区：工作区的终端会自己挂到这条 SSH 会话上 */
 	const enterWorkspace = () => {
-		useSessionsStore.getState().openSession(host.id);
+		const tabId = useSessionsStore.getState().openSession(host.id);
+		// 走到这里说明 shell 已经起来了，标签与分屏格的状态要跟着变成「已连接」，
+		// 否则状态栏与标签会一直停在「连接中」。
+		useSessionsStore.getState().setStatus(tabId, "connected");
 		navigate("/");
 	};
 
@@ -414,6 +417,7 @@ export default function Connect() {
 										value={password}
 										disabled={connecting}
 										autoComplete="off"
+										autoFocus
 										placeholder={connecting ? "正在认证…" : "SSH 登录密码"}
 										onChange={(e) => setPassword(e.target.value)}
 										onKeyDown={(e) => {
@@ -616,7 +620,7 @@ export default function Connect() {
 					<FingerprintBlock value={fingerprint} className="mt-2" />
 					<div className="mt-2.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
 						<span className="icon-[lucide--triangle-alert] mt-px size-3 shrink-0" />
-						指纹只能来自服务器，TermX 不会预填或推测任何指纹值；首次连接的人工确认与 known_hosts 写入也尚未接入。
+						指纹只能来自服务器，TermX 不会预填或推测任何指纹值。
 					</div>
 				</Modal>
 
@@ -846,7 +850,11 @@ function FingerprintBlock({ value, className }: { value: string | null; classNam
 			</div>
 			<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
 				<span className="icon-[lucide--triangle-alert] mt-px size-3 shrink-0" />
-				<span>已显示服务器返回的真实指纹；known_hosts 校验与首次连接人工确认尚未实现，当前不会阻止你连接。</span>
+				<span>
+					{value
+						? "已显示服务器返回的真实指纹；known_hosts 校验与首次连接人工确认尚未实现，当前不会阻止你连接。"
+						: "还没有握手，所以这里没有指纹；known_hosts 校验与首次连接的人工确认尚未实现，TermX 也不会预填任何指纹值。"}
+				</span>
 			</div>
 		</div>
 	);

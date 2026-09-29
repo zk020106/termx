@@ -173,8 +173,27 @@ export function CommandPalettePanel({
 				});
 				return;
 			}
-			toast({ title: `正在连接 ${item.title}`, description: item.subtitle, tone: "default" });
-			navigate("/");
+			// 主机项：直接进入连接流程（需求书设计目标：Ctrl+K → 输入几个字母 → 回车即连接）
+			if (item.id.startsWith("host-")) {
+				const hostId = item.id.slice("host-".length);
+				navigate(`/connect?host=${encodeURIComponent(hostId)}`);
+				return;
+			}
+			if (item.id.startsWith("snippet-")) {
+				toast({
+					title: `片段：${item.title}`,
+					description: "到「命令片段」界面选择发送目标后使用。",
+					tone: "default",
+				});
+				navigate("/snippets");
+				return;
+			}
+			// 其余是静态快捷动作：目前只做提示，具体实现随对应能力接入
+			toast({
+				title: item.title,
+				description: item.shortcut ? `快捷键 ${item.shortcut}` : "该动作尚未接入。",
+				tone: "default",
+			});
 		},
 		[navigate, onClose],
 	);
