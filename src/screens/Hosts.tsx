@@ -7,6 +7,7 @@ import { cn } from "@/lib/cn";
 import { describeProbe, formatMs, probeSupported } from "@/lib/probe";
 import { filterHosts, useHostsStore, type HostScope } from "@/store/hosts";
 import { useProbeStore } from "@/store/probe";
+import { liveTabForHost, useSessionsStore } from "@/store/sessions";
 import { toast } from "@/store/toast";
 import { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router";
@@ -132,8 +133,38 @@ export default function Hosts() {
 		return hosts.filter((h) => h.jumpHostIds.length === 0 && hosts.some((x) => x.jumpHostIds.includes(h.id))).length;
 	};
 
+	/**
+	 * 「打开」这台主机（双击卡片 / 列表行、树形双击）：
+	 * 已经有活着的会话就**聚焦**到那个标签，没有才进连接页。
+	 * 不这么做的话，用户在主机库里随手点一下就会多出一条同主机的连接。
+	 */
 	const openHost = (host: Host) => {
+		const live = liveTabForHost(host.id);
+		if (live) {
+			useSessionsStore.getState().setActiveTab(live.id);
+			toast({
+				title: `已切到 ${host.name} 的会话`,
+				description: "这台主机已经有会话，没有新开连接 · 要再开一条用「连接」",
+				tone: "default",
+			});
+			navigate("/");
+			return;
+		}
 		toast({ title: `正在连接 ${host.name}`, description: `${host.username}@${host.hostname}:${host.port}`, tone: "default" });
+		navigate(`/connect?host=${host.id}`);
+	};
+
+	/**
+	 * 「连接」这台主机（卡片 / 列表 / 树形上的终端图标）：**明确要开新连接**。
+	 * 每次进连接页都会为这次连接生成一个新的会话键，所以同一台主机可以有
+	 * 多条并发连接，已有一条也不会被复用。
+	 */
+	const connectHost = (host: Host) => {
+		toast({
+			title: `新建到 ${host.name} 的连接`,
+			description: liveTabForHost(host.id) ? "已有会话保持不动，这是一条独立的新连接" : `${host.username}@${host.hostname}:${host.port}`,
+			tone: "default",
+		});
 		navigate(`/connect?host=${host.id}`);
 	};
 
@@ -343,6 +374,7 @@ export default function Hosts() {
 									dragging={draggingId === h.id}
 									onSelect={() => useHostsStore.getState().toggleSelect(h.id)}
 									onOpen={() => openHost(h)}
+									onConnect={() => connectHost(h)}
 									onEdit={() => navigate(`/hosts/${h.id}/edit`)}
 									onDelete={() => deleteHosts([h.id])}
 								/>
@@ -367,6 +399,7 @@ export default function Hosts() {
 									dragging={draggingId === h.id}
 									onSelect={() => useHostsStore.getState().toggleSelect(h.id)}
 									onOpen={() => openHost(h)}
+									onConnect={() => connectHost(h)}
 									onEdit={() => navigate(`/hosts/${h.id}/edit`)}
 									onDelete={() => deleteHosts([h.id])}
 								/>
@@ -438,7 +471,7 @@ export default function Hosts() {
 															<span className="flex items-center gap-2">
 																<LatencyCell host={h} />
 																<span className="hidden items-center gap-0.5 group-hover:flex">
-																	<IconAction icon="icon-[lucide--terminal]" label="连接" onClick={() => openHost(h)} />
+																	<IconAction icon="icon-[lucide--terminal]" label="连接" onClick={() => connectHost(h)} />
 																	<IconAction icon="icon-[lucide--pencil]" label="编辑" onClick={() => navigate(`/hosts/${h.id}/edit`)} />
 																	<IconAction
 																		icon="icon-[lucide--trash-2]"
@@ -585,6 +618,7 @@ function HostCard({
 	dragging,
 	onSelect,
 	onOpen,
+	onConnect,
 	onEdit,
 	onDelete,
 }: {
@@ -592,7 +626,10 @@ function HostCard({
 	selected: boolean;
 	dragging: boolean;
 	onSelect: () => void;
+	/** 打开（聚焦已有会话 / 首次连接） */
 	onOpen: () => void;
+	/** 明确新建一条连接 */
+	onConnect: () => void;
 	onEdit: () => void;
 	onDelete: () => void;
 }) {
@@ -621,7 +658,7 @@ function HostCard({
 					<span className="flex shrink-0 items-center gap-1">
 						{selected && <span className="icon-[lucide--check-circle] size-3 text-primary" />}
 						<span className="hidden items-center gap-0.5 group-hover:flex">
-							<IconAction icon="icon-[lucide--terminal]" label="连接" onClick={onOpen} />
+							<IconAction icon="icon-[lucide--terminal]" label="新建连接" onClick={onConnect} />
 							<IconAction icon="icon-[lucide--pencil]" label="编辑" onClick={onEdit} />
 							<IconAction icon="icon-[lucide--trash-2]" label="删除" danger onClick={onDelete} />
 						</span>
@@ -662,6 +699,7 @@ function HostRow({
 	dragging,
 	onSelect,
 	onOpen,
+	onConnect,
 	onEdit,
 	onDelete,
 }: {
@@ -669,7 +707,10 @@ function HostRow({
 	selected: boolean;
 	dragging: boolean;
 	onSelect: () => void;
+	/** 打开（聚焦已有会话 / 首次连接） */
 	onOpen: () => void;
+	/** 明确新建一条连接 */
+	onConnect: () => void;
 	onEdit: () => void;
 	onDelete: () => void;
 }) {
@@ -705,7 +746,7 @@ function HostRow({
 			<LatencyCell host={host} showDot className="w-[76px] shrink-0 justify-end" />
 			<span className="flex w-[92px] shrink-0 items-center justify-end gap-0.5">
 				<span className="hidden items-center gap-0.5 group-hover:flex">
-					<IconAction icon="icon-[lucide--terminal]" label="连接" onClick={onOpen} />
+					<IconAction icon="icon-[lucide--terminal]" label="新建连接" onClick={onConnect} />
 					<IconAction icon="icon-[lucide--pencil]" label="编辑" onClick={onEdit} />
 					<IconAction icon="icon-[lucide--trash-2]" label="删除" danger onClick={onDelete} />
 				</span>

@@ -1,5 +1,5 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
-import { closeSshSession, hasSshSession, openSshSession, sshKeyForHost, type SshOpenResult } from "@/components/terminal/sshCache";
+import { closeSshSession, hasSshSession, newSshSessionKey, openSshSession, type SshOpenResult } from "@/components/terminal/sshCache";
 import { Button } from "@/components/ui/Button";
 import { Badge, EmptyState, Segmented, StatusDot } from "@/components/ui/Display";
 import { Field, Input } from "@/components/ui/Input";
@@ -30,7 +30,7 @@ import { useSessionsStore } from "@/store/sessions";
 import { useSettingsStore } from "@/store/settings";
 import { toast } from "@/store/toast";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
 /* =============================================================================
@@ -200,8 +200,21 @@ export default function Connect() {
 	/** 主机登记的认证方式；本页没手动切换时就用它 */
 	const hostMethod: AuthMethod = host?.auth.method ?? "password";
 	const authMethod: AuthMethod = methodOverride ?? hostMethod;
-	/** 会话键：hooks 也要用它，所以在「没有主机」的提前返回之前就算出来 */
-	const sessionKey = host ? sshKeyForHost(host.id) : "";
+	/**
+	 * 本次连接的会话键：**每次进入本页都生成一个新的**。
+	 *
+	 * 本页的语义就是「现在发起一次连接」，所以这里不该复用别的会话：
+	 * 复用了就退回「一台主机只能有一条连接」。同一台主机想再开一条，
+	 * 从主机库再走一次连接页即可，两条会话各有各的键、互不影响。
+	 * 换主机（路由参数变了但组件没重挂载）时重新生成。
+	 */
+	const [sessionKey, setSessionKey] = useState(() => (hostId ? newSshSessionKey(hostId) : ""));
+	const keyHostRef = useRef(hostId);
+	useEffect(() => {
+		if (keyHostRef.current === hostId) return;
+		keyHostRef.current = hostId;
+		setSessionKey(hostId ? newSshSessionKey(hostId) : "");
+	}, [hostId]);
 	/** 主机登记的那把密钥（密钥库只存公钥元数据，没有文件路径，所以仍要用户指定文件） */
 	const registeredKey = useKeysStore((s) => (host?.auth.keyId ? s.keys.find((k) => k.id === host.auth.keyId) : undefined));
 
@@ -439,7 +452,12 @@ export default function Connect() {
 
 	/** 会话标签 + 进入工作区：工作区的终端会自己挂到这条 SSH 会话上 */
 	const enterWorkspace = () => {
-		const tabId = useSessionsStore.getState().openSession(host.id);
+		const store = useSessionsStore.getState();
+		// 已经是同一个会话键的标签就聚焦它，别再开一个一模一样的格子；
+		// 真正要开第二条连接得生成新的键（本页每次进入就是一个新键）。
+		const existing = store.tabs.find((t) => t.sessionKey === sessionKey);
+		const tabId = existing ? existing.id : store.openSession(host.id, sessionKey);
+		useSessionsStore.getState().setActiveTab(tabId);
 		// 走到这里说明 shell 已经起来了，标签与分屏格的状态要跟着变成「已连接」，
 		// 否则状态栏与标签会一直停在「连接中」。
 		useSessionsStore.getState().setStatus(tabId, "connected");

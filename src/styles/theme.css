@@ -7,7 +7,8 @@
  * 来源：termx.vetd/theme.css（Vetta 设计画布）与 termx.vetd/DESIGN.md（Linear 体系）
  * 结构：
  *   1) :root / [data-theme] 定义 --tx-* 原始语义变量（可随主题切换）
- *   2) [data-accent] 在六套强调色色板之间切换 --tx-accent（默认 indigo）
+ *   2) [data-accent] 在六套强调色色板之间切换：--tx-primary（主色，大面积底色）
+ *      与 --tx-accent（同色相的亮色，小面积标记），默认 indigo
  *   3) @theme 把 --tx-* 映射为 Tailwind 的 --color-*，从而生成 bg-surface /
  *      text-muted / border-border 等工具类
  *
@@ -20,8 +21,6 @@
 	color-scheme: dark;
 
 	/* Linear 核心 */
-	--tx-primary: oklch(56% 0.19 274);
-	--tx-primary-foreground: oklch(99% 0 0);
 	--tx-surface: oklch(14% 0.006 260);
 	--tx-surface-raised: oklch(17.5% 0.008 260);
 	--tx-surface-sunk: oklch(11% 0.005 260);
@@ -45,6 +44,22 @@
 	--tx-swatch-steel: oklch(74% 0.02 260);
 	--tx-swatch-steel-soft: oklch(24% 0.01 260);
 
+	/* 强调色当「主色」用：按钮底色、选中态、焦点框都是大面积上色，色板那套亮色
+	 * 直接当底压白字只有 2.0–2.9:1，所以按色相保留、把明度落到 54–57%，
+	 * 并把彩度收敛进 sRGB 色域（oklch 超域会被浏览器裁掉，白算对比度）。
+	 * 目标：--tx-primary-foreground（oklch 99% 0 0）压上去 ≥4.5:1，实测 4.61–4.77:1。 */
+	--tx-primary-indigo: oklch(56% 0.19 274); /* 与改造前的深色主色一致，默认观感不变 */
+	--tx-primary-cyan: oklch(54% 0.092 205);
+	--tx-primary-emerald: oklch(54% 0.133 155);
+	--tx-primary-amber: oklch(56% 0.126 65);
+	--tx-primary-rose: oklch(57% 0.19 25);
+	--tx-primary-steel: oklch(55% 0.02 260);
+
+	/* 主色前景：同一枚近白在 6 套主色上都够（见上），无需逐色分叉 */
+	--tx-primary-foreground: oklch(99% 0 0);
+	/* 默认主色（强调色为 indigo 时） */
+	--tx-primary: var(--tx-primary-indigo);
+
 	/* 默认强调色：Linear 经典靛蓝 */
 	--tx-accent: var(--tx-swatch-indigo);
 	--tx-accent-soft: var(--tx-swatch-indigo-soft);
@@ -64,8 +79,6 @@
 :root[data-theme="light"] {
 	color-scheme: light;
 
-	--tx-primary: oklch(52% 0.19 274);
-	--tx-primary-foreground: oklch(99% 0 0);
 	--tx-surface: oklch(97.5% 0.002 260);
 	--tx-surface-raised: oklch(99.4% 0.001 260);
 	--tx-surface-sunk: oklch(94.5% 0.003 260);
@@ -87,6 +100,20 @@
 	--tx-swatch-steel: oklch(48% 0.02 260);
 	--tx-swatch-steel-soft: oklch(93% 0.008 260);
 
+	/* 浅色下的主色：色板本身已经是 48–56% 的深色，基本能直接当底压白字
+	 * （实测 4.68–6.35:1）；只有 cyan 在 55% 处卡在 4.53:1，降 1% 明度留余量。 */
+	--tx-primary-indigo: oklch(52% 0.19 274); /* 与改造前的浅色主色一致，默认观感不变 */
+	--tx-primary-cyan: oklch(54% 0.092 205);
+	--tx-primary-emerald: oklch(53% 0.131 155);
+	--tx-primary-amber: oklch(56% 0.126 65);
+	--tx-primary-rose: oklch(53% 0.19 25);
+	--tx-primary-steel: oklch(48% 0.02 260);
+
+	/* 主色前景：同一枚近白在 6 套主色上都够（见上），无需逐色分叉 */
+	--tx-primary-foreground: oklch(99% 0 0);
+	/* 默认主色（强调色为 indigo 时） */
+	--tx-primary: var(--tx-primary-indigo);
+
 	/* 默认强调色：Linear 经典靛蓝 */
 	--tx-accent: var(--tx-swatch-indigo);
 	--tx-accent-soft: var(--tx-swatch-indigo-soft);
@@ -99,28 +126,40 @@
 }
 
 /* 强调色切换：data-accent 也挂在 <html> 上，和 data-theme 叠加生效。
- * 这一段必须排在两个主题块之后：选择器特异性相同，靠顺序盖过主题块里的默认值。 */
+ * 这一段必须排在两个主题块之后：选择器特异性相同，靠顺序盖过主题块里的默认值。
+ *
+ * 每个块做两件事：
+ *   1) --tx-primary 指向该强调色的主色取值 → bg-primary / text-primary / border-primary
+ *      等 127 处用法（按钮、选中态、焦点框、开关、活动栏高亮…）全部跟着变；
+ *   2) --tx-accent 仍指向亮色板：小面积标记（文字/图标/描边）需要更亮的同色相，
+ *      也避免和 primary 语义重叠（见 Display.tsx 的 primary/accent 两种 tone）。 */
 :root[data-accent="indigo"] {
+	--tx-primary: var(--tx-primary-indigo);
 	--tx-accent: var(--tx-swatch-indigo);
 	--tx-accent-soft: var(--tx-swatch-indigo-soft);
 }
 :root[data-accent="cyan"] {
+	--tx-primary: var(--tx-primary-cyan);
 	--tx-accent: var(--tx-swatch-cyan);
 	--tx-accent-soft: var(--tx-swatch-cyan-soft);
 }
 :root[data-accent="emerald"] {
+	--tx-primary: var(--tx-primary-emerald);
 	--tx-accent: var(--tx-swatch-emerald);
 	--tx-accent-soft: var(--tx-swatch-emerald-soft);
 }
 :root[data-accent="amber"] {
+	--tx-primary: var(--tx-primary-amber);
 	--tx-accent: var(--tx-swatch-amber);
 	--tx-accent-soft: var(--tx-swatch-amber-soft);
 }
 :root[data-accent="rose"] {
+	--tx-primary: var(--tx-primary-rose);
 	--tx-accent: var(--tx-swatch-rose);
 	--tx-accent-soft: var(--tx-swatch-rose-soft);
 }
 :root[data-accent="steel"] {
+	--tx-primary: var(--tx-primary-steel);
 	--tx-accent: var(--tx-swatch-steel);
 	--tx-accent-soft: var(--tx-swatch-steel-soft);
 }

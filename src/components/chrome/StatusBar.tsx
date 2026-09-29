@@ -28,11 +28,13 @@ export function StatusBar() {
 	const visual = connVisual[status];
 	const reconnecting = status === "reconnecting";
 
-	// 连接建立后量真正的往返（SSH keepalive 往返）；没连上时退回主机库的 TCP 建连耗时
-	const rtt = useProbeStore((s) => (tab?.id ? s.rtt[tab.id] : undefined));
+	// 连接建立后量真正的往返（SSH keepalive 往返）；没连上时退回主机库的 TCP 建连耗时。
+	// 键必须是**会话键**：标签 id 不是会话身份，同主机两条会话会有两个不同的键
+	const sessionKey = tab?.sessionKey ?? undefined;
+	const rtt = useProbeStore((s) => (sessionKey ? s.rtt[sessionKey] : undefined));
 	const probe = useProbeStore((s) => (host ? s.results[host.id] : undefined));
 	// 只有真的挂着主机的会话才量往返：本地终端会话没有 SSH 连接可发 keepalive
-	useSshRttPolling(tab?.id, status === "connected" && Boolean(tab?.hostId));
+	useSshRttPolling(sessionKey, status === "connected" && Boolean(sessionKey));
 
 	const latency = latencyReading(rtt, probe, status === "connected", host);
 

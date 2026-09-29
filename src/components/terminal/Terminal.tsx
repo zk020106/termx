@@ -7,7 +7,6 @@ import {
 	attachSsh,
 	hasSshSession,
 	resizeSsh,
-	sshKeyForHost,
 	writeSsh,
 	type SshAttachment,
 } from "./sshCache";
@@ -58,11 +57,17 @@ interface Match {
 export function Terminal({
 	paneId,
 	hostId,
+	sessionKey,
 	className,
 	ref,
 }: {
 	paneId: string;
 	hostId?: string | null;
+	/**
+	 * 这一格接的 SSH 会话键。每次连接一个（见 sshCache.newSshSessionKey），
+	 * 所以同一台主机的两个格子可以各接一条独立会话。
+	 */
+	sessionKey?: string | null;
 	className?: string;
 	/** React 19：ref 作为普通 prop 传入，工作区据此拿到命令式句柄 */
 	ref?: Ref<TerminalHandle>;
@@ -129,8 +134,9 @@ export function Terminal({
 		const note = noteColor(scheme, palette);
 		const writeNote = (text: string) => writeLine(fg(note, text));
 
-		// 这一格连的是哪台主机：有真实 SSH 会话就走 SSH，否则才考虑本地 PTY
-		const sshKey = hostId ? sshKeyForHost(hostId) : null;
+		// 这一格接的是哪条 SSH 会话：会话键由分屏格自己带着。
+		// 选了主机但还没有会话时**不能**退回本地 PTY（那会在远程主机名下开一个本地 shell）
+		const sshKey = sessionKey ?? null;
 		const usingSsh = Boolean(sshKey && hasSshSession(sshKey));
 
 		const dataSub = term.onData((data) => {
@@ -158,10 +164,10 @@ export function Terminal({
 			sshRef.current = attachment;
 			attachRef.current = null;
 			if (attachment?.replay) term.write(attachment.replay);
-		} else if (sshKey) {
-			// 选了主机但还没建立 SSH 会话：如实说明，**不能**偷偷开一个本地 shell
+		} else if (sshKey || hostId) {
+			// 这条会话还没建立（或者选了主机但没走连接页）：如实说明，**不能**偷偷开一个本地 shell
 			noPtyRef.current = true;
-			writeNote("这台主机还没有建立 SSH 会话。请在主机库对它发起连接。");
+			writeNote("这条会话还没有建立。请在主机库对它发起一次连接。");
 		} else {
 			// 本地终端：真实 PTY 只在原生壳里有。会话由 ptyCache 持有，独立于组件生命周期，
 			// 因此 StrictMode 的「挂载→卸载→再挂载」以及分屏重建都不会丢掉 shell 的输出。
@@ -219,7 +225,7 @@ export function Terminal({
 			fitRef.current = null;
 			term.dispose();
 		};
-	}, [paneId, hostId]);
+	}, [paneId, hostId, sessionKey]);
 
 	/* 终端环境偏好改动 → 立即改已打开终端的 xterm 运行时选项，不需要重开会话。
 	   字号/字体/行高会影响网格，改完必须重新 fit，否则列数还是旧值。 */
@@ -303,8 +309,9 @@ export function Terminal({
 					return false;
 				}
 				if (!text) return false;
-				// 有真实会话才谈得上粘贴：SSH 优先，其次本地 PTY；都没有就如实返回失败
-				if (hostId && writeSsh(sshKeyForHost(hostId), text)) return true;
+				// 有真实会话才谈得上粘贴：这一格自己的 SSH 会话优先，其次本地 PTY。
+				// 会话键对一个分屏格是稳定的（格子不换会话），与上面 hostId 的取法一致
+				if (sessionKey && writeSsh(sessionKey, text)) return true;
 				return writePty(paneId, text);
 			},
 			saveScreen: () => {

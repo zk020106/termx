@@ -76,6 +76,7 @@ export function TerminalPane({
 				<Terminal
 					paneId={pane.id}
 					hostId={pane.hostId}
+					sessionKey={pane.sessionKey}
 					className="h-full w-full overflow-hidden"
 					ref={(handle) => registerTerminal(pane.id, handle)}
 				/>

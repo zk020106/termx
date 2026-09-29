@@ -207,7 +207,18 @@ export interface TerminalLine {
 
 export interface TerminalPane {
 	id: string;
+	/**
+	 * 所属标签。分屏格按**标签**归属，而不是按主机归属：
+	 * 同一台主机可以有多条会话（多个标签），按主机归属会让关掉一个标签
+	 * 把另一个标签的格子一起清掉。
+	 */
+	tabId: string | null;
 	hostId: string | null;
+	/**
+	 * 本格接的 SSH 会话键（每次连接一个，见 sshCache 的 newSshSessionKey）。
+	 * null = 本地 PTY，或者这台主机还没有建立会话（界面会如实说明）。
+	 */
+	sessionKey: string | null;
 	title: string;
 	subtitle?: string;
 	status: ConnectionStatus;
@@ -217,6 +228,11 @@ export interface TerminalPane {
 export interface SessionTab {
 	id: string;
 	hostId: string | null;
+	/**
+	 * 本标签占用的 SSH 会话键；null = 本地终端。
+	 * 会话身份是**键**不是主机：同一台主机的两个标签各有一个键、两条独立连接。
+	 */
+	sessionKey: string | null;
 	title: string;
 	status: ConnectionStatus;
 	latencyMs?: number;

@@ -40,8 +40,13 @@ enum SshCommand {
 #[derive(Default)]
 pub struct SshState {
     sessions: Arc<Mutex<HashMap<String, UnboundedSender<SshCommand>>>>,
-    /// 等待用户确认的主机密钥：host:port -> 公钥。
+    /// 各主机**最近一次握手看到的**服务器公钥：host:port -> 公钥。
     /// 存在这里而不是走 IPC 传递密钥材料，用户确认后由 Rust 自己写盘。
+    ///
+    /// 为什么是「最近看到」而不是「取走一份」：同一台主机可以有多条并发会话
+    /// （会话键每次连接都不同），几条会话撞上未知指纹时会写入同一把公钥。
+    /// 若确认时把它取走，第二条会话点确认就会撞上「没有待确认的主机密钥」，
+    /// 而其实它看到的正是同一把。留着不动，谁先确认都能拿到同一份材料。
     pending_keys: Arc<Mutex<HashMap<String, PublicKey>>>,
     /// 正在等界面回答的键盘交互请求（二次验证要来回问用户）
     pub auth_prompts: AuthPromptRegistry,
@@ -49,6 +54,24 @@ pub struct SshState {
 
 fn host_port_key(host: &str, port: u16) -> String {
     format!("{host}:{port}")
+}
+
+/// 登记一条会话。
+///
+/// 键必须唯一：同键重复登记会让两条会话抢同一格事件通道。前端给**每次连接**
+/// 生成一个新的键（`ssh:<hostId>#<序号>-<随机段>`），所以同一台主机的第二条
+/// 连接不会被这里挡住 —— 挡住的只是同一个键的重复登记。
+fn insert_session(
+    sessions: &Arc<Mutex<HashMap<String, UnboundedSender<SshCommand>>>>,
+    key: &str,
+    tx: UnboundedSender<SshCommand>,
+) -> Result<(), String> {
+    let mut map = sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
+    if map.contains_key(key) {
+        return Err(format!("会话 {key} 已存在"));
+    }
+    map.insert(key.to_string(), tx);
+    Ok(())
 }
 
 /// 连接阶段事件：phase 取 resolve / tcp / handshake / auth / shell / failed
@@ -427,14 +450,7 @@ pub async fn ssh_connect(
     rows: u32,
 ) -> Result<(), String> {
     let (tx, mut rx) = unbounded_channel::<SshCommand>();
-
-    {
-        let mut sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
-        if sessions.contains_key(&key) {
-            return Err(format!("会话 {key} 已存在"));
-        }
-        sessions.insert(key.clone(), tx);
-    }
+    insert_session(&state.sessions, &key, tx)?;
 
     let sessions = state.sessions.clone();
     let pending = state.pending_keys.clone();
@@ -483,7 +499,7 @@ pub fn ssh_trust_host(
     host: String,
     port: u16,
 ) -> Result<String, String> {
-    let key = take_pending(&state, &host, port)?;
+    let key = pending_key(&state.pending_keys, &host, port)?;
     known_hosts::trust(&app, &host, port, &key)?;
     Ok(known_hosts::fingerprint_of(&key))
 }
@@ -496,7 +512,7 @@ pub fn ssh_replace_host_key(
     host: String,
     port: u16,
 ) -> Result<String, String> {
-    let key = take_pending(&state, &host, port)?;
+    let key = pending_key(&state.pending_keys, &host, port)?;
     let removed = known_hosts::replace(&app, &host, port, &key)?;
 
     // 替换后复查：旧指纹也可能来自 OpenSSH 的 ~/.ssh/known_hosts，而我们不写那个文件。
@@ -514,12 +530,20 @@ pub fn ssh_replace_host_key(
     }
 }
 
-fn take_pending(state: &State<'_, SshState>, host: &str, port: u16) -> Result<PublicKey, String> {
-    state
-        .pending_keys
-        .lock()
+/// 取这台主机最近一次握手看到的公钥（只读，不取走）。
+///
+/// 同主机的并发会话共用这一份材料：谁先点「确认」都能拿到同一把密钥，
+/// 不会出现「第二条会话确认时被告知没有待确认密钥」。重复确认只是把同一条
+/// 记录再写一遍 —— known_hosts::trust 已做幂等，不会留下重复行。
+fn pending_key(
+    keys: &Arc<Mutex<HashMap<String, PublicKey>>>,
+    host: &str,
+    port: u16,
+) -> Result<PublicKey, String> {
+    keys.lock()
         .map_err(|_| "待确认密钥表已损坏".to_string())?
-        .remove(&host_port_key(host, port))
+        .get(&host_port_key(host, port))
+        .cloned()
         .ok_or_else(|| "没有待确认的主机密钥，请重新发起连接".to_string())
 }
 
@@ -877,5 +901,210 @@ mod tests {
         assert_eq!(report.loss, 0.5, "发出两次、收到一次");
         assert!(report.error.is_some());
         assert_eq!(source.calls, 2, "收工之后不能再发");
+    }
+
+    // ---------------------------------------------------------------------
+    // 多会话：同一台主机可以同时有多条连接。
+    //
+    // 会话身份是**会话键**（前端每次连接生成一个新的），不是主机：
+    // 会话表按键存，所以同一台主机登记两次是两条会话，各占一格、互不覆盖。
+    // ---------------------------------------------------------------------
+
+    /// 夹具公钥（与 known_hosts 的测试同款），只用于「待确认密钥」的读写验证
+    const FIXTURE_KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMA6n+DQWVPOxphqrRcQRfq6san3Tlu/Sevut+ELlKjJ";
+
+    fn fixture_key() -> PublicKey {
+        FIXTURE_KEY.parse().expect("夹具公钥应可解析")
+    }
+
+    fn session_table() -> Arc<Mutex<HashMap<String, UnboundedSender<SshCommand>>>> {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    /// 同一台主机的两次连接得到**不同的键**，两条会话各自占一格
+    #[test]
+    fn two_connections_to_one_host_get_separate_slots() {
+        let table = session_table();
+        let (tx1, _rx1) = unbounded_channel::<SshCommand>();
+        let (tx2, _rx2) = unbounded_channel::<SshCommand>();
+
+        // 前端生成的形状：ssh:<hostId>#<序号>-<随机段>
+        let first = "ssh:aws-18-216-234-51#1-ab12cd";
+        let second = "ssh:aws-18-216-234-51#2-ef34gh";
+        assert_ne!(first, second, "同一台主机的两次连接必须是不同的键");
+
+        insert_session(&table, first, tx1).expect("同主机的第一条会话应当能登记");
+        insert_session(&table, second, tx2).expect("同一台主机的第二条会话也应当能登记");
+
+        let map = table.lock().unwrap();
+        assert_eq!(map.len(), 2, "两条会话各占一格，不能互相覆盖");
+        assert!(map.contains_key(first) && map.contains_key(second));
+    }
+
+    /// 同一个键重复登记必须被挡住：否则两条会话会抢同一格事件通道
+    #[test]
+    fn duplicate_session_key_is_rejected() {
+        let table = session_table();
+        let key = "ssh:host#1-ab12cd";
+        let (tx1, _rx1) = unbounded_channel::<SshCommand>();
+        let (tx2, _rx2) = unbounded_channel::<SshCommand>();
+
+        insert_session(&table, key, tx1).expect("第一次登记应当成功");
+        let error = insert_session(&table, key, tx2).expect_err("同键重复登记必须被拒绝");
+        assert!(error.contains("已存在"), "错误信息应说明原因：{error}");
+        assert_eq!(table.lock().unwrap().len(), 1, "被拒绝的登记不能改动会话表");
+    }
+
+    /// 一条会话结束，不能动到同一台主机的另一条（清理按会话键来）
+    #[test]
+    fn ending_one_session_leaves_the_other() {
+        let table = session_table();
+        let first = "ssh:host#1-ab12cd";
+        let second = "ssh:host#2-ef34gh";
+        let (tx1, _rx1) = unbounded_channel::<SshCommand>();
+        let (tx2, _rx2) = unbounded_channel::<SshCommand>();
+        insert_session(&table, first, tx1).unwrap();
+        insert_session(&table, second, tx2).unwrap();
+
+        assert!(
+            table.lock().unwrap().remove(first).is_some(),
+            "第一条会话应当能按自己的键收掉"
+        );
+        assert!(
+            table.lock().unwrap().contains_key(second),
+            "同一台主机的另一条会话必须还在"
+        );
+    }
+
+    /// 待确认的主机密钥是按主机存的：同主机并发会话都能读到同一份材料
+    /// （读而不是取走 —— 取走会让第二条会话的「确认指纹」报「没有待确认的密钥」）
+    #[test]
+    fn pending_key_is_readable_by_every_concurrent_session() {
+        let keys = Arc::new(Mutex::new(HashMap::new()));
+        keys.lock()
+            .unwrap()
+            .insert(host_port_key("18.216.234.51", 22), fixture_key());
+
+        let first = pending_key(&keys, "18.216.234.51", 22).expect("第一条会话应能读到待确认密钥");
+        let second = pending_key(&keys, "18.216.234.51", 22).expect("并发的第二条会话也应能读到同一把");
+        assert_eq!(
+            known_hosts::fingerprint_of(&first),
+            known_hosts::fingerprint_of(&second),
+            "两条会话看到的必须是同一把密钥"
+        );
+
+        // 主机与端口都是维度：别的目标不能串到这台主机的材料上
+        assert!(pending_key(&keys, "49.235.166.66", 22).is_err());
+        assert!(pending_key(&keys, "18.216.234.51", 2222).is_err());
+    }
+
+    /// 连上一台真机并起一个 shell 通道；连接句柄要一起返回，否则连接会被丢掉
+    async fn open_shell(
+        host: &str,
+        port: u16,
+        user: &str,
+        password: &str,
+    ) -> (client::Handle<TestHandler>, russh::Channel<client::Msg>) {
+        let (mut session, _) = connect(host, port).await;
+        let auth = session
+            .authenticate_password(user.to_string(), password.to_string())
+            .await
+            .expect("认证过程出错");
+        assert!(
+            matches!(auth, AuthResult::Success),
+            "密码认证未通过（{user}@{host}）"
+        );
+
+        let mut channel = session.channel_open_session().await.expect("打开会话通道失败");
+        channel
+            .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+            .await
+            .expect("申请 PTY 失败");
+        channel.request_shell(true).await.expect("启动远程 shell 失败");
+        (session, channel)
+    }
+
+    /// 从通道里一直读到出现 `needle`（或超时），返回读到的全部输出
+    async fn read_until(
+        channel: &mut russh::Channel<client::Msg>,
+        needle: &str,
+        budget: Duration,
+    ) -> String {
+        let mut received = String::new();
+        let deadline = tokio::time::Instant::now() + budget;
+        while !received.contains(needle) && tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(5), channel.wait()).await {
+                Ok(Some(ChannelMsg::Data { data })) => {
+                    received.push_str(&String::from_utf8_lossy(&data));
+                }
+                Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                    received.push_str(&String::from_utf8_lossy(&data));
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        received
+    }
+
+    /// 真机：同一台主机的两条**并发**连接各自独立 ——
+    /// 各自的命令输出不会串到对方，关掉一条之后另一条照旧可用。
+    /// 对应界面验收的「两条会话同时开」与「关掉一个标签，另一个仍在工作」。
+    #[tokio::test]
+    async fn two_concurrent_connections_to_one_host_stay_independent() {
+        let Some((host, port, user, password)) = test_target() else {
+            eprintln!("跳过：未提供 TERMX_TEST_SSH_* 环境变量");
+            return;
+        };
+
+        let (_session_a, mut first) = open_shell(&host, port, &user, &password).await;
+        let (_session_b, mut second) = open_shell(&host, port, &user, &password).await;
+
+        let tag = std::process::id();
+        let first_tag = format!("A-{tag}");
+        let second_tag = format!("B-{tag}");
+
+        // 两条连接同时活着：各自敲一条带独立标记的命令
+        first
+            .data(format!("echo {first_tag}\n").as_bytes())
+            .await
+            .expect("第一条会话写入失败");
+        second
+            .data(format!("echo {second_tag}\n").as_bytes())
+            .await
+            .expect("第二条会话写入失败");
+
+        let first_out = read_until(&mut first, &first_tag, Duration::from_secs(20)).await;
+        let second_out = read_until(&mut second, &second_tag, Duration::from_secs(20)).await;
+        assert!(first_out.contains(&first_tag), "第一条会话没有回显自己的标记");
+        assert!(second_out.contains(&second_tag), "第二条会话没有回显自己的标记");
+        assert!(
+            !first_out.contains(&second_tag),
+            "第一条会话里出现了第二条的标记：两条会话串流了"
+        );
+        assert!(
+            !second_out.contains(&first_tag),
+            "第二条会话里出现了第一条的标记：两条会话串流了"
+        );
+
+        // 关掉第一条，第二条必须照旧能用
+        let _ = first.close().await;
+        drop(first);
+        let later_tag = format!("B2-{tag}");
+        second
+            .data(format!("echo {later_tag}\n").as_bytes())
+            .await
+            .expect("关掉另一条之后，这条会话仍应可写");
+        let later_out = read_until(&mut second, &later_tag, Duration::from_secs(20)).await;
+        assert!(
+            later_out.contains(&later_tag),
+            "关掉另一条会话后，这条会话应当继续正常工作"
+        );
+
+        eprintln!(
+            "同一台主机两条并发会话各自独立：{first_tag} / {second_tag}；关掉第一条后第二条仍可用"
+        );
     }
 }

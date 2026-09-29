@@ -100,7 +100,18 @@ pub fn verify(app: &AppHandle, host: &str, port: u16, key: &PublicKey) -> Verdic
 /// 首次连接确认后记录信任
 pub fn trust(app: &AppHandle, host: &str, port: u16, key: &PublicKey) -> Result<(), String> {
     let path = store_path(app)?;
-    learn_known_hosts_path(host, port, key, &path).map_err(|e| format!("写入 known_hosts 失败：{e}"))
+    trust_in(&path, host, port, key)
+}
+
+/// 信任的实际实现（落在指定文件上，便于测试）。
+///
+/// 已经记过这条密钥就直接返回：`learn_known_hosts_path` 是**无条件追加**的，
+/// 而同一台主机的并发会话会各自点一次「确认」，重复写会在文件里留下重复行。
+fn trust_in(path: &Path, host: &str, port: u16, key: &PublicKey) -> Result<(), String> {
+    if check_in(path, host, port, key) == Some(Verdict::Trusted) {
+        return Ok(());
+    }
+    learn_known_hosts_path(host, port, key, path).map_err(|e| format!("写入 known_hosts 失败：{e}"))
 }
 
 /// 替换已保存的指纹：只用于「服务器确实重装过、用户已人工核对」的场景
@@ -248,5 +259,25 @@ mod tests {
     fn remove_entries_on_missing_file_is_noop() {
         let path = fresh_path("does-not-exist");
         assert_eq!(remove_entries(&path, "example.com", 22).unwrap(), 0);
+    }
+
+    /// 同主机并发会话会各自点一次「确认」：信任必须幂等，不能写出重复行
+    #[test]
+    fn trust_is_idempotent() {
+        let path = fresh_path("idempotent");
+
+        trust_in(&path, "host.example", 22, &key_a()).unwrap();
+        trust_in(&path, "host.example", 22, &key_a()).unwrap();
+        trust_in(&path, "host.example", 22, &key_a()).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "重复确认不应写出重复记录，实际是：{text}");
+        assert_eq!(check_in(&path, "host.example", 22, &key_a()), Some(Verdict::Trusted));
+
+        // 另一台主机仍然可以正常新增
+        trust_in(&path, "other.example", 22, &key_a()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().filter(|l| !l.trim().is_empty()).count(), 2);
     }
 }

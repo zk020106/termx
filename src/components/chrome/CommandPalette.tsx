@@ -3,6 +3,7 @@ import { EmptyState } from "@/components/ui/Display";
 import type { CommandItem } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
+import { liveTabForHost, useSessionsStore } from "@/store/sessions";
 import { useSnippetsStore } from "@/store/snippets";
 import { toast } from "@/store/toast";
 import { useUiStore } from "@/store/ui";
@@ -172,9 +173,18 @@ export function CommandPalettePanel({
 				});
 				return;
 			}
-			// 主机项：直接进入连接流程（需求书设计目标：Ctrl+K → 输入几个字母 → 回车即连接）
+			// 主机项：已经有活着的会话就聚焦那个标签，否则进连接流程
+			// （需求书设计目标：Ctrl+K → 输入几个字母 → 回车即连接）。
+			// 想要**第二条**同主机连接，用主机库里的「新建连接」动作。
 			if (item.id.startsWith("host-")) {
 				const hostId = item.id.slice("host-".length);
+				const live = liveTabForHost(hostId);
+				if (live) {
+					useSessionsStore.getState().setActiveTab(live.id);
+					toast({ title: `已切到 ${item.title} 的会话`, description: "这台主机已经有会话，没有新开连接", tone: "default" });
+					navigate("/");
+					return;
+				}
 				navigate(`/connect?host=${encodeURIComponent(hostId)}`);
 				return;
 			}

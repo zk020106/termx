@@ -1,4 +1,5 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
+import { closeSshSession, observeSshLifecycle } from "@/components/terminal/sshCache";
 import { type TerminalHandle, type TerminalMatchInfo } from "@/components/terminal/Terminal";
 import { TerminalPane } from "@/components/terminal/TerminalPane";
 import { Button, IconButton, Kbd } from "@/components/ui/Button";
@@ -14,7 +15,7 @@ import { cn } from "@/lib/cn";
 import { probeSupported } from "@/lib/probe";
 import { filterHosts, useHostsStore } from "@/store/hosts";
 import { useProbeStore } from "@/store/probe";
-import { paneCountFor, useSessionsStore } from "@/store/sessions";
+import { liveTabForHost, paneCountFor, panesOfTab, useSessionsStore } from "@/store/sessions";
 import { useSettingsStore } from "@/store/settings";
 import { toast } from "@/store/toast";
 import { useUiStore } from "@/store/ui";
@@ -118,9 +119,9 @@ export default function Workspace() {
 	const ungroupedHosts = hostStore.hosts.filter((h) => !h.groupId || !groupedIds.has(h.groupId));
 
 	/** 监控面板的数据源，两个口径分开取：
-	 *  - rtt：已认证连接上的 SSH 往返（真正的端到端时间）
+	 *  - rtt：已认证连接上的 SSH 往返（真正的端到端时间），按**会话键**存
 	 *  - results：主机库的 TCP 建连探测（没连上时只有它） */
-	const monitorRtt = activeTab ? probeStore.rtt[activeTab.id] : undefined;
+	const monitorRtt = activeTab?.sessionKey ? probeStore.rtt[activeTab.sessionKey] : undefined;
 	const monitorReport = activeHost ? probeStore.results[activeHost.id] : undefined;
 	const probingActiveHost = activeHost ? probeStore.probing.includes(activeHost.id) : false;
 
@@ -181,7 +182,7 @@ export default function Workspace() {
 			const fresh = useSessionsStore.getState().tabs.find((t) => t.id === primary.id);
 			if (fresh && !fresh.broadcasting) store.toggleBroadcast(primary.id);
 		}
-		const owned = useSessionsStore.getState().panes.find((p) => p.hostId === primary.hostId);
+		const owned = panesOfTab(primary.id)[0];
 		if (owned) store.focusPane(owned.id);
 	}, []);
 
@@ -320,6 +321,12 @@ export default function Workspace() {
 
 	const onCloseTab = (tab: SessionTab) => {
 		closeTab(tab.id);
+		// 关掉这个标签就收掉它自己的连接。判据是**会话键**：同一台主机的另一条
+		// 会话有自己的键，不受影响；本地终端没有键，由 ptyCache 自己延迟销毁。
+		const key = tab.sessionKey;
+		if (key && !useSessionsStore.getState().tabs.some((t) => t.sessionKey === key)) {
+			void closeSshSession(key);
+		}
 		toast({
 			title: `已关闭 ${tab.title}`,
 			tone: "default",
@@ -328,10 +335,13 @@ export default function Workspace() {
 	};
 
 	const onNewTab = () => {
+		// 标签栏的「+」永远是**新的独立终端**：本地 shell 各格一个 PTY，
+		// 不碰任何已有会话，也就无所谓复用（本地终端本来就没有会话键）。
 		const id = `tab-local-${Date.now()}`;
 		reopenTab({
 			id,
 			hostId: null,
+			sessionKey: null,
 			title: "本地终端",
 			status: "connected",
 			layout: "single",
@@ -340,12 +350,39 @@ export default function Workspace() {
 		setActiveTab(id);
 	};
 
+	/**
+	 * 点主机库里的主机：
+	 *  - 这台主机已经有活着的会话 → **聚焦**到那个标签（不再默默多开一条）
+	 *  - 没有 → 按老规矩开一格（没有凭据就建立不了会话，终端会如实说明）
+	 * 想明确再开一条连接的，走主机库里的「连接」动作（每次一个新会话键）。
+	 */
 	const onOpenHost = (host: Host) => {
+		const live = liveTabForHost(host.id);
+		if (live) {
+			setActiveTab(live.id);
+			const first = panesOfTab(live.id)[0];
+			if (first) focusPane(first.id);
+			toast({ title: `已切到 ${host.name} 的会话`, description: "这台主机已有会话，没有新开连接", tone: "default" });
+			return;
+		}
 		const tabId = openSession(host.id);
 		setActiveTab(tabId);
-		const owned = useSessionsStore.getState().panes.find((p) => p.hostId === host.id);
+		const owned = panesOfTab(tabId)[0];
 		if (owned) focusPane(owned.id);
 	};
+
+	/* 真实会话的生命周期 → 标签状态：按**会话键**找标签，
+	   一条会话断开只更新它自己那个标签，另一条会话的「已连接」不会被改掉。 */
+	useEffect(
+		() =>
+			observeSshLifecycle((key, event) => {
+				const store = useSessionsStore.getState();
+				const tab = store.tabs.find((t) => t.sessionKey === key);
+				if (!tab) return;
+				store.setStatus(tab.id, event === "connected" ? "connected" : event === "failed" ? "failed" : "disconnected");
+			}),
+		[],
+	);
 
 	const copySelection = async (paneId: string = focusId) => {
 		const handle = handleFor(paneId);
@@ -839,15 +876,19 @@ function LatencyReadout({
 	);
 }
 
-/** 分屏格：优先取本标签主机名下的真实分屏；布局要求更多格时补出空位（不编造提示符文案） */
+/** 分屏格：取本标签自己的格子；布局要求更多格时补出空位（不编造提示符文案）。
+ *  补出来的格子接的是**本标签自己的会话键**，所以同一台主机的另一个标签
+ *  不会被牵连，也不会被误当成同一格。 */
 function panesForTab(tab: SessionTab, panes: TerminalPaneModel[]): TerminalPaneModel[] {
 	const count = paneCountFor(tab.layout);
-	const owned = panes.filter((p) => p.hostId === tab.hostId);
+	const owned = panes.filter((p) => p.tabId === tab.id);
 	const list = owned.slice(0, count);
 	while (list.length < count) {
 		list.push({
 			id: `${tab.id}-split-${list.length}`,
+			tabId: tab.id,
 			hostId: tab.hostId,
+			sessionKey: tab.sessionKey,
 			title: "",
 			status: tab.status,
 			lines: [],
