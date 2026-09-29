@@ -7,6 +7,10 @@ import { listenSsh, sshConnect, sshDisconnect, sshResize, sshWrite, type SshPhas
  * 两者之间会有一段空窗，这段时间的输出必须先缓冲，等终端挂上来再回放，
  * 否则登录横幅（motd）和首个提示符就丢了——那正是最能证明「真的连上了」的东西。
  *
+ * 缓冲是**整段会话输出**，不是「没人看的那一段」：组件重挂载（切到别的界面再回
+ * 到工作区、StrictMode 演练、分屏重建）时，新终端只拿到空窗期的数据就会一片空白，
+ * 看上去像会话掉了、逼着用户重连。所以只要会话活着就一路累积，重新挂载时整段回放。
+ *
  * 凭据只存在内存：密码用于建立会话，不写进配置文件、不落盘。
  * 应用退出即消失。
  * ========================================================================== */
@@ -17,7 +21,8 @@ export function sshKeyForHost(hostId: string): string {
 }
 
 interface Entry {
-	buffer: string;
+	/** 整段会话输出（只留末尾 MAX_BUFFER 字符）：终端重挂载时靠它回放 */
+	replay: string;
 	subs: Set<(chunk: string) => void>;
 	exitSubs: Set<(code: number | null) => void>;
 	phase: SshPhase | null;
@@ -34,7 +39,7 @@ function ensureEntry(key: string): Entry {
 	let entry = sessions.get(key);
 	if (!entry) {
 		entry = {
-			buffer: "",
+			replay: "",
 			subs: new Set(),
 			exitSubs: new Set(),
 			phase: null,
@@ -91,10 +96,11 @@ export async function openSshSession(
 				if (phase.phase === "shell" && phase.ok) entry.connected = true;
 			},
 			onData: (chunk) => {
-				if (entry.subs.size === 0) {
-					entry.buffer = (entry.buffer + chunk).slice(-MAX_BUFFER);
-					return;
-				}
+				// 关键：不管此刻有没有终端挂着都累积整段输出。
+				// 只累积「没人看的那一段」的话，切到别的界面再回到工作区时，
+				// 之前已经画在终端上的内容就永久丢了——切回来是一片空白，
+				// 看起来就像会话没了。这里保留末尾 MAX_BUFFER，重新挂载时整段回放。
+				entry.replay = (entry.replay + chunk).slice(-MAX_BUFFER);
 				for (const sub of entry.subs) sub(chunk);
 			},
 			onExit: (code) => {
@@ -140,7 +146,7 @@ export async function openSshSession(
 }
 
 export interface SshAttachment {
-	/** 挂载前的既有输出（登录横幅 + 首个提示符） */
+	/** 挂载前会话已经产生的全部输出（登录横幅 + 历史命令 + 首个提示符） */
 	replay: string;
 	detach: () => void;
 }
@@ -158,7 +164,7 @@ export function attachSsh(
 	entry.exitSubs.add(onExit);
 
 	return {
-		replay: entry.buffer,
+		replay: entry.replay,
 		detach: () => {
 			entry.subs.delete(onData);
 			entry.exitSubs.delete(onExit);
