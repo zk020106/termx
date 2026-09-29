@@ -62,7 +62,6 @@ function LatencyCell({
 		return (
 			<span className={cn(base, latencyTierClass[tier], className)} title={describeProbe(report)}>
 				{showDot && <StatusDot status={report.reachable ? "connected" : "failed"} size={6} />}
-				{tier === "intercepted" && <span className="icon-[lucide--shield-alert] size-3" />}
 				{report.reachable ? `${Math.round(report.avg_ms)} ms` : "不可达"}
 			</span>
 		);

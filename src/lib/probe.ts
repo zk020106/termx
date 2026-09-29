@@ -82,18 +82,12 @@ export function describeProbe(report: ProbeReport): string {
 	return report.error ?? "TCP 不可达";
 }
 
-/** 亚毫秒往返对远端主机不成立（光速不允许），出现即说明连接被本地设施接管 */
-export function isIntercepted(report: ProbeReport): boolean {
-	return report.reachable && report.avg_ms < 1;
-}
-
 /** 延迟分档，用于上色（沿用状态语义色） */
-export type LatencyTier = "good" | "ok" | "slow" | "dead" | "intercepted" | "unknown";
+export type LatencyTier = "good" | "ok" | "slow" | "dead" | "unknown";
 
 export function latencyTier(report: ProbeReport | undefined): LatencyTier {
 	if (!report) return "unknown";
 	if (!report.reachable) return "dead";
-	if (isIntercepted(report)) return "intercepted";
 	if (report.avg_ms <= 60) return "good";
 	if (report.avg_ms <= 150) return "ok";
 	return "slow";
@@ -104,7 +98,5 @@ export const latencyTierClass: Record<LatencyTier, string> = {
 	ok: "text-warning",
 	slow: "text-danger",
 	dead: "text-danger",
-	// 不算健康：连接被本地设施接管，真实可达性未知
-	intercepted: "text-warning",
 	unknown: "text-faint",
 };

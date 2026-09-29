@@ -30,10 +30,10 @@ import { Link, useNavigate } from "react-router";
  * 此时给出「去主机库」的空状态），主机来自 useHostsStore，监控面板只显示
  * useProbeStore 的实测 TCP 结果 —— 没有结果就写「未接入」，不填任何假数字。
  * 右上角的「状态」切换器是骨架期评审工具，逐个复现需求书 06-终端工作区要求的状态：
- * 单屏 / 2 格 / 4 格、搜索栏、右键菜单、广播中、重连宽限期横幅、已断开覆盖层、生产环境提示。
+ * 单屏 / 2 格 / 4 格、搜索栏、右键菜单、广播中、重连宽限期横幅、已断开覆盖层。
  * ========================================================================== */
 
-type ReviewState = "split-1" | "split-2" | "split-4" | "search" | "menu" | "broadcast" | "reconnect" | "offline" | "prod";
+type ReviewState = "split-1" | "split-2" | "split-4" | "search" | "menu" | "broadcast" | "reconnect" | "offline";
 
 const REVIEW_STATES: { value: ReviewState; label: string; title: string }[] = [
 	{ value: "split-1", label: "单屏", title: "单屏（1 格）" },
@@ -44,7 +44,6 @@ const REVIEW_STATES: { value: ReviewState; label: string; title: string }[] = [
 	{ value: "broadcast", label: "广播", title: "广播输入到全部终端（被广播的终端有明显标识）" },
 	{ value: "reconnect", label: "重连", title: "断线重连宽限期：顶部横幅 + 立即重连 / 关闭" },
 	{ value: "offline", label: "断开", title: "已断开覆盖层：终端变灰，按回车重新连接" },
-	{ value: "prod", label: "生产", title: "生产环境提示：终端区红色描边" },
 ];
 
 /** 分屏数 → 网格模板（SFTP 面板占满一行，收起时少一行） */
@@ -103,7 +102,6 @@ export default function Workspace() {
 	const gridPanes = activeTab ? panesForTab(activeTab, panes) : [];
 	const focusId = gridPanes.some((p) => p.id === focusedPaneId) ? focusedPaneId : (gridPanes[0]?.id ?? "");
 	const broadcasting = Boolean(activeTab?.broadcasting);
-	const prodGuard = review === "prod";
 	const paneStatus: ConnectionStatus =
 		review === "offline" ? "disconnected" : review === "reconnect" ? "reconnecting" : (activeTab?.status ?? "idle");
 
@@ -170,7 +168,7 @@ export default function Workspace() {
 		if (!primary) return;
 		store.setActiveTab(primary.id);
 		if (next === "split-1") store.setLayout(primary.id, "single");
-		if (next === "split-2" || next === "search" || next === "menu" || next === "prod") store.setLayout(primary.id, "horizontal");
+		if (next === "split-2" || next === "search" || next === "menu") store.setLayout(primary.id, "horizontal");
 		if (next === "split-4") store.setLayout(primary.id, "grid");
 		if (next === "broadcast") {
 			store.setLayout(primary.id, "horizontal");
@@ -623,14 +621,8 @@ export default function Workspace() {
 							}
 						/>
 					) : (
-						/* 分屏网格 + 底部 SFTP 面板；生产提示下整片终端区 2px 红描边 */
-						<div
-							className={cn(
-								"grid min-h-0 flex-1 gap-px bg-border",
-								gridClass,
-								prodGuard && "shadow-[inset_0_0_0_2px_var(--color-danger)]",
-							)}
-						>
+						/* 分屏网格 + 底部 SFTP 面板 */
+						<div className={cn("grid min-h-0 flex-1 gap-px bg-border", gridClass)}>
 							{gridPanes.map((pane) => (
 								<TerminalPane
 									key={pane.id}
@@ -638,7 +630,6 @@ export default function Workspace() {
 									focused={pane.id === focusId}
 									broadcasting={broadcasting}
 									offline={review === "offline"}
-									prod={prodGuard}
 									status={paneStatus}
 									registerTerminal={registerTerminal}
 									onFocus={() => focusPane(pane.id)}

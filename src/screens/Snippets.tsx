@@ -3,7 +3,6 @@ import { Button } from "@/components/ui/Button";
 import { Badge, EmptyState, SectionLabel } from "@/components/ui/Display";
 import { Field, Input, Textarea } from "@/components/ui/Input";
 import { Drawer, Modal } from "@/components/ui/Overlay";
-import { Checkbox } from "@/components/ui/Toggle";
 import { SNIPPET_TARGET_LABEL, type Host, type Snippet, type SnippetTarget } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
@@ -17,7 +16,7 @@ import { useEffect, useMemo, useState } from "react";
  * 数据来源：片段来自 useSnippetsStore()（落盘），主机来自 useHostsStore()，
  *          发送目标来自 useSessionsStore()（真实打开的标签与分屏格，首次启动为空）。
  * 覆盖状态：列表（按分组）/ 分组筛选 / 编辑抽屉 / 发送前填变量 + 实时预览 /
- *          发送目标选择 / 生产环境二次确认 / 空状态 / 搜索无结果。
+ *          发送目标选择 / 空状态 / 搜索无结果。
  *
  * 诚实边界：终端注入要等 SSH 会话层接入，目前「发送」会把最终命令复制到剪贴板并如实说明。
  * ========================================================================== */
@@ -67,7 +66,6 @@ export default function Snippets() {
 	const [values, setValues] = useState<Record<string, string>>({});
 	const [target, setTarget] = useState<SnippetTarget>("current");
 	const [pickedPanes, setPickedPanes] = useState<string[]>([]);
-	const [confirmed, setConfirmed] = useState(false);
 	const [draft, setDraft] = useState<Snippet | null>(null);
 	const [draftTouched, setDraftTouched] = useState(false);
 	const [deleteOpen, setDeleteOpen] = useState(false);
@@ -125,17 +123,13 @@ export default function Snippets() {
 		});
 	}, [selected, values]);
 
-	const needConfirm = target === "all" && tabs.length > 0;
-	const confirmMissing = needConfirm && !confirmed;
 	const blockedReason = !hasSessions
 		? "还没有已连接的终端：先在主机库打开一个会话"
 		: target === "selected" && pickedPanes.length === 0
 			? "请至少选择一个分屏格"
 			: unresolved.length > 0
 				? `还有 ${unresolved.length} 个变量未填写`
-				: confirmMissing
-					? "请先勾选发送确认"
-					: null;
+				: null;
 	const canSend = selected !== null && blockedReason === null;
 
 	const targetHint: Record<SnippetTarget, string> = {
@@ -190,12 +184,10 @@ export default function Snippets() {
 	const selectSnippet = (id: string) => {
 		setSelectedId(id);
 		setValues({});
-		setConfirmed(false);
 	};
 
 	const togglePane = (id: string) => {
 		setPickedPanes((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
-		setConfirmed(false);
 	};
 
 	const openNew = () => {
@@ -224,7 +216,6 @@ export default function Snippets() {
 		upsert(next);
 		setSelectedId(next.id);
 		setValues({});
-		setConfirmed(false);
 		setDraft(null);
 		setQuery("");
 		setGroup(ALL_GROUPS);
@@ -260,7 +251,7 @@ export default function Snippets() {
 		toast({ title: "命令已复制", description: resolvedCommand });
 	};
 
-	/* Ctrl + Enter 发送（每次渲染重挂载，始终拿到最新的变量与确认状态；抽屉打开时不触发） */
+	/* Ctrl + Enter 发送（每次渲染重挂载，始终拿到最新的变量状态；抽屉打开时不触发） */
 	useEffect(() => {
 		const onKey = (event: KeyboardEvent) => {
 			if (draft) return;
@@ -276,7 +267,6 @@ export default function Snippets() {
 	/** 状态切换器：一键进入某个必查状态 */
 	const applyReview = (next: ReviewState) => {
 		setReview(next);
-		setConfirmed(false);
 		setDraft(null);
 		setQuery("");
 		setGroup(ALL_GROUPS);
@@ -398,7 +388,7 @@ export default function Snippets() {
 						</div>
 					</div>
 
-					{/* 执行面板：变量替换 + 发送目标 + 生产确认 */}
+					{/* 执行面板：变量替换 + 发送目标 */}
 					<div className="rounded-lg border border-border bg-surface-raised p-5 shadow-md">
 						<div className="flex items-center justify-between gap-2 border-b border-border pb-3">
 							<div className="flex items-center gap-2">
@@ -486,10 +476,7 @@ export default function Snippets() {
 												<button
 													key={option}
 													type="button"
-													onClick={() => {
-														setTarget(option);
-														setConfirmed(false);
-													}}
+													onClick={() => setTarget(option)}
 													className={cn(
 														"truncate rounded py-1 text-center font-medium transition-colors",
 														option === target
@@ -549,24 +536,6 @@ export default function Snippets() {
 								</div>
 								{targetInfo.detail && <p className="mt-0.5 text-[11px] text-faint">{targetInfo.detail}</p>}
 							</div>
-							{/* 全部终端广播前的二次确认 */}
-							{needConfirm && (
-								<div className="rounded border border-danger/40 bg-danger/10 p-2.5">
-									<div className="flex flex-wrap items-center gap-1.5 text-[11.5px] font-medium text-danger">
-										<span className="icon-[lucide--triangle-alert] size-3.5" />
-										发送到全部终端前确认
-									</div>
-									<p className="mt-1 text-[11px] leading-relaxed text-muted">
-										命令将在远端 PTY 立即执行且无法撤销。
-									</p>
-									<Checkbox
-										className="mt-2"
-										checked={confirmed}
-										onChange={setConfirmed}
-										label="我已知晓，确认发送"
-									/>
-								</div>
-							)}
 						</div>
 
 						{/* 底部动作栏 */}

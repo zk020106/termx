@@ -15,7 +15,7 @@ interface ProbeState {
 	run: (
 		targets: { id: string; host: string; port: number }[],
 		options?: { attempts?: number; timeoutMs?: number },
-	) => Promise<{ ok: number; fail: number; intercepted: number } | null>;
+	) => Promise<{ ok: number; fail: number } | null>;
 	clear: () => void;
 }
 
@@ -45,9 +45,7 @@ export const useProbeStore = create<ProbeState>((set) => ({
 			});
 
 			const ok = reports.filter((r) => r.reachable).length;
-			// 亚毫秒往返说明连接被本地设施接管，真实可达性未知，单独计数
-			const intercepted = reports.filter((r) => r.reachable && r.avg_ms < 1).length;
-			return { ok, fail: reports.length - ok, intercepted };
+			return { ok, fail: reports.length - ok };
 		} catch {
 			set((s) => ({ probing: s.probing.filter((id) => !ids.includes(id)) }));
 			return null;
