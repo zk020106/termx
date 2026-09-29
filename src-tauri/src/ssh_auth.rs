@@ -15,7 +15,7 @@
 //!   各给各的下一步动作，不笼统甩一句「认证失败」。
 
 use crate::known_hosts;
-use crate::ssh::{emit_phase, SshState};
+use crate::ssh::{emit_phase, emit_phase_opt, SshState};
 use russh::client::{AuthResult, Handle, KeyboardInteractiveAuthResponse, Prompt};
 use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::agent::AgentIdentity;
@@ -160,7 +160,7 @@ pub async fn authenticate<H: russh::client::Handler>(
         }
         Credential::Agent => agent_auth(session, username).await,
         Credential::KeyboardInteractive => {
-            keyboard_interactive_auth(app, key, session, username, prompts).await
+            keyboard_interactive_auth(Some(app), key, session, username, prompts).await
         }
     };
 
@@ -303,7 +303,7 @@ async fn agent_auth<H: russh::client::Handler>(
 /// 服务器每一轮的提问都转成 `ssh://auth-prompt/{key}` 事件问界面，
 /// 界面提交后调 `ssh_auth_respond` 送回答案，然后继续下一轮，直到 Success / Failure。
 async fn keyboard_interactive_auth<H: russh::client::Handler>(
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     key: &str,
     session: &mut Handle<H>,
     username: &str,
@@ -371,7 +371,7 @@ async fn keyboard_interactive_auth<H: russh::client::Handler>(
                 } else {
                     String::new()
                 };
-                emit_phase(
+                emit_phase_opt(
                     app,
                     key,
                     "auth",
@@ -382,7 +382,7 @@ async fn keyboard_interactive_auth<H: russh::client::Handler>(
                     ),
                 );
 
-                let answers = ask_user(Some(app), key, prompts, &name, &instructions, &items).await?;
+                let answers = ask_user(app, key, prompts, &name, &instructions, &items).await?;
                 response = session
                     .authenticate_keyboard_interactive_respond(answers)
                     .await
@@ -625,6 +625,7 @@ fn display_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::keys::PublicKeyOrCertificate;
     use russh::keys::PublicKey;
     use russh::Signer;
     use std::path::{Path, PathBuf};
@@ -1008,5 +1009,148 @@ mod tests {
             error.contains("没有等待输入"),
             "错误文案要说清是没有等待中的请求，实际是：{error}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // 下面这条测试自带一台「要求键盘交互」的 SSH 服务器，把整条循环跑完：
+    // 服务器提问 → 循环登记并投递提问 → 代界面作答 → 循环提交回答 → 服务器放行。
+    //
+    // 为什么自带：手上两台真实服务器都没启用键盘交互（sshd 报的可用方式里
+    // 不含 keyboard-interactive），而这条路径恰恰是最需要真跑一遍的。
+    // ---------------------------------------------------------------------
+
+    const KI_ANSWER: &str = "s3cret";
+
+    #[derive(Clone, Default)]
+    struct KiHandler {
+        received: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    impl russh::server::Handler for KiHandler {
+        type Error = russh::Error;
+
+        async fn auth_keyboard_interactive<'a>(
+            &'a mut self,
+            _user: &str,
+            _submethods: &str,
+            response: Option<russh::server::Response<'a>>,
+        ) -> Result<russh::server::Auth, Self::Error> {
+            match response {
+                // 第一轮：把两个提问发下去（一个密码类、一个回显类）
+                None => Ok(russh::server::Auth::Partial {
+                    name: "TermX 测试服务器".into(),
+                    instructions: "请输入约定口令".into(),
+                    prompts: vec![("Password: ".into(), false), ("Code: ".into(), true)].into(),
+                }),
+                // 第二轮：校验客户端提交的回答
+                Some(answers) => {
+                    let got: Vec<String> = answers
+                        .map(|b| String::from_utf8_lossy(&b).to_string())
+                        .collect();
+                    let ok = got == vec![KI_ANSWER.to_string(), "123456".to_string()];
+                    *self.received.lock().await = got;
+                    Ok(if ok {
+                        russh::server::Auth::Accept
+                    } else {
+                        russh::server::Auth::reject()
+                    })
+                }
+            }
+        }
+    }
+
+    struct AcceptAnyKey;
+
+    impl russh::client::Handler for AcceptAnyKey {
+        type Error = russh::Error;
+
+        async fn check_server_key(
+            &mut self,
+            _key: &PublicKeyOrCertificate,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn keyboard_interactive_full_loop_against_a_test_server() {
+        // 主机密钥现场生成，与本文件其它测试一致，不引入新的加密依赖
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("termx-ki-server-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host_key_path = dir.join("host_ed25519");
+        let _ = std::fs::remove_file(&host_key_path);
+
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-q", "-f"])
+            .arg(&host_key_path)
+            .status()
+            .expect("需要本机有 ssh-keygen 才能生成测试主机密钥");
+        assert!(status.success(), "ssh-keygen 生成主机密钥失败");
+
+        let host_key =
+            russh::keys::load_secret_key(&host_key_path, None).expect("加载测试主机密钥失败");
+        let config = Arc::new(russh::server::Config {
+            keys: vec![host_key],
+            inactivity_timeout: Some(Duration::from_secs(30)),
+            ..Default::default()
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received: Arc<tokio::sync::Mutex<Vec<String>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        let server_task = {
+            let handler = KiHandler {
+                received: received.clone(),
+            };
+            tokio::spawn(async move {
+                if let Ok((stream, _)) = listener.accept().await {
+                    let _ = russh::server::run_stream(config, stream, handler).await;
+                }
+            })
+        };
+
+        let mut session = russh::client::connect(
+            Arc::new(russh::client::Config::default()),
+            addr,
+            AcceptAnyKey,
+        )
+        .await
+        .expect("连接本地测试服务器失败");
+
+        let registry = Arc::new(AuthPromptRegistry::default());
+        let key = "ki-full-loop";
+
+        // 代界面作答：轮询到登记完成就把两个答案交上去
+        let answerer = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                for _ in 0..400 {
+                    if registry
+                        .resolve(key, vec![KI_ANSWER.to_string(), "123456".to_string()])
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                false
+            })
+        };
+
+        // app 传 None：不发事件，由上面的应答方代替界面
+        keyboard_interactive_auth(None, key, &mut session, "tester", &registry)
+            .await
+            .expect("键盘交互应当认证通过");
+
+        assert!(answerer.await.unwrap(), "应答方没能对上注册的通道");
+        assert_eq!(
+            received.lock().await.clone(),            vec![KI_ANSWER.to_string(), "123456".to_string()],
+            "服务器收到的回答应与提交的一致，且顺序对应两个提问"
+        );
+
+        server_task.abort();
     }
 }

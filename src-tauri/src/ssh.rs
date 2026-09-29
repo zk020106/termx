@@ -59,6 +59,20 @@ pub(crate) fn emit_phase(app: &AppHandle, key: &str, phase: &str, ok: bool, deta
     emit_phase_full(app, key, phase, ok, detail, None, None);
 }
 
+/// 与 emit_phase 相同，但没有 AppHandle 时静默跳过。
+/// 只给测试用：这样认证循环可以在没有界面的情况下被完整驱动。
+pub(crate) fn emit_phase_opt(
+    app: Option<&AppHandle>,
+    key: &str,
+    phase: &str,
+    ok: bool,
+    detail: impl Into<String>,
+) {
+    if let Some(app) = app {
+        emit_phase(app, key, phase, ok, detail);
+    }
+}
+
 fn emit_phase_full(
     app: &AppHandle,
     key: &str,
