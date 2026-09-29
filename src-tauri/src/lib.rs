@@ -4,6 +4,7 @@ mod probe;
 mod pty;
 mod secret;
 mod ssh;
+mod ssh_auth;
 
 use pty::PtyState;
 use ssh::SshState;
@@ -11,6 +12,8 @@ use ssh::SshState;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 文件选择器：界面上「选择私钥文件」用它（前端 @tauri-apps/plugin-dialog）
+        .plugin(tauri_plugin_dialog::init())
         .manage(PtyState::default())
         .manage(SshState::default())
         .invoke_handler(tauri::generate_handler![
@@ -29,6 +32,8 @@ pub fn run() {
             ssh::ssh_disconnect,
             ssh::ssh_trust_host,
             ssh::ssh_replace_host_key,
+            ssh_auth::ssh_auth_respond,
+            ssh_auth::ssh_agent_identities,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,

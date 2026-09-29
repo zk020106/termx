@@ -1,20 +1,34 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { closeSshSession, hasSshSession, openSshSession, sshKeyForHost, type SshOpenResult } from "@/components/terminal/sshCache";
 import { Button } from "@/components/ui/Button";
-import { Badge, EmptyState, StatusDot } from "@/components/ui/Display";
-import { Input } from "@/components/ui/Input";
+import { Badge, EmptyState, Segmented, StatusDot } from "@/components/ui/Display";
+import { Field, Input } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Overlay";
 import { Checkbox } from "@/components/ui/Toggle";
-import { AUTH_LABEL, type ConnectionStatus, type Host } from "@/data/types";
+import { AUTH_LABEL, type AuthMethod, type ConnectionStatus } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { describeProbe, probeSupported, type ProbeReport } from "@/lib/probe";
 import { secretAvailable, secretDelete, secretLoad, secretSave } from "@/lib/secret";
-import { sshReplaceHostKey, sshSupported, sshTrustHost, type SshPhase } from "@/lib/ssh";
+import {
+	listenAuthPrompts,
+	sshAgentIdentities,
+	sshAuthRespond,
+	sshReplaceHostKey,
+	sshSupported,
+	sshTrustHost,
+	stageCredential,
+	type AgentIdentity,
+	type AuthPromptRequest,
+	type Credential,
+	type SshPhase,
+} from "@/lib/ssh";
 import { useHostsStore } from "@/store/hosts";
+import { useKeysStore } from "@/store/keys";
 import { useProbeStore } from "@/store/probe";
 import { useSessionsStore } from "@/store/sessions";
 import { toast } from "@/store/toast";
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
 /* =============================================================================
@@ -30,14 +44,17 @@ import { useNavigate, useSearchParams } from "react-router";
  *    本页负责把这两种情况引导成「确认并继续」或「取消」，绝不静默放行。
  *  - 指纹一律取 Rust 事件的真实值（phase.fingerprint / 结果里的 fingerprint），
  *    界面不预填、不推测、不补造。
- *  - 仍未接入：键盘交互（多因素 / 二次验证）、非密码认证方式。这两条保留骨架并标 unwired。
+ *  - 认证方式五种都已接入：密码、私钥、私钥 + 口令、SSH Agent、键盘交互（二次验证）。
+ *    默认按主机登记的 auth.method 渲染，也允许在本页临时切换（否则主机配错就把人锁死了）。
+ *    键盘交互的提问由 ssh://auth-prompt/{key} 事件驱动，服务器连着问几轮就弹几轮。
  *
- * 密码默认只活在内存里：用来建立会话，不进主机库、不写配置文件，应用退出即消失；
- * 只有用户在本页明确勾选「记住密码（存入系统钥匙串）」时，才额外交给操作系统钥匙串保管。
+ * 凭据默认只活在内存里：用来建立会话，不进主机库、不写配置文件，应用退出即消失。
+ * 只有密码方式下、用户明确勾选「记住密码（存入系统钥匙串）」时，才额外交给操作系统钥匙串；
+ * 私钥口令始终只在内存里，连钥匙串都不进。
  * ========================================================================== */
 
-/** 步骤状态：unwired = 能力确实尚未接入（既非成功也非失败） */
-type StepState = "done" | "failed" | "active" | "pending" | "unwired";
+/** 步骤状态：五步全部由真实阶段驱动，没有「尚未接入」这种中间态了 */
+type StepState = "done" | "failed" | "active" | "pending";
 
 interface Step {
 	id: string;
@@ -96,10 +113,14 @@ const EMPTY_PROGRESS: SshProgress = {
 	failure: null,
 };
 
-/** 仍未接入、只能预览骨架的能力（真实流程触发不到，留一个入口给评审） */
-type PreviewState = "2fa";
-
-const PREVIEW_OPTIONS: { value: PreviewState; label: string }[] = [{ value: "2fa", label: "二次验证" }];
+/** 认证方式在本页可临时切换：主机登记错了不至于把人锁死在一种方式上 */
+const AUTH_CHOICES: { value: AuthMethod; label: string }[] = [
+	{ value: "password", label: "密码" },
+	{ value: "key", label: "私钥" },
+	{ value: "key-passphrase", label: "私钥+口令" },
+	{ value: "agent", label: "Agent" },
+	{ value: "keyboard-interactive", label: "键盘交互" },
+];
 
 /**
  * 主机密钥需要用户决策的两种情况：
@@ -131,9 +152,28 @@ export default function Connect() {
 	const [progress, setProgress] = useState<SshProgress>(EMPTY_PROGRESS);
 	/** 密码只在内存里活到本次连接结束，绝不写进任何 store 或配置文件 */
 	const [password, setPassword] = useState("");
-	const [code, setCode] = useState("");
-	/** 未接入能力的界面预览，与真实连接无关 */
-	const [preview, setPreview] = useState<PreviewState | null>(null);
+	/** 本页临时选用的认证方式；null = 跟主机登记的一致（进页面时的默认） */
+	const [methodOverride, setMethodOverride] = useState<AuthMethod | null>(null);
+	/** 私钥文件路径：用户在文件选择器里选的，或手动粘贴的；只进 credential，不写配置文件 */
+	const [keyPath, setKeyPath] = useState("");
+	/** 私钥口令：只在内存里，连系统钥匙串都不进 */
+	const [passphrase, setPassphrase] = useState("");
+	/** SSH Agent 里的身份：null = 还没读到（读不到就是 null + agentError） */
+	const [agentIdentities, setAgentIdentities] = useState<AgentIdentity[] | null>(null);
+	const [agentLoading, setAgentLoading] = useState(false);
+	const [agentError, setAgentError] = useState<string | null>(null);
+	/** 每次点「重新读取」自增，用来重新枚举 Agent 身份 */
+	const [agentTicket, setAgentTicket] = useState(0);
+	/** 服务器当前这一轮的键盘交互提问；null = 没有在等用户作答 */
+	const [authPrompt, setAuthPrompt] = useState<AuthPromptRequest | null>(null);
+	/** 与 authPrompt.prompts 顺序一一对应的作答 */
+	const [answers, setAnswers] = useState<string[]>([]);
+	/** 正在把这一轮作答交给后端 */
+	const [responding, setResponding] = useState(false);
+	/** 这一轮已经提交，等服务器下一步（可能再问一轮，也可能直接建立会话） */
+	const [promptSubmitted, setPromptSubmitted] = useState(false);
+	/** 提交失败的真实原因 */
+	const [promptError, setPromptError] = useState<string | null>(null);
 	/** 桌面端探测本身失败（Rust 端没返回结果）：既不是可达也不是不可达，如实标出来 */
 	const [probeError, setProbeError] = useState<string | null>(null);
 	/** 主机密钥需要用户决策时的告警（首次连接确认 / 指纹变化） */
@@ -142,7 +182,7 @@ export default function Connect() {
 	const [trusting, setTrusting] = useState(false);
 	/** known_hosts 写回失败的真实原因 */
 	const [trustError, setTrustError] = useState<string | null>(null);
-	/** 记住密码：默认不勾选，只有用户自己勾了才写钥匙串（需求书 07） */
+	/** 记住密码：默认不勾选，只有用户自己勾了才写钥匙串（需求书 07）；只对密码方式有效 */
 	const [remember, setRemember] = useState(false);
 	/** 系统钥匙串是否可用；null = 还没问出来，先不吓唬用户 */
 	const [secretUsable, setSecretUsable] = useState<boolean | null>(null);
@@ -150,12 +190,18 @@ export default function Connect() {
 	const [hasSavedSecret, setHasSavedSecret] = useState(false);
 	/** 本次进页面时从钥匙串读到了密码：给一行提示，没保存过的用户不被打扰 */
 	const [loadedFromKeychain, setLoadedFromKeychain] = useState(false);
-	const codeRef = useRef<HTMLInputElement>(null);
 
 	const supported = probeSupported();
 	const sshReady = sshSupported();
 	const report: ProbeReport | undefined = host ? probeResults[host.id] : undefined;
 	const isProbing = host ? probing.includes(host.id) : false;
+	/** 主机登记的认证方式；本页没手动切换时就用它 */
+	const hostMethod: AuthMethod = host?.auth.method ?? "password";
+	const authMethod: AuthMethod = methodOverride ?? hostMethod;
+	/** 会话键：hooks 也要用它，所以在「没有主机」的提前返回之前就算出来 */
+	const sessionKey = host ? sshKeyForHost(host.id) : "";
+	/** 主机登记的那把密钥（密钥库只存公钥元数据，没有文件路径，所以仍要用户指定文件） */
+	const registeredKey = useKeysStore((s) => (host?.auth.keyId ? s.keys.find((k) => k.id === host.auth.keyId) : undefined));
 
 	// 进入页面即对这台主机做一次真实 TCP 探测；浏览器内没有 Rust 端，跳过探测
 	const hostname = host?.hostname;
@@ -190,6 +236,71 @@ export default function Connect() {
 		};
 	}, [storedHostId]);
 
+	// 换主机（只是路由参数变了、组件没重挂载）时，回到这台主机登记的认证方式
+	useEffect(() => {
+		setMethodOverride(null);
+	}, [hostId]);
+
+	// 键盘交互：服务器在认证阶段随时可能提问，监听要在发起连接之前就挂上，否则第一轮提问会丢。
+	// 事件不经过 sshCache 的会话缓冲，这里单独订阅一条。
+	useEffect(() => {
+		if (!sessionKey || !sshReady) return;
+		let alive = true;
+		let unlisten: (() => void) | null = null;
+		void listenAuthPrompts(sessionKey, (payload) => {
+			// 服务器可以连着问好几轮：每来一轮就换一组输入框，上一轮的回答按顺序提交完就作废
+			setAuthPrompt(payload);
+			setAnswers(payload.prompts.map(() => ""));
+			setPromptSubmitted(false);
+			setPromptError(null);
+		})
+			.then((off) => {
+				if (alive) unlisten = off;
+				else off();
+			})
+			.catch(() => {
+				/* 订阅不上不编造提问：真实提问一定会再走事件，界面不假装 */
+			});
+		return () => {
+			alive = false;
+			unlisten?.();
+		};
+	}, [sessionKey, sshReady]);
+
+	// 会话已经建立、或者已经失败：这一轮问答窗口就该收起（不作答了，也不继续等）
+	const promptFinished = progress.connected || progress.failure !== null;
+	useEffect(() => {
+		if (!authPrompt || !promptFinished) return;
+		setAuthPrompt(null);
+		setAnswers([]);
+		setPromptSubmitted(false);
+		setPromptError(null);
+	}, [authPrompt, promptFinished]);
+
+	// 选中 SSH Agent 时枚举一次身份：一条都没有要如实说出来，别让用户白点连接
+	useEffect(() => {
+		if (authMethod !== "agent" || !sshReady) return;
+		let alive = true;
+		setAgentLoading(true);
+		setAgentError(null);
+		void sshAgentIdentities()
+			.then((list) => {
+				if (!alive) return;
+				setAgentIdentities(list);
+			})
+			.catch((error) => {
+				if (!alive) return;
+				setAgentIdentities(null);
+				setAgentError(messageOf(error));
+			})
+			.finally(() => {
+				if (alive) setAgentLoading(false);
+			});
+		return () => {
+			alive = false;
+		};
+	}, [authMethod, sshReady, agentTicket]);
+
 	if (!host) {
 		return (
 			<WindowChrome>
@@ -214,7 +325,6 @@ export default function Connect() {
 	}
 
 	// 本页之前就已建立、且还活着的会话（从工作区点回连接页时会走到这里）
-	const sessionKey = sshKeyForHost(host.id);
 	const alreadyConnected = hasSshSession(sessionKey);
 	const base: SshProgress = alreadyConnected && !progress.connected ? { ...progress, connected: true } : progress;
 	// 主机密钥被拦下时，Rust 紧接着还会补发一条笼统的 failed；展示上只用带 kind 的那条说明，
@@ -226,10 +336,22 @@ export default function Connect() {
 	const connected = ssh.connected;
 	/** 真实指纹：优先用 Rust 事件里直接带的 fingerprint，其次从握手 detail 里取；都没有就不显示 */
 	const fingerprint = progress.stages.handshake?.fingerprint || fingerprintOf(progress.stages.handshake?.detail);
-	/** 服务器要求多因素时，界面要说明键盘交互尚未接入，而不是假装能继续 */
-	const needsInteractiveAuth = Boolean(ssh.failure && ssh.failedStage === "auth" && /多因素|继续验证/.test(ssh.failure));
 
-	const steps = buildSteps(host, report, supported, isProbing, probeError, ssh, alert !== null);
+	/** 当前认证方式还差什么才能发起连接；null = 齐了。桌面端不可用另有提示，不算在这里 */
+	const credentialProblem: string | null =
+		authMethod === "password"
+			? password
+				? null
+				: "请先输入登录密码"
+			: authMethod === "key" || authMethod === "key-passphrase"
+				? keyPath.trim()
+					? null
+					: "请先选择或粘贴私钥文件路径"
+				: authMethod === "agent" && agentIdentities !== null && agentIdentities.length === 0
+					? "SSH Agent 里没有可用身份：请先 ssh-add 添加私钥"
+					: null;
+
+	const steps = buildSteps(report, supported, isProbing, probeError, ssh, alert !== null, authMethod);
 	const conclusion = summarize(report, supported, isProbing, probeError, ssh, alert);
 	const tabStatus: ConnectionStatus = connected
 		? "connected"
@@ -305,6 +427,7 @@ export default function Connect() {
 	/**
 	 * 连接成功之后才处理「记住密码」：勾了就写钥匙串，没勾而钥匙串里有旧密码就删掉。
 	 * 这里出错只提示，绝不影响已经建立的会话，也不改「连接成功」这个事实。
+	 * 只对密码方式调用：用 Agent / 私钥连上时不该去动钥匙串里那点密码。
 	 */
 	const persistSecret = async () => {
 		if (remember && secretUsable === false) {
@@ -338,7 +461,27 @@ export default function Connect() {
 		}
 	};
 
-	/** 主按钮：发起真实连接。密码只在这次调用里用一次。 */
+	/** 按界面上的选择拼出凭据；私钥路径与口令都只在内存里过一手 */
+	const buildCredential = (): Credential => {
+		switch (authMethod) {
+			case "key":
+			case "key-passphrase":
+				return {
+					method: "private_key",
+					path: keyPath.trim(),
+					// 没填口令就是「这把私钥没有口令」：key 方式下不显示口令框，一律 null
+					passphrase: authMethod === "key-passphrase" && passphrase ? passphrase : null,
+				};
+			case "agent":
+				return { method: "agent" };
+			case "keyboard-interactive":
+				return { method: "keyboard_interactive" };
+			default:
+				return { method: "password", password };
+		}
+	};
+
+	/** 主按钮：发起真实连接。凭据只在这次调用里用一次。 */
 	const startConnect = async () => {
 		if (connecting) return;
 		if (!sshReady) {
@@ -349,21 +492,31 @@ export default function Connect() {
 			});
 			return;
 		}
-		if (!password) {
-			toast({ title: "请先输入登录密码", tone: "warning" });
+		if (credentialProblem) {
+			toast({ title: credentialProblem, tone: "warning" });
 			return;
 		}
 
-		setPreview(null);
 		setAlert(null);
 		setTrustError(null);
 		setProgress({ ...EMPTY_PROGRESS, started: true, connecting: true });
 
 		let result: SshOpenResult;
 		try {
+			// sshCache.openSshSession 的入参固定是 password（那个文件不在本次写入范围），
+			// 所以真正的凭据先按会话键寄存在 ssh.ts，再由 sshConnect 取走 —— 五种方式走同一条路。
+			stageCredential(sessionKey, buildCredential());
 			result = await openSshSession(
 				sessionKey,
-				{ host: host.hostname, port: host.port, username: host.username, password, cols: 80, rows: 24 },
+				{
+					host: host.hostname,
+					port: host.port,
+					username: host.username,
+					// 密码方式顺手带上；其他方式这个字段没人会用（寄存的凭据优先）
+					password: authMethod === "password" ? password : "",
+					cols: 80,
+					rows: 24,
+				},
 				(phase: SshPhase) => setProgress((prev) => applyPhase(prev, phase)),
 			);
 		} catch (error) {
@@ -399,13 +552,60 @@ export default function Connect() {
 		}
 
 		// 会话已经建立：先按用户的选择处理钥匙串（失败只提示），再进工作区
-		await persistSecret();
+		if (authMethod === "password") await persistSecret();
 		toast({
 			title: "SSH 会话已建立",
-			description: `${host.username}@${host.hostname}:${host.port}`,
+			description: `${host.username}@${host.hostname}:${host.port} · ${AUTH_LABEL[authMethod]}`,
 			tone: "success",
 		});
 		enterWorkspace();
+	};
+
+	/** 选私钥文件：路径只进内存里的 credential，不写配置文件、也不写钥匙串 */
+	const chooseKeyFile = async () => {
+		try {
+			const picked = await open({ multiple: false, directory: false, title: "选择私钥文件" });
+			if (picked) setKeyPath(picked);
+			// 返回 null = 用户取消，什么都不做也不提示
+		} catch (error) {
+			toast({ title: "没能打开文件选择器", description: messageOf(error), tone: "danger" });
+		}
+	};
+
+	/** 提交这一轮键盘交互的回答：顺序必须与服务器给的 prompts 一致 */
+	const submitAuthPrompt = async () => {
+		if (!authPrompt || responding) return;
+		setResponding(true);
+		setPromptError(null);
+		try {
+			// 按 prompts 的顺序逐个取值；空着的就是空串，不替用户补内容
+			await sshAuthRespond(
+				sessionKey,
+				authPrompt.prompts.map((_, index) => answers[index] ?? ""),
+			);
+			// 不关窗：服务器可能紧接着再问一轮（新事件会替换掉这一轮），
+			// 也可能直接进 shell —— 那时由 promptFinished 把窗口收掉。
+			setPromptSubmitted(true);
+		} catch (error) {
+			setPromptError(messageOf(error));
+		} finally {
+			setResponding(false);
+		}
+	};
+
+	/** 取消键盘交互：真的把这条连接断掉，并如实说明「已取消认证」 */
+	const cancelAuthPrompt = async () => {
+		setAuthPrompt(null);
+		setAnswers([]);
+		setPromptSubmitted(false);
+		setPromptError(null);
+		setProgress({ ...EMPTY_PROGRESS });
+		await closeSshSession(sessionKey);
+		toast({
+			title: "已取消认证",
+			description: "已断开这次 SSH 连接；没有把任何回答发给服务器",
+			tone: "default",
+		});
 	};
 
 	/** 首次连接确认指纹：把待确认的密钥写进 known_hosts，然后自动重连 */
@@ -467,6 +667,11 @@ export default function Connect() {
 		setAlert(null);
 		setTrustError(null);
 		setPassword("");
+		setPassphrase("");
+		setAuthPrompt(null);
+		setAnswers([]);
+		setPromptSubmitted(false);
+		setPromptError(null);
 		await closeSshSession(sessionKey);
 		toast({ title: "已断开 SSH 会话", description: `${host.username}@${host.hostname}`, tone: "default" });
 	};
@@ -495,7 +700,10 @@ export default function Connect() {
 					<div className="p-4 font-mono text-[12px] text-faint">
 						<div>TermX 连接过程 · {host.name}</div>
 						<div className="text-muted">
-							目标 {host.hostname}:{host.port} · 用户 {host.username} · 认证方式 {AUTH_LABEL[host.auth.method]}
+							目标 {host.hostname}:{host.port} · 用户 {host.username} · 认证方式 {AUTH_LABEL[authMethod]}
+							{methodOverride && methodOverride !== hostMethod
+								? `（主机登记的是${AUTH_LABEL[hostMethod]}，本次临时改用）`
+								: ""}
 						</div>
 						<div className="text-muted">
 							{connected
@@ -537,7 +745,7 @@ export default function Connect() {
 														? "font-medium text-danger"
 														: s.state === "active"
 															? "font-medium text-surface-foreground"
-															: s.state === "pending" || s.state === "unwired"
+															: s.state === "pending"
 																? "text-faint"
 																: "text-muted",
 												)}
@@ -549,7 +757,7 @@ export default function Connect() {
 											title={s.detail}
 											className={cn(
 												"max-w-[52%] shrink-0 truncate font-mono text-[11px]",
-												s.state === "failed" ? "text-danger" : s.state === "pending" || s.state === "unwired" ? "text-faint" : "text-muted",
+												s.state === "failed" ? "text-danger" : s.state === "pending" ? "text-faint" : "text-muted",
 											)}
 										>
 											{s.detail}
@@ -660,115 +868,311 @@ export default function Connect() {
 								</div>
 							)}
 
-							{/* 认证：真实密码输入 + 主连接按钮 */}
-							{!preview && !connected && (
+							{/* 认证：五种方式（密码 / 私钥 / 私钥+口令 / SSH Agent / 键盘交互）都由 Rust 侧真实实现 */}
+							{!connected && (
 								<div className="mt-4 rounded-control border border-border bg-surface p-3">
-									<div className="flex items-center justify-between">
-										<label htmlFor="ssh-password" className="text-[11px] font-medium text-muted">
-											输入 {host.username}@{host.hostname} 的登录密码
-										</label>
+									{/* 认证方式：默认按主机登记的那一种，也允许在本页临时切换，免得主机配错就把人锁死 */}
+									<div className="flex items-center justify-between gap-2">
+										<span className="text-[11px] font-medium text-muted">认证方式</span>
 										<Badge className="font-mono text-[9.5px]">
-											{remember ? "将存入钥匙串" : "只存内存"}
+											{methodOverride && methodOverride !== hostMethod
+												? `本页临时切换 · ${AUTH_LABEL[authMethod]}`
+												: `主机配置 · ${AUTH_LABEL[hostMethod]}`}
 										</Badge>
 									</div>
-									<Input
-										id="ssh-password"
-										type="password"
-										value={password}
-										disabled={connecting}
-										autoComplete="off"
-										autoFocus
-										placeholder={connecting ? "正在认证…" : "SSH 登录密码"}
-										onChange={(e) => setPassword(e.target.value)}
-										onKeyDown={(e) => {
-											if (e.key === "Enter") void startConnect();
-										}}
-										className="mt-2 font-mono"
-									/>
-									{/* 从钥匙串读到了才提示，没保存过的用户不被打扰 */}
-									{loadedFromKeychain && (
-										<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-success">
-											<span className="icon-[lucide--key-round] mt-px size-3 shrink-0" />
-											已从系统钥匙串读取到保存的密码，可以直接连接。
+									<Segmented value={authMethod} onChange={setMethodOverride} options={AUTH_CHOICES} className="mt-2 w-full" />
+									{methodOverride && methodOverride !== hostMethod && (
+										<p className="mt-1.5 text-[10.5px] leading-4 text-warning">
+											这台主机登记的是「{AUTH_LABEL[hostMethod]}」，本次连接改用「{AUTH_LABEL[authMethod]}」；只影响这次连接，不改主机库里的配置。
 										</p>
 									)}
-									<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
-										密码只用于本次连接，保存在内存里：不写进主机库、不写进配置文件。只有勾选下面的「记住密码」时，才会额外交给操作系统钥匙串保管。
-									</p>
 
-									<div
-										className="mt-2.5 border-t border-border pt-2.5"
-										onClickCapture={(e) => {
-											// Checkbox 本身没有 disabled 属性（本次写入范围只允许改本文件），
-											// 所以在捕获阶段就把点击拦住：钥匙串不可用时这个勾选框真的改不动，
-											// 并且明确告诉用户为什么，而不是让他点了没反应。
-											if (secretUsable !== false) return;
-											e.preventDefault();
-											e.stopPropagation();
-											toast({
-												title: "系统钥匙串不可用，密码无法保存",
-												description: "密码只能留在内存里；请用桌面端，或先修好系统的钥匙串服务",
-												tone: "warning",
-											});
-										}}
-									>
-										<Checkbox
-											checked={remember}
-											onChange={setRemember}
-											className={secretUsable === false ? "cursor-not-allowed opacity-45" : undefined}
-											label="记住密码（存入系统钥匙串）"
-											description={
-												secretUsable === false
-													? undefined
-													: "默认不勾选；勾选后密码交给 Windows 凭据管理器 / macOS 钥匙串保管，下次进入本页会预填。"
-											}
-										/>
-										{secretUsable === false && (
-											<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
-												<span className="icon-[lucide--triangle-alert] mt-px size-3 shrink-0" />
-												系统钥匙串当前不可用（浏览器预览里没有钥匙串；Linux 上缺少 Secret Service 也会这样），
-												这个选项已禁用，密码只能留在内存里。
-											</p>
-										)}
-										{hasSavedSecret && (
-											<div className="mt-1.5 flex flex-wrap items-center gap-2">
-												<Button size="sm" variant="ghost" icon="icon-[lucide--trash-2]" onClick={() => void forgetSavedSecret()}>
-													删除已保存的密码
-												</Button>
-												<span className="text-[10.5px] text-faint">系统钥匙串里已存有这台主机的密码</span>
+									{/* ① 密码 */}
+									{authMethod === "password" && (
+										<div className="mt-3">
+											<div className="flex items-center justify-between">
+												<label htmlFor="ssh-password" className="text-[11px] font-medium text-muted">
+													输入 {host.username}@{host.hostname} 的登录密码
+												</label>
+												<Badge className="font-mono text-[9.5px]">
+													{remember ? "将存入钥匙串" : "只存内存"}
+												</Badge>
 											</div>
+											<Input
+												id="ssh-password"
+												type="password"
+												value={password}
+												disabled={connecting}
+												autoComplete="off"
+												autoFocus
+												placeholder={connecting ? "正在认证…" : "SSH 登录密码"}
+												onChange={(e) => setPassword(e.target.value)}
+												onKeyDown={(e) => {
+													if (e.key === "Enter") void startConnect();
+												}}
+												className="mt-2 font-mono"
+											/>
+											{/* 从钥匙串读到了才提示，没保存过的用户不被打扰 */}
+											{loadedFromKeychain && (
+												<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-success">
+													<span className="icon-[lucide--key-round] mt-px size-3 shrink-0" />
+													已从系统钥匙串读取到保存的密码，可以直接连接。
+												</p>
+											)}
+											<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
+												密码只用于本次连接，保存在内存里：不写进主机库、不写进配置文件。只有勾选下面的「记住密码」时，才会额外交给操作系统钥匙串保管。
+											</p>
+
+											<div
+												className="mt-2.5 border-t border-border pt-2.5"
+												onClickCapture={(e) => {
+													// Checkbox 本身没有 disabled 属性（本次写入范围只允许改本文件），
+													// 所以在捕获阶段就把点击拦住：钥匙串不可用时这个勾选框真的改不动，
+													// 并且明确告诉用户为什么，而不是让他点了没反应。
+													if (secretUsable !== false) return;
+													e.preventDefault();
+													e.stopPropagation();
+													toast({
+														title: "系统钥匙串不可用，密码无法保存",
+														description: "密码只能留在内存里；请用桌面端，或先修好系统的钥匙串服务",
+														tone: "warning",
+													});
+												}}
+											>
+												<Checkbox
+													checked={remember}
+													onChange={setRemember}
+													className={secretUsable === false ? "cursor-not-allowed opacity-45" : undefined}
+													label="记住密码（存入系统钥匙串）"
+													description={
+														secretUsable === false
+															? undefined
+															: "默认不勾选；勾选后密码交给 Windows 凭据管理器 / macOS 钥匙串保管，下次进入本页会预填。"
+													}
+												/>
+												{secretUsable === false && (
+													<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
+														<span className="icon-[lucide--triangle-alert] mt-px size-3 shrink-0" />
+														系统钥匙串当前不可用（浏览器预览里没有钥匙串；Linux 上缺少 Secret Service 也会这样），
+														这个选项已禁用，密码只能留在内存里。
+													</p>
+												)}
+												{hasSavedSecret && (
+													<div className="mt-1.5 flex flex-wrap items-center gap-2">
+														<Button size="sm" variant="ghost" icon="icon-[lucide--trash-2]" onClick={() => void forgetSavedSecret()}>
+															删除已保存的密码
+														</Button>
+														<span className="text-[10.5px] text-faint">系统钥匙串里已存有这台主机的密码</span>
+													</div>
+												)}
+											</div>
+										</div>
+									)}
+
+									{/* ② 私钥 / ③ 私钥 + 口令 */}
+									{(authMethod === "key" || authMethod === "key-passphrase") && (
+										<div className="mt-3">
+											<div className="flex items-center justify-between">
+												<label htmlFor="ssh-key-path" className="text-[11px] font-medium text-muted">
+													私钥文件
+												</label>
+												<Badge className="font-mono text-[9.5px]">只进内存</Badge>
+											</div>
+											<div className="mt-2 flex items-center gap-1.5">
+												<Input
+													id="ssh-key-path"
+													value={keyPath}
+													disabled={connecting}
+													autoComplete="off"
+													autoFocus
+													placeholder={connecting ? "正在认证…" : "C:\\Users\\you\\.ssh\\id_ed25519"}
+													onChange={(e) => setKeyPath(e.target.value)}
+													onKeyDown={(e) => {
+														if (e.key === "Enter") void startConnect();
+													}}
+													className="font-mono"
+												/>
+												<Button size="sm" icon="icon-[lucide--folder-open]" disabled={connecting} onClick={() => void chooseKeyFile()}>
+													选择文件…
+												</Button>
+											</div>
+											{registeredKey && (
+												<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
+													这台主机登记的密钥是「{registeredKey.name}」（{registeredKey.type}
+													{registeredKey.bits ? ` ${registeredKey.bits}` : ""} · {registeredKey.fingerprint}
+													）；密钥库只保存公钥元数据、不含私钥文件路径，所以本地私钥文件仍要在这里指定。
+												</p>
+											)}
+											{authMethod === "key-passphrase" && (
+												<div className="mt-2.5">
+													<div className="flex items-center justify-between">
+														<label htmlFor="ssh-key-passphrase" className="text-[11px] font-medium text-muted">
+															私钥口令
+														</label>
+														<Badge className="font-mono text-[9.5px]">只存内存</Badge>
+													</div>
+													<Input
+														id="ssh-key-passphrase"
+														type="password"
+														value={passphrase}
+														disabled={connecting}
+														autoComplete="off"
+														placeholder={connecting ? "正在认证…" : "私钥口令"}
+														onChange={(e) => setPassphrase(e.target.value)}
+														onKeyDown={(e) => {
+															if (e.key === "Enter") void startConnect();
+														}}
+														className="mt-2 font-mono"
+													/>
+													<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
+														口令只活在本次连接的内存里：不写配置文件，也不进系统钥匙串（钥匙串那一套只服务密码方式）。私钥没有口令就留空。
+													</p>
+												</div>
+											)}
+											<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
+												私钥文件路径随凭据交给本机 Rust 侧读取，不写进主机库或配置文件；私钥内容始终不出这台机器。
+											</p>
+										</div>
+									)}
+
+									{/* ④ SSH Agent */}
+									{authMethod === "agent" && (
+										<div className="mt-3">
+											<div className="flex items-center justify-between">
+												<span className="text-[11px] font-medium text-muted">SSH Agent 里的身份</span>
+												<Badge className="font-mono text-[9.5px]">私钥不经过 TermX</Badge>
+											</div>
+
+											{!sshReady && (
+												<p className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
+													<span className="icon-[lucide--laptop] mt-px size-3 shrink-0" />
+													<span>浏览器预览里读不到 SSH Agent：这一项只在桌面端可用。</span>
+												</p>
+											)}
+
+											{sshReady && agentLoading && <p className="mt-2 text-[11px] leading-4 text-muted">正在读取系统 SSH Agent…</p>}
+
+											{sshReady && !agentLoading && agentError && (
+												<div className="mt-2 rounded-control border border-danger/40 bg-danger/10 p-2.5">
+													<p className="text-[11px] leading-4 text-danger">读取 SSH Agent 失败：{agentError}</p>
+													<Button
+														size="sm"
+														icon="icon-[lucide--rotate-cw]"
+														className="mt-2"
+														onClick={() => setAgentTicket((n) => n + 1)}
+													>
+														重试
+													</Button>
+												</div>
+											)}
+
+											{sshReady && !agentLoading && !agentError && agentIdentities?.length === 0 && (
+												<div className="mt-2 rounded-control border border-warning/40 bg-warning/10 p-2.5">
+													<div className="flex items-center gap-1.5 text-[11.5px] font-medium text-surface-foreground">
+														<span className="icon-[lucide--triangle-alert] size-3.5 shrink-0 text-warning" />
+														SSH Agent 里没有可用身份：请先 ssh-add 添加私钥
+													</div>
+													<p className="mt-1 text-[10.5px] leading-4 text-muted">
+														在系统终端里执行 ssh-add ~/.ssh/id_ed25519（Windows 上用它认识的真实路径），加好之后再点「重新读取」。
+													</p>
+													<Button
+														size="sm"
+														icon="icon-[lucide--rotate-cw]"
+														className="mt-2"
+														onClick={() => setAgentTicket((n) => n + 1)}
+													>
+														重新读取
+													</Button>
+												</div>
+											)}
+
+											{sshReady && !agentLoading && !agentError && agentIdentities && agentIdentities.length > 0 && (
+												<div className="mt-2 rounded-control border border-border bg-surface-sunk p-2.5">
+													<div className="flex items-center justify-between gap-2">
+														<span className="text-[11px] font-medium text-muted">
+															Agent 里有 {agentIdentities.length} 个身份
+														</span>
+														<Button
+															size="sm"
+															variant="ghost"
+															icon="icon-[lucide--rotate-cw]"
+															onClick={() => setAgentTicket((n) => n + 1)}
+														>
+															重新读取
+														</Button>
+													</div>
+													<ul className="mt-1.5 space-y-1">
+														{agentIdentities.map((identity, index) => (
+															<li
+																key={`${identity.fingerprint}-${index}`}
+																className="rounded border border-border bg-surface px-2 py-1.5"
+															>
+																<div className="selectable font-mono text-[10.5px] leading-4 break-all text-surface-foreground">
+																	{identity.fingerprint || "（Rust 侧没有给出指纹）"}
+																</div>
+																<div className="mt-0.5 text-[10.5px] leading-4 text-muted">
+																	{identity.algorithm || "算法未报告"}
+																	{identity.comment ? ` · ${identity.comment}` : ""}
+																</div>
+															</li>
+														))}
+													</ul>
+													<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-faint">
+														<span className="icon-[lucide--info] mt-px size-3 shrink-0" />
+														<span>
+															连接时将依次尝试下列身份，直到服务器接受其中一把；用哪一把由服务器说了算，界面不做选择。私钥始终留在 SSH Agent 进程里。
+														</span>
+													</p>
+												</div>
+											)}
+										</div>
+									)}
+
+									{/* ⑤ 键盘交互（二次验证 / 服务器逐步提问） */}
+									{authMethod === "keyboard-interactive" && (
+										<div className="mt-3">
+											<div className="flex items-center justify-between">
+												<span className="text-[11px] font-medium text-muted">键盘交互</span>
+												<Badge className="font-mono text-[9.5px]">问答只走内存</Badge>
+											</div>
+											<div className="mt-2 rounded-control border border-border bg-surface-sunk p-2.5 text-[11px] leading-4 text-muted">
+												<p>
+													服务器会以交互方式提问（可能是密码，也可能是二次验证码 / 一次性口令）。点「连接」之后，
+													TermX 把服务器的提问原样弹成输入框，你答完点「继续」提交。
+												</p>
+												<p className="mt-1.5">
+													服务器可以连着问好几轮（例如先密码、再验证码），TermX 会一轮一轮地接着弹。这里的问答不写配置文件，也不进系统钥匙串。
+												</p>
+											</div>
+										</div>
+									)}
+
+									{/* 主按钮：五种方式共用；缺什么就如实说缺什么 */}
+									<div className="mt-3 flex items-center gap-2">
+										<Button
+											size="sm"
+											variant="primary"
+											icon="icon-[lucide--plug-zap]"
+											disabled={connecting || !sshReady || credentialProblem !== null}
+											onClick={() => void startConnect()}
+										>
+											{connecting ? "连接中…" : "连接"}
+										</Button>
+										{!connecting && sshReady && credentialProblem && (
+											<span className="text-[10.5px] text-faint">{credentialProblem}</span>
 										)}
 									</div>
-									{host.auth.method !== "password" && (
-										<p className="mt-1 text-[10.5px] leading-4 text-warning">
-											这台主机登记的是「{AUTH_LABEL[host.auth.method]}」认证；Rust 侧目前只实现了密码认证，本次会用密码尝试。
-										</p>
-									)}
 									{!sshReady && (
 										<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
 											<span className="icon-[lucide--laptop] mt-px size-3 shrink-0" />
 											<span>SSH 需要在桌面端运行：浏览器预览里没有原生 SSH 通道，按钮已禁用，也不会伪造连接过程。</span>
 										</div>
 									)}
-									<div className="mt-3 flex items-center gap-2">
-										<Button
-											size="sm"
-											variant="primary"
-											icon="icon-[lucide--plug-zap]"
-											disabled={connecting || !sshReady || password.length === 0}
-											onClick={() => void startConnect()}
-										>
-											{connecting ? "连接中…" : "连接"}
-										</Button>
-										{!connecting && password.length === 0 && sshReady && (
-											<span className="text-[10.5px] text-faint">输入密码后即可发起真实连接</span>
-										)}
-									</div>
 								</div>
 							)}
 
 							{/* 连接成功：真实指纹 + 进入工作区 */}
-							{!preview && connected && (
+							{connected && (
 								<div className="mt-4 rounded-control border border-success/40 bg-success/10 p-3">
 									<div className="flex items-center gap-2">
 										<span className="icon-[lucide--check-circle] size-3.5 shrink-0 text-success" />
@@ -799,7 +1203,7 @@ export default function Connect() {
 
 							{/* 普通失败态（认证失败、TCP 不通等）：只展示 Rust 端真实返回的原因；
 							    主机密钥被拦下的情况由上面的告警卡片负责，不在这里重复 */}
-							{!preview && !connected && ssh.failure && !alert && (
+							{!connected && ssh.failure && !alert && (
 								<div className="mt-4 rounded-control border border-danger/40 bg-danger/10 p-3">
 									<div className="flex items-start gap-2">
 										<span className="icon-[lucide--circle-x] mt-px size-3.5 shrink-0 text-danger" />
@@ -819,7 +1223,7 @@ export default function Connect() {
 													size="sm"
 													variant="primary"
 													icon="icon-[lucide--rotate-cw]"
-													disabled={connecting || !sshReady || password.length === 0}
+													disabled={connecting || !sshReady || credentialProblem !== null}
 													onClick={() => void startConnect()}
 												>
 													重试
@@ -843,11 +1247,6 @@ export default function Connect() {
 										</div>
 									</div>
 								</div>
-							)}
-
-							{/* 二次验证：服务器真的要二次验证时才出现，并明确标注尚未接入 */}
-							{(preview === "2fa" || (!preview && needsInteractiveAuth)) && (
-								<TwoFactorCard code={code} onChange={setCode} inputRef={codeRef} className="mt-4" />
 							)}
 
 							{/* 操作按钮栏 */}
@@ -932,25 +1331,80 @@ export default function Connect() {
 					)}
 				</Modal>
 
-				{/* 未接入能力预览：真实流程走不到的状态，保留骨架以便逐条评审 */}
-				<div className="absolute right-3 bottom-3 z-[60] flex items-center gap-2 rounded-card border border-border bg-surface-raised px-2 py-1.5 shadow-lg">
-					<span className="text-[10px] font-medium tracking-wider text-faint uppercase">尚未接入</span>
-					<div className="flex items-center gap-0.5">
-						{PREVIEW_OPTIONS.map((o) => (
-							<button
-								key={o.value}
-								type="button"
-								onClick={() => setPreview((current) => (current === o.value ? null : o.value))}
-								className={cn(
-									"rounded px-1.5 py-0.5 text-[11px] transition-colors",
-									preview === o.value ? "bg-primary/15 font-medium text-primary" : "text-muted hover:text-surface-foreground",
-								)}
+				{/* 键盘交互问答：服务器问一轮就弹一轮，答完接着下一轮，直到认证结束或用户取消 */}
+				<Modal
+					open={authPrompt !== null}
+					onClose={() => void cancelAuthPrompt()}
+					title={authPrompt?.name || "服务器要求交互式验证"}
+					icon="icon-[lucide--shield-question]"
+					width={440}
+					footer={
+						<>
+							<Button size="sm" disabled={responding} onClick={() => void cancelAuthPrompt()}>
+								取消认证
+							</Button>
+							<Button
+								size="sm"
+								variant="primary"
+								icon="icon-[lucide--arrow-right]"
+								disabled={responding || promptSubmitted}
+								onClick={() => void submitAuthPrompt()}
 							>
-								{o.label}
-							</button>
-						))}
-					</div>
-				</div>
+								{responding ? "正在提交…" : promptSubmitted ? "已提交，等待服务器…" : "继续"}
+							</Button>
+						</>
+					}
+				>
+					{authPrompt && (
+						<>
+							{authPrompt.instructions ? (
+								<p className="whitespace-pre-wrap">{authPrompt.instructions}</p>
+							) : (
+								<p>服务器没有给额外说明，只给了下面这些提问。</p>
+							)}
+							<div className="mt-2.5 space-y-2">
+								{authPrompt.prompts.map((item, index) => (
+									<Field
+										key={`${item.prompt}-${index}`}
+										label={item.prompt || `第 ${index + 1} 项`}
+										hint={item.echo ? undefined : "不回显"}
+									>
+										<Input
+											type={item.echo ? "text" : "password"}
+											value={answers[index] ?? ""}
+											disabled={responding || promptSubmitted}
+											autoComplete="off"
+											autoFocus={index === 0}
+											onChange={(e) =>
+												setAnswers((prev) =>
+													authPrompt.prompts.map((_, i) => (i === index ? e.target.value : (prev[i] ?? ""))),
+												)
+											}
+											onKeyDown={(e) => {
+												if (e.key === "Enter" && !promptSubmitted) void submitAuthPrompt();
+											}}
+											className="font-mono"
+										/>
+									</Field>
+								))}
+							</div>
+							<p className="mt-2.5 text-[10.5px] leading-4 text-faint">
+								回答按上面提问的顺序原样提交给服务器；这里的内容不写配置文件、也不进系统钥匙串。
+							</p>
+							{promptSubmitted && (
+								<div className="mt-2 flex items-start gap-1.5 text-[10.5px] leading-4 text-success">
+									<span className="icon-[lucide--check-circle] mt-px size-3 shrink-0" />
+									<span>这一轮已提交。服务器可能接着再问一轮（会立刻换成新的输入框），也可能直接完成认证。</span>
+								</div>
+							)}
+							{promptError && (
+								<div className="mt-2 rounded-control border border-danger/40 bg-danger/10 px-2 py-1.5 text-[10.5px] leading-4 text-danger">
+									回答没能交给服务器：{promptError}
+								</div>
+							)}
+						</>
+					)}
+				</Modal>
 			</div>
 		</WindowChrome>
 	);
@@ -1007,13 +1461,13 @@ function fingerprintOf(detail: string | undefined): string | null {
 
 /** 用真实结果推导分步进度：未发起 SSH 时前两步看 TCP 探测，发起后五步全看 SSH 阶段 */
 function buildSteps(
-	host: Host,
 	report: ProbeReport | undefined,
 	supported: boolean,
 	probing: boolean,
 	probeError: string | null,
 	ssh: SshProgress,
 	hostKeyRefused: boolean,
+	authMethod: AuthMethod,
 ): Step[] {
 	const sshDriven = ssh.started || ssh.connected;
 	const probeDetail = !supported ? "需桌面端" : probing ? "正在探测…" : probeError ? "探测失败" : "等待探测";
@@ -1053,7 +1507,7 @@ function buildSteps(
 		resolve,
 		tcp,
 		sshStep("handshake", STAGE_LABEL.handshake),
-		sshStep("auth", `认证 · ${AUTH_LABEL[host.auth.method]}`),
+		sshStep("auth", `认证 · ${AUTH_LABEL[authMethod]}`),
 		sshStep("shell", STAGE_LABEL.shell),
 	];
 
@@ -1137,7 +1591,7 @@ function summarize(
 			tone: "border-success/40 bg-success/10",
 			icon: "icon-[lucide--check-circle] text-success",
 			headline: "TCP 可达性已确认；尚未发起 SSH 连接",
-			body: `${describeProbe(report)}。TCP 能连上并不代表 SSH 一定可用，填好密码点「连接」用真实握手确认。`,
+			body: `${describeProbe(report)}。TCP 能连上并不代表 SSH 一定可用，按上面的认证方式点「连接」用真实握手确认。`,
 		};
 	}
 	if (!supported) {
@@ -1160,26 +1614,11 @@ function summarize(
 		tone: "border-border bg-surface",
 		icon: "icon-[lucide--circle-dashed] text-faint",
 		headline: probing ? "正在探测 TCP 可达性…" : "TCP 可达性尚未确认；尚未发起 SSH 连接",
-		body: probing ? "探测结果会显示在步骤条的前两步。" : "可以先探测 TCP，也可以直接填密码发起真实 SSH 连接。",
+		body: probing ? "探测结果会显示在步骤条的前两步。" : "可以先探测 TCP，也可以直接按上面的认证方式发起真实 SSH 连接。",
 	};
 }
 
 /* ---------------------------------- 零件 ---------------------------------- */
-
-/** 骨架态共用的提醒：这些能力为什么还不能用 */
-function UnwiredNote({ children, className }: { children: ReactNode; className?: string }) {
-	return (
-		<div
-			className={cn(
-				"flex items-start gap-2 rounded-control border border-border bg-surface p-3 text-[11px] leading-4 text-muted",
-				className,
-			)}
-		>
-			<StepMark state="unwired" />
-			<span>{children}</span>
-		</div>
-	);
-}
 
 /**
  * 真实指纹区块：值只可能来自服务器（Rust 侧握手时算出来的 SHA256）。
@@ -1228,63 +1667,6 @@ function FingerprintBlock({
 	);
 }
 
-/** 二次验证（键盘交互）：Rust 侧尚未实现，这里只保留骨架并如实标注 */
-function TwoFactorCard({
-	code,
-	onChange,
-	inputRef,
-	className,
-}: {
-	code: string;
-	onChange: (value: string) => void;
-	inputRef: RefObject<HTMLInputElement | null>;
-	className?: string;
-}) {
-	return (
-		<div className={cn("rounded-control border border-border bg-surface p-3", className)}>
-			<div className="flex items-center justify-between">
-				<label className="text-[11px] font-medium text-muted">输入二次验证码 (Google Authenticator / OTP)</label>
-				<span className="flex items-center gap-1.5">
-					<Badge className="font-mono text-[9.5px]">尚未接入</Badge>
-					<StepMark state="unwired" />
-				</span>
-			</div>
-
-			<div className="mt-2 flex items-center justify-between gap-1.5 font-mono" onClick={() => inputRef.current?.focus()}>
-				{Array.from({ length: 6 }).map((_, i) => {
-					const char = code[i];
-					return (
-						<div
-							key={i}
-							className={cn(
-								"flex size-8 items-center justify-center rounded border text-[14px] font-semibold",
-								char ? "border-primary bg-primary/10 text-surface-foreground" : "border-border bg-surface text-faint",
-							)}
-						>
-							{char ?? ""}
-						</div>
-					);
-				})}
-			</div>
-
-			{/* 真正的键盘输入源：隐藏输入框，支持退格、粘贴与输入法 */}
-			<input
-				ref={inputRef}
-				value={code}
-				inputMode="numeric"
-				autoComplete="one-time-code"
-				aria-label="二次验证码"
-				onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, 6))}
-				className="sr-only"
-			/>
-
-			<UnwiredNote className="mt-3">
-				键盘交互认证（Keyboard-Interactive）尚未在 Rust 侧实现：服务器要求二次验证时，TermX 现在只能如实报出失败；这个输入框不参与任何提交，也不会被保存。
-			</UnwiredNote>
-		</div>
-	);
-}
-
 function StepMark({ state }: { state: StepState }) {
 	if (state === "done") {
 		return (
@@ -1304,13 +1686,6 @@ function StepMark({ state }: { state: StepState }) {
 		return (
 			<span className="flex size-4 items-center justify-center rounded-full bg-danger/20 text-danger">
 				<span className="icon-[lucide--x] size-2.5" />
-			</span>
-		);
-	}
-	if (state === "unwired") {
-		return (
-			<span className="flex size-4 shrink-0 items-center justify-center rounded-full border border-dashed border-border text-faint">
-				<span className="icon-[lucide--minus] size-2.5" />
 			</span>
 		);
 	}

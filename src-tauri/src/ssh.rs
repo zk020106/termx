@@ -4,13 +4,15 @@
 //! - 连接过程分阶段回报给前端（`ssh://state/{key}`），正好对应「连接过程」界面的步骤条，
 //!   失败时能指出是哪一步出错，而不是笼统的一句「连接失败」。
 //! - 会话数据走事件流（`ssh://data/{key}`），与本地终端 PTY 的形态保持一致。
-//! - 凭据只存在于内存：密码用于本次认证，**不写进任何配置文件**
+//! - 凭据只存在于内存：认证方式与凭据由 `ssh_auth` 处理，用完即弃、**不写进任何配置文件**
 //!   （配置文件只存主机地址、用户名这类非敏感信息）。系统钥匙串持久化尚未接入。
-//! - 主机指纹会被回报并在界面上展示；但**信任策略（known_hosts / 首次连接人工确认）尚未实现**，
-//!   当前是接受任何指纹。这一点在界面上必须如实标注，不能假装已经校验过。
+//!   五种认证方式（密码 / 私钥 / 私钥加口令 / SSH Agent / 键盘交互）都在 `crate::ssh_auth`。
+//! - 主机指纹会被回报并在界面上展示，信任策略（known_hosts / 首次连接人工确认）由
+//!   `crate::known_hosts` 执行：未见过的指纹一律先拒绝，由用户确认后再写入自己的记录。
 
 use crate::known_hosts::{self, Verdict};
-use russh::client::{self, AuthResult};
+use crate::ssh_auth::{self, AuthPromptRegistry, Credential};
+use russh::client;
 use russh::keys::{PublicKey, PublicKeyOrCertificate};
 use russh::ChannelMsg;
 use serde::Serialize;
@@ -32,6 +34,8 @@ pub struct SshState {
     /// 等待用户确认的主机密钥：host:port -> 公钥。
     /// 存在这里而不是走 IPC 传递密钥材料，用户确认后由 Rust 自己写盘。
     pending_keys: Arc<Mutex<HashMap<String, PublicKey>>>,
+    /// 正在等界面回答的键盘交互请求（二次验证要来回问用户）
+    pub auth_prompts: AuthPromptRegistry,
 }
 
 fn host_port_key(host: &str, port: u16) -> String {
@@ -51,7 +55,7 @@ pub struct SshPhase {
     fingerprint: Option<String>,
 }
 
-fn emit_phase(app: &AppHandle, key: &str, phase: &str, ok: bool, detail: impl Into<String>) {
+pub(crate) fn emit_phase(app: &AppHandle, key: &str, phase: &str, ok: bool, detail: impl Into<String>) {
     emit_phase_full(app, key, phase, ok, detail, None, None);
 }
 
@@ -123,11 +127,12 @@ async fn run_session(
     host: &str,
     port: u16,
     username: &str,
-    password: &str,
+    credential: Credential,
     cols: u32,
     rows: u32,
     rx: &mut UnboundedReceiver<SshCommand>,
     pending_keys: &Arc<Mutex<HashMap<String, PublicKey>>>,
+    auth_prompts: &AuthPromptRegistry,
 ) -> Result<(), String> {
     emit_phase(app, key, "resolve", true, format!("{host}:{port}"));
 
@@ -192,25 +197,20 @@ async fn run_session(
         Some(&fp),
     );
 
-    let auth = session
-        .authenticate_password(username, password)
-        .await
-        .map_err(|e| format!("认证阶段出错：{e}"))?;
-
-    match auth {
-        AuthResult::Success => {
-            emit_phase(app, key, "auth", true, format!("{username} 密码认证通过"));
-        }
-        AuthResult::Failure { partial_success, .. } => {
-            let detail = if partial_success {
-                "服务器要求继续验证（多因素）".to_string()
-            } else {
-                "认证被拒绝：用户名或密码不正确".to_string()
-            };
-            emit_phase(app, key, "auth", false, detail.clone());
-            return Err(detail);
-        }
-    }
+    // 认证：密码 / 私钥 / 私钥加口令 / SSH Agent / 键盘交互，由 ssh_auth 分派。
+    // 详细过程（用了哪种方式、服务器提了什么问）由 ssh_auth 自己回报 auth 阶段。
+    let outcome = ssh_auth::authenticate(
+        app,
+        key,
+        &mut session,
+        username,
+        &credential,
+        auth_prompts,
+    )
+    .await;
+    // 凭据用完即弃，不跟着会话一直挂在内存里
+    drop(credential);
+    outcome?;
 
     let mut channel = session
         .channel_open_session()
@@ -280,7 +280,7 @@ pub async fn ssh_connect(
     host: String,
     port: u16,
     username: String,
-    password: String,
+    credential: Credential,
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
@@ -296,13 +296,27 @@ pub async fn ssh_connect(
 
     let sessions = state.sessions.clone();
     let pending = state.pending_keys.clone();
+    let auth_prompts = state.auth_prompts.clone();
     let task_key = key.clone();
 
     tauri::async_runtime::spawn(async move {
         let result = run_session(
-            &app, &task_key, &host, port, &username, &password, cols, rows, &mut rx, &pending,
+            &app,
+            &task_key,
+            &host,
+            port,
+            &username,
+            credential,
+            cols,
+            rows,
+            &mut rx,
+            &pending,
+            &auth_prompts,
         )
         .await;
+
+        // 认证输入若还挂着（失败退出、超时），一并收掉，别留下永远等不到的通道
+        auth_prompts.cancel(&task_key, "会话已结束");
 
         // 先清掉会话条目再报失败：否则界面立刻重试（例如用户刚确认完指纹）会撞上「会话已存在」
         if let Ok(mut map) = sessions.lock() {
@@ -392,6 +406,9 @@ pub fn ssh_resize(
 
 #[tauri::command]
 pub fn ssh_disconnect(state: State<'_, SshState>, key: String) -> Result<(), String> {
+    // 认证还没结束（比如正卡在键盘交互等输入）时也要把它叫醒，
+    // 否则会话任务会一直挂着，用户点了「断开」却什么都没发生
+    state.auth_prompts.cancel(&key, "用户断开了连接");
     let mut sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
     if let Some(tx) = sessions.remove(&key) {
         let _ = tx.send(SshCommand::Close);
@@ -402,6 +419,7 @@ pub fn ssh_disconnect(state: State<'_, SshState>, key: String) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::client::AuthResult;
     use russh::keys::HashAlg;
     use std::time::Duration;
 
