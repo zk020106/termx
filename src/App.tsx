@@ -1,8 +1,11 @@
 import { Component, lazy, Suspense, type ErrorInfo, type ReactNode } from "react";
 import { HashRouter, Route, Routes } from "react-router";
+import { LockGate } from "@/components/chrome/LockGate";
 
 /* 路由与 termx-design-brief「06 设计交付清单」的 16 个界面一一对应。
- * 其中 /welcome、/lock、/palette、/updater 是整页或浮层，不套应用外壳。
+ * 其中 /welcome、/palette、/updater 是整页或浮层，不套应用外壳；
+ * 锁屏不是路由：它由 LockGate 以覆盖层形式盖在整棵界面之上（见该文件），
+ * 这样锁屏不会卸载终端，SSH 会话得以保留。
  *
  * 桌面端用 HashRouter：打包后由自定义协议加载，无需服务端改写路由。
  * 16 个界面全部按路由懒加载 —— 既让首屏只装载当前界面，也让单个界面的
@@ -14,7 +17,6 @@ const Forward = lazy(() => import("@/screens/Forward"));
 const HostEdit = lazy(() => import("@/screens/HostEdit"));
 const Hosts = lazy(() => import("@/screens/Hosts"));
 const Keys = lazy(() => import("@/screens/Keys"));
-const Lock = lazy(() => import("@/screens/Lock"));
 const Monitor = lazy(() => import("@/screens/Monitor"));
 const Palette = lazy(() => import("@/screens/Palette"));
 const Settings = lazy(() => import("@/screens/Settings"));
@@ -28,32 +30,33 @@ const Workspace = lazy(() => import("@/screens/Workspace"));
 export default function App() {
 	return (
 		<HashRouter>
-			<ScreenBoundary>
-				<Suspense fallback={<ScreenLoading />}>
-					<Routes>
-						<Route path="/welcome" element={<Welcome />} />
-						<Route path="/lock" element={<Lock />} />
+			<LockGate>
+				<ScreenBoundary>
+					<Suspense fallback={<ScreenLoading />}>
+						<Routes>
+							<Route path="/welcome" element={<Welcome />} />
 
-						<Route path="/" element={<Workspace />} />
-						<Route path="/hosts" element={<Hosts />} />
-						<Route path="/hosts/new" element={<HostEdit />} />
-						<Route path="/hosts/:hostId/edit" element={<HostEdit />} />
-						<Route path="/connect" element={<Connect />} />
-						<Route path="/sftp" element={<Sftp />} />
-						<Route path="/editor" element={<Editor />} />
-						<Route path="/transfers" element={<Transfers />} />
-						<Route path="/forward" element={<Forward />} />
-						<Route path="/snippets" element={<Snippets />} />
-						<Route path="/keys" element={<Keys />} />
-						<Route path="/monitor" element={<Monitor />} />
-						<Route path="/settings" element={<Settings />} />
-						<Route path="/palette" element={<Palette />} />
-						<Route path="/updater" element={<Updater />} />
+							<Route path="/" element={<Workspace />} />
+							<Route path="/hosts" element={<Hosts />} />
+							<Route path="/hosts/new" element={<HostEdit />} />
+							<Route path="/hosts/:hostId/edit" element={<HostEdit />} />
+							<Route path="/connect" element={<Connect />} />
+							<Route path="/sftp" element={<Sftp />} />
+							<Route path="/editor" element={<Editor />} />
+							<Route path="/transfers" element={<Transfers />} />
+							<Route path="/forward" element={<Forward />} />
+							<Route path="/snippets" element={<Snippets />} />
+							<Route path="/keys" element={<Keys />} />
+							<Route path="/monitor" element={<Monitor />} />
+							<Route path="/settings" element={<Settings />} />
+							<Route path="/palette" element={<Palette />} />
+							<Route path="/updater" element={<Updater />} />
 
-						<Route path="*" element={<Workspace />} />
-					</Routes>
-				</Suspense>
-			</ScreenBoundary>
+							<Route path="*" element={<Workspace />} />
+						</Routes>
+					</Suspense>
+				</ScreenBoundary>
+			</LockGate>
 		</HashRouter>
 	);
 }

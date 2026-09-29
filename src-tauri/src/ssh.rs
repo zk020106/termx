@@ -11,6 +11,7 @@
 //!   `crate::known_hosts` 执行：未见过的指纹一律先拒绝，由用户确认后再写入自己的记录。
 
 use crate::known_hosts::{self, Verdict};
+use crate::probe::Stats;
 use crate::ssh_auth::{self, AuthPromptRegistry, Credential};
 use russh::client;
 use russh::keys::{PublicKey, PublicKeyOrCertificate};
@@ -18,13 +19,21 @@ use russh::ChannelMsg;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 
 /// 发给会话任务的指令
 enum SshCommand {
     Data(Vec<u8>),
     Resize { cols: u32, rows: u32 },
+    /// 在这条连接上量一次往返；答复走 oneshot 回给发起测量的命令
+    Ping {
+        samples: u32,
+        timeout: Duration,
+        reply: oneshot::Sender<SshRttReport>,
+    },
     Close,
 }
 
@@ -131,6 +140,118 @@ impl client::Handler for ClientHandler {
         *self.verdict.lock().unwrap() = Some((kind, fingerprint));
         Ok(false)
     }
+}
+
+/// 在已认证连接上量到的往返延迟。
+///
+/// 口径：一次 SSH 全局请求（keepalive）从发出到收到对端答复，
+/// 也就是**端到端的真实往返**（含两端 SSH 协议栈的处理时间）。
+/// 与 probe.rs 的 TCP 建连耗时是两码事：后者可能被本机代理就地握完，与远端无关。
+#[derive(Debug, Serialize, Clone)]
+pub struct SshRttReport {
+    pub key: String,
+    /// 口径标识，恒为 `ssh_round_trip`
+    pub caliber: &'static str,
+    /// 实际发出去的 ping 次数（首包超时后就不再继续，所以可能小于请求的次数）
+    pub sent: u32,
+    pub received: u32,
+    /// 丢包率 0..1
+    pub loss: f64,
+    pub min_ms: f64,
+    pub avg_ms: f64,
+    pub median_ms: f64,
+    pub max_ms: f64,
+    pub jitter_ms: f64,
+    pub samples: Vec<f64>,
+    pub error: Option<String>,
+}
+
+/// SSH 往返测量的口径名，前端据此措辞
+pub const RTT_CALIBER: &str = "ssh_round_trip";
+
+/// 「在这条连接上发一次往返」的来源。
+///
+/// 抽成 trait 是为了能用可控实现钉住「首包超时后立刻收工」这条 FIFO 安全规则 ——
+/// 在真机上没法稳定造出「服务器就是不回话」，而这条规则恰恰最不能被改错。
+trait RttSource {
+    fn ping(&mut self) -> impl std::future::Future<Output = Result<(), String>> + Send;
+}
+
+/// 真实来源：在已认证的 SSH 会话上发一次 keepalive 并等答复
+struct SshKeepalive<'a, H: client::Handler> {
+    session: &'a client::Handle<H>,
+    timeout: Duration,
+}
+
+impl<H: client::Handler> RttSource for SshKeepalive<'_, H> {
+    async fn ping(&mut self) -> Result<(), String> {
+        match tokio::time::timeout(self.timeout, self.session.send_ping()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(failure)) => Err(format!("keepalive 发送失败：{failure}")),
+            Err(_) => Err("keepalive 没有得到答复".to_string()),
+        }
+    }
+}
+
+/// 按样本数依次测量：**一旦有一次失败就收工**，把已经拿到的样本如实报出去。
+///
+/// 为什么必须收工：russh 用 FIFO 队列把全局请求的答复与请求配对，
+/// 上一次超时后它的槽位还占着，紧接着再发一次会让答复配错位置。
+async fn measure_rtt<S: RttSource>(key: &str, samples: u32, source: &mut S) -> SshRttReport {
+    let mut times: Vec<f64> = Vec::with_capacity(samples as usize);
+    let mut sent = 0u32;
+    let mut error: Option<String> = None;
+
+    for _ in 0..samples {
+        sent += 1;
+        let started = Instant::now();
+        match source.ping().await {
+            Ok(()) => times.push(started.elapsed().as_secs_f64() * 1000.0),
+            Err(message) => {
+                error = Some(message);
+                break;
+            }
+        }
+    }
+
+    let stats = Stats::from_samples(&times);
+    let received = times.len() as u32;
+
+    SshRttReport {
+        key: key.to_string(),
+        caliber: RTT_CALIBER,
+        sent,
+        received,
+        loss: if sent > 0 {
+            (sent - received) as f64 / sent as f64
+        } else {
+            1.0
+        },
+        min_ms: stats.min,
+        avg_ms: stats.avg,
+        median_ms: stats.median,
+        max_ms: stats.max,
+        jitter_ms: stats.jitter,
+        samples: times,
+        error,
+    }
+}
+
+/// 在已有连接上量一次 SSH 往返（口径见 [`SshRttReport`]）。
+///
+/// 为什么不另开一条 TCP 连接去连服务端口：那会在服务端 sshd 日志里留下一条
+/// **没有用户名的预认证失败记录**（Netcatty 也正因此放弃了这种测法），
+/// 而且本机装了 TUN 类代理时，那条连接会被本机协议栈就地握完，
+/// 量出来的只是本机耗时 —— 保留域名 `.invalid` 都能"连上"，可见一斑。
+/// 已认证连接上的往返不受这两件事影响。
+async fn measure_ssh_rtt<H: client::Handler>(
+    session: &client::Handle<H>,
+    key: &str,
+    samples: u32,
+    timeout: Duration,
+) -> SshRttReport {
+    let mut source = SshKeepalive { session, timeout };
+    measure_rtt(key, samples, &mut source).await
 }
 
 /// 建立连接并跑会话循环；返回 Err 时调用方会把失败阶段报给前端
@@ -272,6 +393,13 @@ async fn run_session(
                     }
                     Some(SshCommand::Resize { cols, rows }) => {
                         let _ = channel.window_change(cols.max(1), rows.max(1), 0, 0).await;
+                    }
+                    // 测量期间不排空终端数据：正常往返只有几十毫秒，而一旦超时就立刻
+                    // 收工（见 measure_ssh_rtt），所以这里最多挡住一个超时时长
+                    Some(SshCommand::Ping { samples, timeout, reply }) => {
+                        let report = measure_ssh_rtt(&session, key, samples, timeout).await;
+                        // 发起测量的命令可能已经整体超时走人了，发不出去就算了
+                        let _ = reply.send(report);
                     }
                     Some(SshCommand::Close) | None => break,
                 }
@@ -416,6 +544,43 @@ pub fn ssh_resize(
     let tx = sessions.get(&key).ok_or_else(|| format!("未找到会话 {key}"))?;
     tx.send(SshCommand::Resize { cols, rows })
         .map_err(|_| "会话已关闭".to_string())
+}
+
+/// 在一条已经认证成功的会话上量真正的端到端往返（见 [`SshRttReport`]）。
+///
+/// 这是「延迟」唯一站得住的口径：连接已经建立，往返必须真的走一趟网络，
+/// 本机代理没法替对端作答；也不会在服务端 sshd 日志里留下预认证失败记录。
+#[tauri::command]
+pub async fn ssh_ping_rtt(
+    state: State<'_, SshState>,
+    key: String,
+    samples: u32,
+    timeout_ms: u64,
+) -> Result<SshRttReport, String> {
+    let samples = samples.clamp(1, 10);
+    let timeout = Duration::from_millis(timeout_ms.clamp(200, 10_000));
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    {
+        // 锁只在这个块里持有：下面要 await，不能把 std 的守卫带过 await 点
+        let sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
+        let sender = sessions.get(&key).ok_or_else(|| format!("未找到会话 {key}"))?;
+        sender
+            .send(SshCommand::Ping {
+                samples,
+                timeout,
+                reply: reply_tx,
+            })
+            .map_err(|_| "会话已关闭".to_string())?;
+    }
+
+    // 会话任务里最多等 samples 次超时，这里再放宽一层，避免命令永远挂住
+    let budget = timeout * (samples + 1);
+    match tokio::time::timeout(budget, reply_rx).await {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(_)) => Err("会话在测量过程中结束".to_string()),
+        Err(_) => Err("测量超时".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -564,5 +729,153 @@ mod tests {
             matches!(auth, AuthResult::Failure { .. }),
             "错误密码不应通过认证"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // SSH 往返：自带一台本地 SSH 服务器，把「已认证连接上的一次真实往返」跑通。
+    //
+    // 为什么自带：这条路径要的就是往返本身，而手上没有可用的测试凭据；
+    // 协议行为足以验证 —— 客户端发 keepalive 全局请求，服务器对未知全局请求
+    // 回 REQUEST_FAILURE（这正是 OpenSSH 对 keepalive@openssh.com 的标准应答），
+    // 客户端把「收到答复」就算一次往返完成。
+    // ---------------------------------------------------------------------
+
+    /// 只接受 none 认证的测试服务器
+    struct NoAuthServer;
+
+    impl russh::server::Handler for NoAuthServer {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+    }
+
+    /// 起一台本地测试服务器并完成认证，返回可以直接发 keepalive 的会话。
+    /// `tag` 用来隔离各条测试的临时目录 —— 测试并行跑，共用一个路径会互相踩。
+    async fn authenticated_local_session(tag: &str) -> client::Handle<TestHandler> {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("termx-rtt-server-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host_key_path = dir.join("host_ed25519");
+        let _ = std::fs::remove_file(&host_key_path);
+
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-q", "-f"])
+            .arg(&host_key_path)
+            .status()
+            .expect("需要本机有 ssh-keygen 才能生成测试主机密钥");
+        assert!(status.success(), "ssh-keygen 生成主机密钥失败");
+
+        let host_key =
+            russh::keys::load_secret_key(&host_key_path, None).expect("加载测试主机密钥失败");
+        let config = Arc::new(russh::server::Config {
+            keys: vec![host_key],
+            inactivity_timeout: Some(Duration::from_secs(30)),
+            ..Default::default()
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = russh::server::run_stream(config, stream, NoAuthServer).await;
+            }
+        });
+
+        let mut session = client::connect(
+            Arc::new(client::Config::default()),
+            addr,
+            TestHandler {
+                fingerprint: Arc::new(Mutex::new(None)),
+            },
+        )
+        .await
+        .expect("连接本地测试服务器失败");
+
+        let auth = session
+            .authenticate_none("termx-test")
+            .await
+            .expect("认证过程出错");
+        assert!(matches!(auth, AuthResult::Success), "测试服务器应当直接放行");
+
+        session
+    }
+
+    #[tokio::test]
+    async fn ssh_rtt_measures_round_trip_after_authentication() {
+        let session = authenticated_local_session("ok").await;
+
+        let report = measure_ssh_rtt(&session, "local", 3, Duration::from_millis(1000)).await;
+
+        assert_eq!(report.key, "local");
+        assert_eq!(report.caliber, RTT_CALIBER);
+        assert_eq!(report.sent, 3);
+        assert_eq!(report.received, 3, "本机往返三次都该拿到答复");
+        assert_eq!(report.loss, 0.0);
+        assert_eq!(report.samples.len(), 3);
+        assert!(report.error.is_none());
+        assert!(report.min_ms <= report.median_ms && report.median_ms <= report.max_ms);
+        assert!(report.median_ms < 1000.0, "本机往返不该逼近超时");
+    }
+
+    /// 第一次就不给答复的来源；被调用第二次就直接失败
+    struct FailsOnFirstPing {
+        calls: usize,
+    }
+
+    impl RttSource for FailsOnFirstPing {
+        async fn ping(&mut self) -> Result<(), String> {
+            self.calls += 1;
+            assert_eq!(self.calls, 1, "首包失败之后不该再发第二次");
+            Err("模拟：keepalive 没有得到答复".to_string())
+        }
+    }
+
+    /// 第一次给答复、第二次不给的来源；再被调用就直接失败
+    struct FailsOnSecondPing {
+        calls: usize,
+    }
+
+    impl RttSource for FailsOnSecondPing {
+        async fn ping(&mut self) -> Result<(), String> {
+            self.calls += 1;
+            assert!(self.calls <= 2, "第二次失败之后不该再发第三次");
+            if self.calls == 1 {
+                Ok(())
+            } else {
+                Err("模拟：第二次没有得到答复".to_string())
+            }
+        }
+    }
+
+    /// 首包失败就必须收工：紧接着再发一次会让 russh 的 FIFO 答复队列配错位置
+    #[tokio::test]
+    async fn rtt_stops_after_the_first_failure() {
+        let mut source = FailsOnFirstPing { calls: 0 };
+
+        let report = measure_rtt("local", 5, &mut source).await;
+
+        assert_eq!(report.sent, 1, "只该发出去一次");
+        assert_eq!(report.received, 0);
+        assert_eq!(report.loss, 1.0);
+        assert!(report.samples.is_empty());
+        assert_eq!(report.error.as_deref(), Some("模拟：keepalive 没有得到答复"));
+        assert_eq!(source.calls, 1);
+    }
+
+    /// 中途失败时，前面已经拿到的样本要如实保留，损失率按实际发出的次数算
+    #[tokio::test]
+    async fn rtt_keeps_earlier_samples_when_a_later_one_fails() {
+        let mut source = FailsOnSecondPing { calls: 0 };
+
+        let report = measure_rtt("local", 5, &mut source).await;
+
+        assert_eq!(report.sent, 2);
+        assert_eq!(report.received, 1);
+        assert_eq!(report.samples.len(), 1);
+        assert_eq!(report.loss, 0.5, "发出两次、收到一次");
+        assert!(report.error.is_some());
+        assert_eq!(source.calls, 2, "收工之后不能再发");
     }
 }

@@ -15,6 +15,7 @@ import { probeSupported } from "@/lib/probe";
 import { filterHosts, useHostsStore } from "@/store/hosts";
 import { useProbeStore } from "@/store/probe";
 import { paneCountFor, useSessionsStore } from "@/store/sessions";
+import { useSettingsStore } from "@/store/settings";
 import { toast } from "@/store/toast";
 import { useUiStore } from "@/store/ui";
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
@@ -85,6 +86,8 @@ export default function Workspace() {
 	const navigate = useNavigate();
 	const embeddedSftpOpen = useUiStore((s) => s.embeddedSftpOpen);
 	const toggleEmbeddedSftp = useUiStore((s) => s.toggleEmbeddedSftp);
+	/** 右键行为来自设置页（粘贴 / 弹出菜单 / 复制选区），改完立即对已打开的终端生效 */
+	const rightClick = useSettingsStore((s) => s.rightClick);
 
 	const [review, setReview] = useState<ReviewState>("split-2");
 	const [searchOpen, setSearchOpen] = useState(false);
@@ -114,7 +117,10 @@ export default function Workspace() {
 	const groupedIds = new Set(hostStore.groups.map((g) => g.id));
 	const ungroupedHosts = hostStore.hosts.filter((h) => !h.groupId || !groupedIds.has(h.groupId));
 
-	/** 监控面板唯一的数据源：本机对该主机的实测 TCP 结果（没有就是没有） */
+	/** 监控面板的数据源，两个口径分开取：
+	 *  - rtt：已认证连接上的 SSH 往返（真正的端到端时间）
+	 *  - results：主机库的 TCP 建连探测（没连上时只有它） */
+	const monitorRtt = activeTab ? probeStore.rtt[activeTab.id] : undefined;
 	const monitorReport = activeHost ? probeStore.results[activeHost.id] : undefined;
 	const probingActiveHost = activeHost ? probeStore.probing.includes(activeHost.id) : false;
 
@@ -341,8 +347,8 @@ export default function Workspace() {
 		if (owned) focusPane(owned.id);
 	};
 
-	const copySelection = async () => {
-		const handle = handleFor(focusId);
+	const copySelection = async (paneId: string = focusId) => {
+		const handle = handleFor(paneId);
 		const ok = handle ? await handle.copySelection() : false;
 		closeMenu();
 		toast(
@@ -352,8 +358,8 @@ export default function Workspace() {
 		);
 	};
 
-	const pasteIntoTerminal = async () => {
-		const handle = handleFor(focusId);
+	const pasteIntoTerminal = async (paneId: string = focusId) => {
+		const handle = handleFor(paneId);
 		const ok = handle ? await handle.paste() : false;
 		closeMenu();
 		toast(
@@ -361,6 +367,18 @@ export default function Workspace() {
 				? { title: "已粘贴到终端", tone: "success" }
 				: { title: "没有可粘贴的终端", description: "剪贴板为空，或当前这格没有真实 PTY 会话", tone: "warning" },
 		);
+	};
+
+	/** 右键落到哪由设置页的「右键行为」决定：粘贴 / 弹出菜单 / 复制当前选区 */
+	const onPaneContextMenu = (event: ReactMouseEvent<HTMLDivElement>, paneId: string) => {
+		if (rightClick === "menu") {
+			openMenuAt(event, paneId);
+			return;
+		}
+		event.preventDefault();
+		focusPane(paneId);
+		if (rightClick === "paste") void pasteIntoTerminal(paneId);
+		else void copySelection(paneId);
 	};
 
 	const clearScreen = () => {
@@ -633,7 +651,7 @@ export default function Workspace() {
 									status={paneStatus}
 									registerTerminal={registerTerminal}
 									onFocus={() => focusPane(pane.id)}
-									onContextMenu={(event) => openMenuAt(event, pane.id)}
+									onContextMenu={(event) => onPaneContextMenu(event, pane.id)}
 									onReconnect={startReconnect}
 								/>
 							))}
@@ -708,31 +726,31 @@ export default function Workspace() {
 						</Link>
 					</div>
 
-					{/* 只有实测 TCP 结果才算数据；系统指标没有来源，一律写「未接入」 */}
-					{monitorReport ? (
+					{/* 连上以后报真正的往返（SSH keepalive 往返）；没连上时只能报 TCP 建连耗时，
+					    两者口径不同，标签里必须写清楚。系统指标没有来源，一律写「未接入」 */}
+					{monitorRtt && monitorRtt.received > 0 ? (
 						<div className="mt-2.5 space-y-3">
-							<MetricBar
-								label="TCP 延迟（实测）"
-								value={`${Math.round(monitorReport.avg_ms)} ms`}
-								progress={Math.min(100, (monitorReport.avg_ms / 300) * 100)}
-								warn={!monitorReport.reachable || monitorReport.avg_ms > 150}
+							<LatencyReadout
+								label="SSH 往返（实测）"
+								median={monitorRtt.median_ms}
+								min={monitorRtt.min_ms}
+								max={monitorRtt.max_ms}
+								jitter={monitorRtt.jitter_ms}
+								loss={monitorRtt.loss}
+								warn={monitorRtt.median_ms > 150}
 							/>
-							<div className="space-y-1 font-mono text-[10.5px] text-muted">
-								<div className="flex justify-between">
-									<span className="text-faint">最低 / 最高</span>
-									<span className="tabular-nums">
-										{Math.round(monitorReport.min_ms)} / {Math.round(monitorReport.max_ms)} ms
-									</span>
-								</div>
-								<div className="flex justify-between">
-									<span className="text-faint">抖动</span>
-									<span className="tabular-nums">±{monitorReport.jitter_ms.toFixed(1)} ms</span>
-								</div>
-								<div className="flex justify-between">
-									<span className="text-faint">丢包</span>
-									<span className="tabular-nums">{Math.round(monitorReport.loss * 100)}%</span>
-								</div>
-							</div>
+						</div>
+					) : monitorReport ? (
+						<div className="mt-2.5 space-y-3">
+							<LatencyReadout
+								label="TCP 建连（主机库实测）"
+								median={monitorReport.median_ms}
+								min={monitorReport.min_ms}
+								max={monitorReport.max_ms}
+								jitter={monitorReport.jitter_ms}
+								loss={monitorReport.loss}
+								warn={!monitorReport.reachable || monitorReport.median_ms > 150}
+							/>
 						</div>
 					) : (
 						<div className="mt-2.5 rounded border border-border bg-surface-raised p-2.5">
@@ -753,7 +771,7 @@ export default function Workspace() {
 							disabled={probingActiveHost}
 							onClick={() => void runProbe()}
 						>
-							{probingActiveHost ? "正在测速…" : "测一次 TCP 延迟"}
+							{probingActiveHost ? "正在测速…" : "测一次 TCP 建连"}
 						</Button>
 					)}
 
@@ -774,6 +792,52 @@ export default function Workspace() {
 }
 
 /* ============================== 局部零件 ============================== */
+
+/** 延迟读数：两个口径共用一套排版，标签由调用方给（口径不同，不能都写成「延迟」） */
+function LatencyReadout({
+	label,
+	median,
+	min,
+	max,
+	jitter,
+	loss,
+	warn,
+}: {
+	label: string;
+	median: number;
+	min: number;
+	max: number;
+	jitter: number;
+	loss: number;
+	warn: boolean;
+}) {
+	return (
+		<>
+			<MetricBar
+				label={label}
+				value={`${Math.round(median)} ms`}
+				progress={Math.min(100, (median / 300) * 100)}
+				warn={warn}
+			/>
+			<div className="space-y-1 font-mono text-[10.5px] text-muted">
+				<div className="flex justify-between">
+					<span className="text-faint">最低 / 最高</span>
+					<span className="tabular-nums">
+						{Math.round(min)} / {Math.round(max)} ms
+					</span>
+				</div>
+				<div className="flex justify-between">
+					<span className="text-faint">抖动</span>
+					<span className="tabular-nums">±{jitter.toFixed(1)} ms</span>
+				</div>
+				<div className="flex justify-between">
+					<span className="text-faint">丢包</span>
+					<span className="tabular-nums">{Math.round(loss * 100)}%</span>
+				</div>
+			</div>
+		</>
+	);
+}
 
 /** 分屏格：优先取本标签主机名下的真实分屏；布局要求更多格时补出空位（不编造提示符文案） */
 function panesForTab(tab: SessionTab, panes: TerminalPaneModel[]): TerminalPaneModel[] {

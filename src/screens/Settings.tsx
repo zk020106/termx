@@ -1,28 +1,57 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
+import { TERMINAL_SCHEMES, schemeColors, schemeTones } from "@/components/terminal/terminalSchemes";
 import { Button, Kbd } from "@/components/ui/Button";
-import { Badge, Panel, ProgressBar, Segmented } from "@/components/ui/Display";
+import { Badge, Panel, Segmented } from "@/components/ui/Display";
 import { Field, Input, ReadonlyValue, Select } from "@/components/ui/Input";
-import { Drawer, Modal } from "@/components/ui/Overlay";
-import { Checkbox, SettingRow, Switch } from "@/components/ui/Toggle";
+import { Modal } from "@/components/ui/Overlay";
+import { SettingRow, Switch } from "@/components/ui/Toggle";
+import {
+	AUTO_LOCK_CHOICES,
+	CURSOR_STYLES,
+	FONT_FAMILIES,
+	FONT_SIZES,
+	LINE_HEIGHTS,
+	RIGHT_CLICK_ACTIONS,
+	SCROLLBACK_CHOICES,
+	type AutoLockChoice,
+	type CursorStyle,
+	type RightClickAction,
+	type ScrollbackChoice,
+	type TerminalSchemeId,
+} from "@/data/preferences";
 import type { Accent, ThemeMode } from "@/data/types";
 import { cn } from "@/lib/cn";
+import { exportConfig, mergeConfig, parseConfigFile } from "@/lib/configBackup";
+import { createVerifier, lockCryptoAvailable, verifyPassword } from "@/lib/lock";
 import { detectPlatform } from "@/lib/platform";
+import { useLockStore } from "@/store/lock";
+import { useSettingsStore } from "@/store/settings";
 import { useThemeStore } from "@/store/theme";
 import { toast } from "@/store/toast";
-import { useEffect, useMemo, useState } from "react";
+import { useRef, useState } from "react";
+import { Link } from "react-router";
 
 /** 运行平台：真实探测，不再写死「Windows x64」 */
 const PLATFORM_LABEL = { windows: "Windows", macos: "macOS", linux: "Linux" }[detectPlatform()];
-import { Link } from "react-router";
+
+/** 系统钥匙串的落地名字，跟随平台 */
+const KEYCHAIN_LABEL = {
+	windows: "Windows 凭据管理器",
+	macos: "macOS 钥匙串",
+	linux: "Secret Service",
+}[detectPlatform()];
 
 /* =============================================================================
  * 设置 —— 设计帧 termx.vetd/frames/settings.tsx 的交互版。
  * 左侧分区导航（外观 / 终端 / 快捷键 / 安全 / 数据）+ 右侧内容区。
- * 主题、强调色与密度写回 useThemeStore（真的生效），其余偏好用界面内局部 state。
+ *
+ * 这一页不放假控件：能接真的就接到真实链路（主题/强调色/密度 → useThemeStore，
+ * 终端偏好与安全/数据偏好 → useSettingsStore → 配置文件 + xterm 运行时选项），
+ * 暂时没有落地路径的（读取 ~/.ssh/config、known_hosts 列表、定时加密备份）
+ * 直接禁用并写明原因，绝不返回「看起来成功」的假提示。
  * ========================================================================== */
 
 type Section = "appearance" | "terminal" | "shortcuts" | "security" | "data";
-type DemoState = Section | "conflict";
 
 const NAV: { id: Section; name: string; icon: string }[] = [
 	{ id: "appearance", name: "外观与界面主题", icon: "icon-[lucide--palette]" },
@@ -39,15 +68,6 @@ const SECTION_TITLE: Record<Section, string> = {
 	security: "安全与主密码",
 	data: "数据与备份",
 };
-
-const DEMO_OPTIONS: { value: DemoState; label: string }[] = [
-	{ value: "appearance", label: "外观" },
-	{ value: "terminal", label: "终端" },
-	{ value: "shortcuts", label: "快捷键" },
-	{ value: "conflict", label: "冲突" },
-	{ value: "security", label: "安全" },
-	{ value: "data", label: "数据" },
-];
 
 /* ------------------------------- 外观 ------------------------------- */
 
@@ -70,32 +90,33 @@ const ACCENTS: { id: Accent; name: string; dot: string }[] = [
 
 /* ------------------------------- 终端 ------------------------------- */
 
-const FONTS = ["JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", "Menlo", "Consolas", "Sarasa Mono SC"];
-const FONT_SIZES = ["11", "12", "13", "14", "15", "16", "18"];
-const LINE_HEIGHTS = ["1.0", "1.2", "1.4", "1.6"];
-const SCROLLBACKS = [
-	{ value: "1000", label: "1,000 行" },
-	{ value: "5000", label: "5,000 行" },
-	{ value: "10000", label: "10,000 行（推荐）" },
-	{ value: "50000", label: "50,000 行" },
-	{ value: "unlimited", label: "不限制（占用内存）" },
+const SCROLLBACK_LABEL: Record<ScrollbackChoice, string> = {
+	"1000": "1,000 行",
+	"5000": "5,000 行",
+	"10000": "10,000 行（推荐）",
+	"50000": "50,000 行",
+	unlimited: "不限制（占用内存）",
+};
+
+const CURSOR_LABEL: Record<CursorStyle, string> = { block: "块状", bar: "竖线", underline: "下划线" };
+const RIGHT_CLICK_LABEL: Record<RightClickAction, string> = { paste: "粘贴", menu: "弹出菜单", select: "选中即复制" };
+const AUTO_LOCK_LABEL: Record<AutoLockChoice, string> = {
+	never: "永不锁定",
+	"1": "1 分钟",
+	"5": "5 分钟",
+	"15": "15 分钟",
+	"30": "30 分钟",
+	"60": "1 小时",
+};
+
+/** 配色方案卡片：第一项跟随界面主题（token 派生），其余用各自真实色板 */
+const SCHEME_CARDS: { id: TerminalSchemeId; name: string; tones: string[] | null }[] = [
+	{ id: "theme", name: "跟随界面主题", tones: null },
+	...TERMINAL_SCHEMES.map((scheme) => ({ id: scheme.id, name: scheme.name, tones: schemeTones(scheme.colors) })),
 ];
 
-/** 配色方案：预览色条只用 token 类，避免硬编码十六进制 */
-const SCHEMES: { id: string; name: string; tone: string[] }[] = [
-	{ id: "one-dark", name: "One Dark", tone: ["bg-primary", "bg-accent", "bg-success", "bg-warning"] },
-	{ id: "dracula", name: "Dracula", tone: ["bg-danger", "bg-accent", "bg-warning", "bg-primary"] },
-	{ id: "solarized", name: "Solarized Dark", tone: ["bg-accent", "bg-success", "bg-warning", "bg-muted"] },
-	{ id: "nord", name: "Nord", tone: ["bg-accent", "bg-primary", "bg-muted", "bg-success"] },
-	{ id: "gruvbox", name: "Gruvbox Dark", tone: ["bg-warning", "bg-danger", "bg-success", "bg-muted"] },
-	{ id: "tokyo-night", name: "Tokyo Night", tone: ["bg-primary", "bg-accent", "bg-danger", "bg-muted"] },
-	{ id: "catppuccin", name: "Catppuccin Mocha", tone: ["bg-danger", "bg-accent", "bg-warning", "bg-primary"] },
-	{ id: "github-dark", name: "GitHub Dark", tone: ["bg-primary", "bg-success", "bg-muted", "bg-accent"] },
-	{ id: "monokai", name: "Monokai Pro", tone: ["bg-danger", "bg-warning", "bg-success", "bg-accent"] },
-];
-
-type CursorStyle = "block" | "bar" | "underline";
-type RightClick = "paste" | "menu" | "select";
+/** 「跟随界面主题」时预览用的 token 类 */
+const THEME_TONES = ["bg-primary", "bg-accent", "bg-success", "bg-warning", "bg-muted"];
 
 /* ------------------------------ 快捷键 ------------------------------ */
 
@@ -107,6 +128,7 @@ interface Binding {
 	keys: string[];
 }
 
+/** 快捷键总表（只读参考）：实际响应在各界面里，改绑尚未接线 */
 const SHORTCUTS: Binding[] = [
 	{ id: "palette", group: "通用", name: "命令面板", desc: "搜索主机、命令与设置", keys: ["Ctrl+K"] },
 	{ id: "quick-connect", group: "通用", name: "快速连接", desc: "输入 user@host 直接连", keys: ["Ctrl+Shift+O"] },
@@ -115,7 +137,6 @@ const SHORTCUTS: Binding[] = [
 	{ id: "close-tab", group: "标签与分屏", name: "关闭标签", desc: "关闭当前标签", keys: ["Ctrl+Shift+W"] },
 	{ id: "switch-tab", group: "标签与分屏", name: "切换标签", desc: "循环 / 按序号跳转", keys: ["Ctrl+Tab", "Alt+1-9"] },
 	{ id: "split-right", group: "标签与分屏", name: "向右分屏", desc: "垂直切分当前标签", keys: ["Ctrl+Shift+D"] },
-	{ id: "split-down", group: "标签与分屏", name: "向下分屏", desc: "水平切分当前标签", keys: ["Ctrl+Shift+E"] },
 	{ id: "focus-pane", group: "标签与分屏", name: "切换焦点格", desc: "在分屏之间移动焦点", keys: ["Alt+方向键"] },
 	{ id: "copy-paste", group: "终端", name: "复制 / 粘贴", desc: "终端内复制与粘贴", keys: ["Ctrl+Shift+C", "Ctrl+Shift+V"] },
 	{ id: "search", group: "终端", name: "终端内搜索", desc: "在回滚缓冲区里查找", keys: ["Ctrl+Shift+F"] },
@@ -127,46 +148,11 @@ const SHORTCUTS: Binding[] = [
 ];
 
 const GROUPS = [...new Set(SHORTCUTS.map((s) => s.group))];
-const NAME_BY_ID = Object.fromEntries(SHORTCUTS.map((s) => [s.id, s.name]));
-
-/** 归一化按键组合：修饰键排序，便于比较冲突 */
-function normalizeKeys(combo: string) {
-	const parts = combo
-		.split("+")
-		.map((p) => p.trim().toLowerCase())
-		.filter(Boolean);
-	const mods = parts.filter((p) => ["ctrl", "shift", "alt", "meta", "cmd"].includes(p)).sort();
-	const rests = parts.filter((p) => !["ctrl", "shift", "alt", "meta", "cmd"].includes(p));
-	return [...mods, ...rests].join("+");
-}
-
-function formatCombo(e: KeyboardEvent) {
-	const mods: string[] = [];
-	if (e.ctrlKey || e.metaKey) mods.push("Ctrl");
-	if (e.shiftKey) mods.push("Shift");
-	if (e.altKey) mods.push("Alt");
-	if (mods.length === 0) return null;
-	let key = e.key;
-	if (key === " ") key = "Space";
-	else if (key.length === 1) key = key.toUpperCase();
-	else if (key === "Escape" || key === "Tab" || key === "Enter" || key === "Backspace") return null;
-	return [...mods, key].join("+");
-}
-
-/* ------------------------------- 安全 ------------------------------- */
-
-const KNOWN_HOSTS_SEED = [
-	{ host: "order-api-01", addr: "10.0.3.21", algo: "ssh-ed25519", fp: "SHA256:9xQ2vB7kLm4pR1sT8uW3yA6cD0eF5gH2jK7nM" },
-	{ host: "order-api-02", addr: "10.0.3.22", algo: "ssh-ed25519", fp: "SHA256:3tR8wE1yU6iO9pA4sD7fG2hJ5kL0zX3cV6bN" },
-	{ host: "bastion-sh", addr: "203.0.113.9", algo: "ssh-rsa", fp: "SHA256:7hJ4kL1zX8cV5bN2mQ9wE6rT3yU0iO7pA4sD" },
-	{ host: "pg-primary-01", addr: "10.0.3.40", algo: "ecdsa-sha2-nistp256", fp: "SHA256:1zX8cV5bN2mQ9wE6rT3yU0iO7pA4sD1fG8hJ" },
-];
 
 /* ============================================================================= */
 
 export default function Settings() {
 	const [section, setSection] = useState<Section>("shortcuts");
-	const [demo, setDemo] = useState<DemoState>("conflict");
 
 	/* 外观：主题、强调色与密度都走 store，切换后立即生效并写入配置文件 */
 	const mode = useThemeStore((s) => s.mode);
@@ -177,116 +163,119 @@ export default function Settings() {
 	const accent = useThemeStore((s) => s.accent);
 	const setAccent = useThemeStore((s) => s.setAccent);
 
-	/* 终端 */
-	const [font, setFont] = useState(FONTS[0]);
-	const [fontSize, setFontSize] = useState("13");
-	const [lineHeight, setLineHeight] = useState("1.4");
-	const [scrollback, setScrollback] = useState("10000");
-	const [cursor, setCursor] = useState<CursorStyle>("block");
-	const [bell, setBell] = useState(true);
-	const [trimNewline, setTrimNewline] = useState(true);
-	const [rightClick, setRightClick] = useState<RightClick>("paste");
-	const [scheme, setScheme] = useState("one-dark");
+	/* 终端 / 安全 / 数据偏好：全部来自 settings store（改动立即生效 + 写盘） */
+	const fontFamily = useSettingsStore((s) => s.fontFamily);
+	const fontSize = useSettingsStore((s) => s.fontSize);
+	const lineHeight = useSettingsStore((s) => s.lineHeight);
+	const scrollback = useSettingsStore((s) => s.scrollback);
+	const cursorStyle = useSettingsStore((s) => s.cursorStyle);
+	const bell = useSettingsStore((s) => s.bell);
+	const rightClick = useSettingsStore((s) => s.rightClick);
+	const trimNewline = useSettingsStore((s) => s.trimNewline);
+	const scheme = useSettingsStore((s) => s.scheme);
+	const keychain = useSettingsStore((s) => s.keychain);
+	const clearClipboard = useSettingsStore((s) => s.clearClipboard);
+	const autoLock = useSettingsStore((s) => s.autoLock);
+	const startLocked = useSettingsStore((s) => s.startLocked);
+	const lockVerifier = useSettingsStore((s) => s.lockVerifier);
+	const sshConfigPath = useSettingsStore((s) => s.sshConfigPath);
+	const setTerminal = useSettingsStore((s) => s.setTerminal);
+	const setSecurity = useSettingsStore((s) => s.setSecurity);
+	const setSshConfigPath = useSettingsStore((s) => s.setSshConfigPath);
 
-	/* 快捷键 */
-	const [overrides, setOverrides] = useState<Record<string, string[]>>({});
-	const [checked, setChecked] = useState(false);
-	const [captureId, setCaptureId] = useState<string | null>(null);
+	const hasPassword = lockVerifier !== null;
+	const cryptoOk = lockCryptoAvailable();
 
-	/* 安全 */
-	const [masterPassword, setMasterPassword] = useState(true);
-	const [autoLock, setAutoLock] = useState("15");
-	const [keychain, setKeychain] = useState(true);
-	const [startLocked, setStartLocked] = useState(false);
-	const [clearClipboard, setClearClipboard] = useState(true);
-	const [knownHosts, setKnownHosts] = useState(KNOWN_HOSTS_SEED);
-	const [knownOpen, setKnownOpen] = useState(false);
+	/* 修改解锁密码的弹窗 */
 	const [pwdOpen, setPwdOpen] = useState(false);
+	const [pwdCurrent, setPwdCurrent] = useState("");
+	const [pwdNew, setPwdNew] = useState("");
+	const [pwdConfirm, setPwdConfirm] = useState("");
+	const [pwdError, setPwdError] = useState<string | null>(null);
+	const [pwdBusy, setPwdBusy] = useState(false);
 
-	/* 数据 */
-	const [encryptedBackup, setEncryptedBackup] = useState(true);
-	const [backupFreq, setBackupFreq] = useState("daily");
-	const [sshConfig, setSshConfig] = useState("~/.ssh/config");
-	const [dedupe, setDedupe] = useState(true);
+	/* 导入配置文件 */
+	const fileRef = useRef<HTMLInputElement | null>(null);
 	const [importing, setImporting] = useState(false);
 
-	const keysOf = (row: Binding) => overrides[row.id] ?? row.keys;
+	const preview = schemeColors(scheme);
 
-	const conflicts = useMemo(() => {
-		const map = new Map<string, string[]>();
-		for (const row of SHORTCUTS) {
-			for (const combo of keysOf(row)) {
-				const norm = normalizeKeys(combo);
-				map.set(norm, [...(map.get(norm) ?? []), row.id]);
-			}
-		}
-		return new Map([...map].filter(([, ids]) => ids.length > 1));
-	}, [overrides]);
+	const cursorShape =
+		cursorStyle === "block"
+			? "inline-block h-3.5 w-2 animate-pulse align-middle"
+			: cursorStyle === "bar"
+				? "inline-block h-3.5 w-0.5 animate-pulse align-middle"
+				: "inline-block h-0.5 w-2.5 animate-pulse align-middle";
 
-	const conflictIds = useMemo(() => new Set([...conflicts.values()].flat()), [conflicts]);
-	const conflictCount = conflicts.size;
-
-	/** 状态切换器：跳到分区，或直接演示「快捷键冲突」态 */
-	const applyDemo = (next: DemoState) => {
-		setDemo(next);
-		if (next === "conflict") {
-			setSection("shortcuts");
-			setOverrides({ search: ["Ctrl+Shift+O"] });
-			setChecked(true);
+	const submitPassword = async () => {
+		setPwdError(null);
+		if (!cryptoOk) {
+			setPwdError("当前环境没有 WebCrypto，无法安全保存密码");
 			return;
 		}
-		setSection(next);
+		if (pwdNew.length < 8) {
+			setPwdError("新密码至少 8 位");
+			return;
+		}
+		if (pwdNew !== pwdConfirm) {
+			setPwdError("两次输入的新密码不一致");
+			return;
+		}
+		setPwdBusy(true);
+		try {
+			if (lockVerifier && !(await verifyPassword(pwdCurrent, lockVerifier))) {
+				setPwdError("当前密码不正确");
+				return;
+			}
+			// 只保存加盐摘要，密码本身不落盘
+			setSecurity({ lockVerifier: await createVerifier(pwdNew) });
+			setPwdOpen(false);
+			setPwdCurrent("");
+			setPwdNew("");
+			setPwdConfirm("");
+			toast({ title: lockVerifier ? "解锁密码已更新" : "解锁密码已设置", tone: "success" });
+		} catch (error) {
+			setPwdError(error instanceof Error ? error.message : "保存失败");
+		} finally {
+			setPwdBusy(false);
+		}
 	};
 
-	const detect = () => {
-		setChecked(true);
+	const clearPassword = () => {
+		// 密码没了就锁不上，相关的锁定设置一起收回，避免留下开不了的开关
+		setSecurity({ lockVerifier: null, startLocked: false, autoLock: "never" });
+		useLockStore.setState({ locked: false });
+		toast({ title: "已清除解锁密码", description: "启动锁定与自动锁定同时关闭", tone: "default" });
+	};
+
+	const toggleKeychain = (next: boolean) => {
+		setSecurity({ keychain: next });
 		toast(
-			conflictCount > 0
-				? { title: `检测到 ${conflictCount} 组快捷键冲突`, description: "冲突项已在列表中高亮，请重新分配按键。", tone: "danger" }
-				: { title: "未发现快捷键冲突", description: "全部绑定均可正常触发。", tone: "success" },
+			next
+				? { title: "已改用系统钥匙串", description: "之后保存的密码交给操作系统保管", tone: "success" }
+				: {
+						title: "已停用系统钥匙串",
+						description: "TermX 不再读写钥匙串；连接页仍可删除已保存的密码",
+						tone: "warning",
+					},
 		);
 	};
 
-	/* 快捷键捕获：捕获阶段拦截，避免触发全局快捷键（Ctrl+K / Ctrl+B 等） */
-	useEffect(() => {
-		if (!captureId) return;
-		const onKey = (e: KeyboardEvent) => {
-			e.preventDefault();
-			e.stopPropagation();
-			if (e.key === "Escape") {
-				setCaptureId(null);
-				return;
-			}
-			const combo = formatCombo(e);
-			if (!combo) return;
-			const id = captureId;
-			setOverrides((prev) => ({ ...prev, [id]: [combo] }));
-			setCaptureId(null);
-			setChecked(false);
-		};
-		window.addEventListener("keydown", onKey, true);
-		return () => window.removeEventListener("keydown", onKey, true);
-	}, [captureId]);
-
-	const runImport = () => {
+	const runImport = async (file: File) => {
 		setImporting(true);
-		window.setTimeout(() => {
-			setImporting(false);
-			// 如实说明：读本机 ~/.ssh/config 需要文件系统访问，这一步还没接入
+		try {
+			const summary = await mergeConfig(parseConfigFile(await file.text()));
 			toast({
-				title: "尚未接入 ~/.ssh/config 解析",
-				description: "解析本机 SSH 配置需要读取文件系统，还没有实现。",
-				tone: "warning",
+				title: "配置已导入",
+				description: `新增 ${summary.hostsAdded} 台主机，更新 ${summary.hostsUpdated} 台`,
+				tone: "success",
 			});
-		}, 600);
+		} catch (error) {
+			toast({ title: "导入失败", description: error instanceof Error ? error.message : "文件读不动", tone: "danger" });
+		} finally {
+			setImporting(false);
+		}
 	};
-
-	const cursorClass =
-		cursor === "block"
-			? "inline-block h-3.5 w-2 animate-pulse bg-term-ink align-middle"
-			: cursor === "bar"
-				? "inline-block h-3.5 w-0.5 animate-pulse bg-term-ink align-middle"
-				: "inline-block h-0.5 w-2.5 animate-pulse bg-term-ink align-middle";
 
 	return (
 		<WindowChrome>
@@ -299,7 +288,7 @@ export default function Settings() {
 							<button
 								key={n.id}
 								type="button"
-								onClick={() => applyDemo(n.id)}
+								onClick={() => setSection(n.id)}
 								className={cn(
 									"flex h-7.5 w-full cursor-pointer items-center gap-2 rounded border px-2.5 text-left text-[12px] transition-colors",
 									section === n.id
@@ -333,13 +322,8 @@ export default function Settings() {
 
 				{/* 右侧设置内容区 */}
 				<div className="flex min-w-0 flex-1 flex-col">
-					{/* 右上角：分区标题 + 评审用状态切换器 */}
-					<div className="flex h-9 shrink-0 items-center justify-between gap-3 px-6 pt-2">
+					<div className="flex h-9 shrink-0 items-center gap-3 px-6 pt-2">
 						<span className="text-[10px] font-medium tracking-wider text-faint uppercase">{SECTION_TITLE[section]}</span>
-						<div className="flex items-center gap-2">
-							<span className="font-mono text-[10.5px] text-faint">状态</span>
-							<Segmented value={demo} onChange={applyDemo} options={DEMO_OPTIONS} />
-						</div>
 					</div>
 
 					<div className="min-h-0 flex-1 overflow-y-auto px-6 pt-2 pb-6">
@@ -443,13 +427,13 @@ export default function Settings() {
 							<div className="max-w-2xl space-y-5">
 								<div>
 									<h2 className="text-[14px] font-semibold text-surface-foreground">终端环境偏好</h2>
-									<p className="mt-0.5 text-[11.5px] text-muted">字体、配色与输入行为，对所有新建会话与分屏格生效。</p>
+									<p className="mt-0.5 text-[11.5px] text-muted">改动立即作用到已打开的终端，并写入本地配置。</p>
 								</div>
 
 								<div className="grid grid-cols-3 gap-3">
 									<Field label="默认字体">
-										<Select value={font} onChange={(e) => setFont(e.target.value)}>
-											{FONTS.map((f) => (
+										<Select value={fontFamily} onChange={(e) => setTerminal({ fontFamily: e.target.value })}>
+											{FONT_FAMILIES.map((f) => (
 												<option key={f} value={f}>
 													{f}
 												</option>
@@ -457,7 +441,7 @@ export default function Settings() {
 										</Select>
 									</Field>
 									<Field label="字号 (px)">
-										<Select value={fontSize} onChange={(e) => setFontSize(e.target.value)}>
+										<Select value={String(fontSize)} onChange={(e) => setTerminal({ fontSize: Number(e.target.value) })}>
 											{FONT_SIZES.map((s) => (
 												<option key={s} value={s}>
 													{s} px
@@ -466,7 +450,7 @@ export default function Settings() {
 										</Select>
 									</Field>
 									<Field label="行高 (倍)">
-										<Select value={lineHeight} onChange={(e) => setLineHeight(e.target.value)}>
+										<Select value={String(lineHeight)} onChange={(e) => setTerminal({ lineHeight: Number(e.target.value) })}>
 											{LINE_HEIGHTS.map((s) => (
 												<option key={s} value={s}>
 													{s}
@@ -478,30 +462,51 @@ export default function Settings() {
 
 								{/* 实时预览：字体大小 / 行高 / 光标样式 / 配色方案一起体现 */}
 								<div
-									className="rounded-lg border border-border bg-term p-3 font-mono text-term-ink"
-									style={{ fontSize: `${fontSize}px`, lineHeight }}
+									className={cn("rounded-lg border border-border p-3 font-mono", !preview && "bg-term text-term-ink")}
+									style={{
+										fontSize: `${fontSize}px`,
+										lineHeight,
+										...(preview ? { background: preview.background, color: preview.foreground } : {}),
+									}}
 								>
 									<div>
-										<span className="text-success">deploy@order-api-01</span>
-										<span className="text-muted">:</span>
-										<span className="text-accent">~/apps/order-api</span>
-										<span className="text-muted">$ </span>
+										<span className={cn(!preview && "text-success")} style={preview ? { color: preview.green } : undefined}>
+											deploy@order-api-01
+										</span>
+										<span className={cn(!preview && "text-muted")} style={preview ? { color: preview.brightBlack } : undefined}>
+											:
+										</span>
+										<span className={cn(!preview && "text-accent")} style={preview ? { color: preview.blue } : undefined}>
+											~/apps/order-api
+										</span>
+										<span className={cn(!preview && "text-muted")} style={preview ? { color: preview.brightBlack } : undefined}>
+											${" "}
+										</span>
 										tail -f logs/app.log
 									</div>
-									<div className="text-muted">[12:04:51] INFO order-service started, pid=24188</div>
-									<div className="text-muted">[12:04:53] INFO listening on 0.0.0.0:8080</div>
+									<div style={preview ? { color: preview.brightBlack } : undefined} className={cn(!preview && "text-muted")}>
+										[12:04:51] INFO order-service started, pid=24188
+									</div>
+									<div style={preview ? { color: preview.brightBlack } : undefined} className={cn(!preview && "text-muted")}>
+										[12:04:53] INFO listening on 0.0.0.0:8080
+									</div>
 									<div>
-										<span className="text-muted">$ </span>
-										<span className={cursorClass} />
+										<span className={cn(!preview && "text-muted")} style={preview ? { color: preview.brightBlack } : undefined}>
+											${" "}
+										</span>
+										<span
+											className={cn(cursorShape, !preview && "bg-term-ink")}
+											style={preview ? { background: preview.cursor } : undefined}
+										/>
 									</div>
 								</div>
 
 								<div className="grid grid-cols-2 gap-3">
 									<Field label="回滚行数（滚动缓冲）" hint="越大越占内存">
-										<Select value={scrollback} onChange={(e) => setScrollback(e.target.value)}>
-											{SCROLLBACKS.map((s) => (
-												<option key={s.value} value={s.value}>
-													{s.label}
+										<Select value={scrollback} onChange={(e) => setTerminal({ scrollback: e.target.value as ScrollbackChoice })}>
+											{SCROLLBACK_CHOICES.map((s) => (
+												<option key={s} value={s}>
+													{SCROLLBACK_LABEL[s]}
 												</option>
 											))}
 										</Select>
@@ -509,54 +514,54 @@ export default function Settings() {
 									<Field label="光标样式">
 										<Segmented
 											className="h-7 w-full"
-											value={cursor}
-											onChange={setCursor}
-											options={[
-												{ value: "block", label: "块状" },
-												{ value: "bar", label: "竖线" },
-												{ value: "underline", label: "下划线" },
-											]}
+											value={cursorStyle}
+											onChange={(value) => setTerminal({ cursorStyle: value })}
+											options={CURSOR_STYLES.map((style) => ({ value: style, label: CURSOR_LABEL[style] }))}
 										/>
 									</Field>
 								</div>
 
 								<div className="overflow-hidden rounded-lg border border-border bg-surface-raised">
-									<SettingRow title="终端响铃" description="输出 BEL 字符时播放系统提示音">
-										<Switch checked={bell} onChange={setBell} label="终端响铃" />
+									<SettingRow title="终端响铃" description="输出 BEL 字符时播放提示音">
+										<Switch checked={bell} onChange={(value) => setTerminal({ bell: value })} label="终端响铃" />
 									</SettingRow>
 									<SettingRow title="右键行为" description="在终端区域点击鼠标右键时执行的动作">
 										<Segmented
 											value={rightClick}
-											onChange={setRightClick}
-											options={[
-												{ value: "paste", label: "粘贴" },
-												{ value: "menu", label: "弹出菜单" },
-												{ value: "select", label: "选中即复制" },
-											]}
+											onChange={(value) => setTerminal({ rightClick: value })}
+											options={RIGHT_CLICK_ACTIONS.map((action) => ({ value: action, label: RIGHT_CLICK_LABEL[action] }))}
 										/>
 									</SettingRow>
 									<SettingRow title="复制时去除末尾换行" description="避免粘贴到远端时直接执行命令">
-										<Switch checked={trimNewline} onChange={setTrimNewline} label="复制时去除末尾换行" />
+										<Switch
+											checked={trimNewline}
+											onChange={(value) => setTerminal({ trimNewline: value })}
+											label="复制时去除末尾换行"
+										/>
 									</SettingRow>
 								</div>
 
 								<div>
 									<h3 className="text-[12.5px] font-semibold text-surface-foreground">终端配色方案</h3>
 									<div className="mt-2.5 grid grid-cols-3 gap-2">
-										{SCHEMES.map((s) => (
+										{SCHEME_CARDS.map((s) => (
 											<button
 												key={s.id}
 												type="button"
-												onClick={() => setScheme(s.id)}
+												onClick={() => setTerminal({ scheme: s.id })}
 												className={cn(
 													"flex cursor-pointer flex-col gap-1.5 rounded border p-2 text-left transition-colors",
 													scheme === s.id ? "border-primary bg-surface-raised shadow-sm" : "border-border bg-surface hover:border-muted/40",
 												)}
 											>
 												<span className="flex items-center gap-1">
-													{s.tone.map((t, i) => (
-														<span key={`${s.id}-${i}`} className={cn("h-1.5 flex-1 rounded-full", t)} />
-													))}
+													{s.tones
+														? s.tones.map((color) => (
+																<span key={color} className="h-1.5 flex-1 rounded-full" style={{ background: color }} />
+															))
+														: THEME_TONES.map((tone) => (
+																<span key={tone} className={cn("h-1.5 flex-1 rounded-full", tone)} />
+															))}
 												</span>
 												<span className="flex items-center justify-between">
 													<span className="truncate text-[11px] text-surface-foreground">{s.name}</span>
@@ -572,43 +577,10 @@ export default function Settings() {
 						{/* ------------------------ 快捷键 ------------------------ */}
 						{section === "shortcuts" && (
 							<div className="max-w-3xl space-y-4">
-								<div className="flex items-start justify-between gap-4">
-									<div>
-										<h2 className="text-[14px] font-semibold text-surface-foreground">快捷键绑定</h2>
-										<p className="mt-0.5 text-[11.5px] text-muted">
-											点击按键可重新录制组合键（需带 Ctrl / Alt / Shift）。
-										</p>
-									</div>
-									<div className="flex shrink-0 items-center gap-2">
-										<Button icon="icon-[lucide--rotate-ccw]" onClick={() => { setOverrides({}); setChecked(false); toast({ title: "已恢复默认快捷键", tone: "default" }); }}>
-											恢复默认
-										</Button>
-										<Button variant="primary" icon="icon-[lucide--search-check]" onClick={detect}>
-											检测冲突
-										</Button>
-									</div>
+								<div>
+									<h2 className="text-[14px] font-semibold text-surface-foreground">快捷键绑定</h2>
+									<p className="mt-0.5 text-[11.5px] text-muted">由各界面固定响应，改绑尚未接线。</p>
 								</div>
-
-								{checked &&
-									(conflictCount > 0 ? (
-										<div className="flex items-start gap-2 rounded border border-danger/40 bg-danger/10 px-3 py-2 text-[11px] text-danger">
-											<span className="icon-[lucide--triangle-alert] mt-px size-3.5 shrink-0" />
-											<div>
-												<div className="font-medium">检测到 {conflictCount} 组快捷键冲突</div>
-												<div className="mt-0.5 text-[10.5px]">
-													{[...conflicts.values()]
-														.map((ids) => ids.map((id) => NAME_BY_ID[id] ?? id).join(" 与 "))
-														.join("；")}
-													　绑定了相同的按键组合，后触发的命令会覆盖前者。
-												</div>
-											</div>
-										</div>
-									) : (
-										<div className="flex items-center gap-2 rounded border border-success/40 bg-success/10 px-3 py-2 text-[11px] text-success">
-											<span className="icon-[lucide--check] size-3.5" />
-											未发现快捷键冲突，全部 {SHORTCUTS.length} 条绑定均可正常触发。
-										</div>
-									))}
 
 								<div className="overflow-hidden rounded-lg border border-border bg-surface-raised shadow-sm">
 									{GROUPS.map((group, gi) => (
@@ -622,70 +594,22 @@ export default function Settings() {
 												<span className="size-1 rounded-full bg-faint" />
 												{group}
 											</div>
-											{SHORTCUTS.filter((s) => s.group === group).map((row) => {
-												const overridden = Boolean(overrides[row.id]);
-												const isConflict = checked && conflictIds.has(row.id);
-												const keys = keysOf(row);
-												return (
-													<div
-														key={row.id}
-														className={cn(
-															"flex items-center justify-between gap-3 border-t border-border px-3 py-1.5 transition-colors",
-															isConflict && "bg-danger-soft",
-														)}
-													>
-														<div className="flex min-w-0 items-baseline gap-2">
-															<span
-																className={cn(
-																	"shrink-0 text-[11.5px]",
-																	isConflict ? "font-medium text-danger" : "text-surface-foreground",
-																)}
-															>
-																{row.name}
-															</span>
-															<span className="truncate text-[10.5px] text-faint">{row.desc}</span>
-															{isConflict && <span className="shrink-0 font-mono text-[10px] text-danger">冲突</span>}
-														</div>
-														<div className="flex shrink-0 items-center gap-1.5">
-															{captureId === row.id ? (
-																<span className="animate-pulse rounded border border-primary/50 bg-primary/10 px-1.5 py-px font-mono text-[10px] text-primary">
-																	按下组合键…（Esc 取消）
-																</span>
-															) : (
-																keys.map((k) => (
-																	<button
-																		key={k}
-																		type="button"
-																		onClick={() => setCaptureId(row.id)}
-																		title="点击重新绑定"
-																		className="cursor-pointer"
-																	>
-																		<Kbd className={cn(isConflict && "border-danger/50 text-danger")}>{k}</Kbd>
-																	</button>
-																))
-															)}
-															{overridden && (
-																<button
-																	type="button"
-																	title="恢复该项默认"
-																	aria-label="恢复该项默认"
-																	onClick={() => {
-																		setOverrides((prev) => {
-																			const next = { ...prev };
-																			delete next[row.id];
-																			return next;
-																		});
-																		setChecked(false);
-																	}}
-																	className="flex size-5 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-surface hover:text-surface-foreground"
-																>
-																	<span className="icon-[lucide--rotate-ccw] size-3" />
-																</button>
-															)}
-														</div>
+											{SHORTCUTS.filter((s) => s.group === group).map((row) => (
+												<div
+													key={row.id}
+													className="flex items-center justify-between gap-3 border-t border-border px-3 py-1.5"
+												>
+													<div className="flex min-w-0 items-baseline gap-2">
+														<span className="shrink-0 text-[11.5px] text-surface-foreground">{row.name}</span>
+														<span className="truncate text-[10.5px] text-faint">{row.desc}</span>
 													</div>
-												);
-											})}
+													<div className="flex shrink-0 items-center gap-1.5">
+														{row.keys.map((k) => (
+															<Kbd key={k}>{k}</Kbd>
+														))}
+													</div>
+												</div>
+											))}
 										</div>
 									))}
 								</div>
@@ -697,80 +621,132 @@ export default function Settings() {
 							<div className="max-w-2xl space-y-5">
 								<div>
 									<h2 className="text-[14px] font-semibold text-surface-foreground">安全与主密码</h2>
-									<p className="mt-0.5 text-[11.5px] text-muted">
-										忘记主密码只能重置并重新录入凭据。
-									</p>
+									<p className="mt-0.5 text-[11.5px] text-muted">解锁密码只保存加盐摘要，忘记只能在下方重设。</p>
 								</div>
 
-								<Panel title={<><span className="icon-[lucide--key-round] size-3.5 text-primary" />主密码</>}>
-									<SettingRow title="启用主密码" description={masterPassword ? "已启用 · 上次修改 2026-09-18" : "未启用，启动时直接进入工作台"}>
-										<Switch checked={masterPassword} onChange={setMasterPassword} label="启用主密码" />
-									</SettingRow>
-									<SettingRow title="主密码强度" description="12 位，含大小写字母、数字与符号">
+								<Panel
+									title={
+										<>
+											<span className="icon-[lucide--key-round] size-3.5 text-primary" />
+											应用锁
+										</>
+									}
+								>
+									<SettingRow
+										title="解锁密码"
+										description={hasPassword ? "已设置 · 锁屏时需要输入" : "未设置，锁屏与自动锁定都不可用"}
+									>
 										<div className="flex items-center gap-2">
-											<span className="flex h-1.5 w-24 items-center gap-0.5">
-												<span className="h-full flex-1 rounded-full bg-success" />
-												<span className="h-full flex-1 rounded-full bg-success" />
-												<span className="h-full flex-1 rounded-full bg-success" />
-												<span className="h-full flex-1 rounded-full bg-success" />
-												<span className="h-full flex-1 rounded-full bg-border" />
-											</span>
 											<Button
 												size="sm"
 												icon="icon-[lucide--pencil]"
-												disabled={!masterPassword}
-												onClick={() => setPwdOpen(true)}
+												disabled={!cryptoOk}
+												onClick={() => {
+													setPwdError(null);
+													setPwdCurrent("");
+													setPwdNew("");
+													setPwdConfirm("");
+													setPwdOpen(true);
+												}}
 											>
-												修改主密码
+												{hasPassword ? "修改" : "设置"}
 											</Button>
+											{hasPassword && (
+												<Button size="sm" variant="danger" icon="icon-[lucide--trash-2]" onClick={clearPassword}>
+													清除
+												</Button>
+											)}
 										</div>
 									</SettingRow>
-									<SettingRow title="启动时锁定应用" description="打开 TermX 后先要求输入主密码（Ctrl+Shift+L 可随时锁定）">
-										<Switch checked={startLocked} onChange={setStartLocked} label="启动时锁定应用" />
+									<SettingRow title="立即锁定" description="Ctrl+Shift+L 随时可用（需先设置解锁密码）">
+										<Button
+											size="sm"
+											icon="icon-[lucide--lock]"
+											disabled={!hasPassword}
+											onClick={() => useLockStore.getState().lock()}
+										>
+											锁定
+										</Button>
 									</SettingRow>
-								</Panel>
-
-								<Panel title={<><span className="icon-[lucide--timer] size-3.5 text-primary" />自动锁定</>}>
-									<SettingRow title="闲置自动锁定" description="无键盘 / 鼠标操作达到设定时长后自动锁屏">
-										<Select className="w-40" value={autoLock} onChange={(e) => setAutoLock(e.target.value)}>
-											<option value="1">1 分钟</option>
-											<option value="5">5 分钟</option>
-											<option value="15">15 分钟</option>
-											<option value="30">30 分钟</option>
-											<option value="60">1 小时</option>
-											<option value="never">永不锁定</option>
-										</Select>
-									</SettingRow>
-									<SettingRow title="复制密码后清空剪贴板" description="敏感字段复制 30 秒后自动清除系统剪贴板">
-										<Switch checked={clearClipboard} onChange={setClearClipboard} label="复制密码后清空剪贴板" />
-									</SettingRow>
-								</Panel>
-
-								<Panel title={<><span className="icon-[lucide--shield-check] size-3.5 text-primary" />凭据存储</>}>
-									<SettingRow title="凭据存系统钥匙串" description="密码与私钥口令交给 Windows 凭据管理器 / macOS Keychain 保管">
-										<Switch checked={keychain} onChange={setKeychain} label="凭据存系统钥匙串" />
-									</SettingRow>
-									<SettingRow title="存储后端" description={keychain ? "由操作系统统一加密，TermX 不落盘明文" : "退化为本地加密文件（主密码派生密钥）"}>
-										<ReadonlyValue>{keychain ? "Windows Credential Manager" : "~/.termx/vault.enc"}</ReadonlyValue>
+									<SettingRow title="启动时锁定应用" description="打开 TermX 后先要求输入解锁密码">
+										<Switch
+											checked={startLocked && hasPassword}
+											disabled={!hasPassword}
+											onChange={(value) => setSecurity({ startLocked: value })}
+											label="启动时锁定应用"
+										/>
 									</SettingRow>
 								</Panel>
 
 								<Panel
-									title={<><span className="icon-[lucide--file-key] size-3.5 text-primary" />known_hosts 管理</>}
-									actions={
-										<Button size="sm" icon="icon-[lucide--external-link]" onClick={() => setKnownOpen(true)}>
-											打开管理
-										</Button>
+									title={
+										<>
+											<span className="icon-[lucide--timer] size-3.5 text-primary" />
+											自动锁定
+										</>
+									}
+								>
+									<SettingRow title="闲置自动锁定" description="无键盘 / 鼠标操作达到设定时长后自动锁屏">
+										<Select
+											className="w-40"
+											value={autoLock}
+											disabled={!hasPassword}
+											onChange={(e) => setSecurity({ autoLock: e.target.value as AutoLockChoice })}
+										>
+											{AUTO_LOCK_CHOICES.map((choice) => (
+												<option key={choice} value={choice}>
+													{AUTO_LOCK_LABEL[choice]}
+												</option>
+											))}
+										</Select>
+									</SettingRow>
+									<SettingRow title="复制密码后清空剪贴板" description="连接页复制密码 30 秒后自动清空系统剪贴板">
+										<Switch
+											checked={clearClipboard}
+											onChange={(value) => setSecurity({ clearClipboard: value })}
+											label="复制密码后清空剪贴板"
+										/>
+									</SettingRow>
+								</Panel>
+
+								<Panel
+									title={
+										<>
+											<span className="icon-[lucide--shield-check] size-3.5 text-primary" />
+											凭据存储
+										</>
 									}
 								>
 									<SettingRow
-										title="已信任的主机指纹"
-										description={`${knownHosts.length} 条记录 · 首次连接确认后的指纹会写入此处`}
+										title="凭据存系统钥匙串"
+										description="密码与私钥口令交给系统凭据管理器保管"
 									>
-										<span className="font-mono text-[11px] text-muted">~/.ssh/known_hosts</span>
+										<Switch checked={keychain} onChange={toggleKeychain} label="凭据存系统钥匙串" />
 									</SettingRow>
-									<SettingRow title="指纹变化时阻断连接" description="检测到主机公钥变化时拒绝连接并提示风险">
+									<SettingRow
+										title="存储后端"
+										description={keychain ? "由操作系统统一加密，TermX 不落盘明文" : "已停用：密码只留在当前会话内存里"}
+									>
+										<ReadonlyValue>{keychain ? KEYCHAIN_LABEL : "不保存"}</ReadonlyValue>
+									</SettingRow>
+								</Panel>
+
+								<Panel
+									title={
+										<>
+											<span className="icon-[lucide--file-key] size-3.5 text-primary" />
+											主机指纹
+										</>
+									}
+								>
+									<SettingRow
+										title="指纹变化时阻断连接"
+										description="主机公钥与记录不一致时拒绝连接并提示风险，由原生层强制执行"
+									>
 										<Switch checked onChange={() => toast({ title: "该安全策略不可关闭", tone: "warning" })} label="指纹变化时阻断连接" />
+									</SettingRow>
+									<SettingRow title="已信任的主机指纹" description="首次连接确认后写入原生 known_hosts；列表与删除需要新增原生命令，尚未接线">
+										<span className="font-mono text-[11px] text-muted">不可列出</span>
 									</SettingRow>
 								</Panel>
 							</div>
@@ -781,89 +757,100 @@ export default function Settings() {
 							<div className="max-w-2xl space-y-5">
 								<div>
 									<h2 className="text-[14px] font-semibold text-surface-foreground">数据与备份</h2>
-									<p className="mt-0.5 text-[11.5px] text-muted">
-										导出文件默认使用主密码派生的密钥加密。
-									</p>
+									<p className="mt-0.5 text-[11.5px] text-muted">导出为未加密 JSON；导入按主机地址合并。</p>
 								</div>
 
-								<Panel title={<><span className="icon-[lucide--arrow-down-up] size-3.5 text-primary" />配置导入与导出</>}>
-									<SettingRow title="导出全部配置" description="主机、分组、片段、密钥引用与界面偏好（.termx 包）">
+								<Panel
+									title={
+										<>
+											<span className="icon-[lucide--arrow-down-up] size-3.5 text-primary" />
+											配置导入与导出
+										</>
+									}
+								>
+									<SettingRow title="导出全部配置" description="主机、分组、密钥引用、片段、转发与偏好（未加密，含主机地址与用户名）">
 										<Button
 											size="sm"
 											icon="icon-[lucide--download]"
-											onClick={() => toast({ title: "已导出 termx-backup-20260929.termx", description: "共 18 台主机 · 24 条片段（已加密）。", tone: "success" })}
+											onClick={() => {
+												exportConfig();
+												toast({ title: "已导出配置文件", description: "保存到系统下载目录", tone: "success" });
+											}}
 										>
 											导出
 										</Button>
 									</SettingRow>
-									<SettingRow title="导入配置" description="支持 .termx 包与旧版 JSON，冲突时按主机地址合并">
+									<SettingRow title="导入配置" description="同地址的主机更新，其余新增；本机偏好不导入">
 										<Button
 											size="sm"
 											icon="icon-[lucide--upload]"
-											onClick={() => toast({ title: "已选择 termx-backup-20260924.termx", description: "解析完成，等待确认合并策略。", tone: "default" })}
+											disabled={importing}
+											onClick={() => fileRef.current?.click()}
 										>
-											选择文件
+											{importing ? "导入中…" : "选择文件"}
 										</Button>
+										<input
+											ref={fileRef}
+											type="file"
+											accept=".json,.termx,application/json"
+											className="hidden"
+											onChange={(event) => {
+												const file = event.target.files?.[0];
+												// 清空 value：连续选同一个文件也能再次触发
+												event.target.value = "";
+												if (file) void runImport(file);
+											}}
+										/>
 									</SettingRow>
 								</Panel>
 
-								<Panel title={<><span className="icon-[lucide--lock] size-3.5 text-primary" />加密备份</>}>
-									<SettingRow title="启用加密备份" description="AES-256-GCM，密钥由主密码派生（Argon2id）">
-										<Switch checked={encryptedBackup} onChange={setEncryptedBackup} label="启用加密备份" />
-									</SettingRow>
-									<SettingRow title="备份频率" description="备份文件保留最近 7 份，超出后滚动删除">
-										<Select
-											className="w-40"
-											value={backupFreq}
-											disabled={!encryptedBackup}
-											onChange={(e) => setBackupFreq(e.target.value)}
-										>
-											<option value="exit">每次退出时</option>
-											<option value="daily">每天</option>
-											<option value="weekly">每周</option>
-											<option value="manual">仅手动</option>
-										</Select>
-									</SettingRow>
-									<SettingRow title="最近一次备份" description="~/TermX/backups/termx-20260929-0200.bak">
-										<div className="flex items-center gap-2">
-											<span className="flex items-center gap-1.5 font-mono text-[11px] text-success">
-												<span className="size-1.5 rounded-full bg-success" />
-												今天 02:00 · 8.4 MB
-											</span>
-											<Button
-												size="sm"
-												icon="icon-[lucide--database-backup]"
-												disabled={!encryptedBackup}
-												onClick={() => toast({ title: "已开始加密备份", tone: "success" })}
-											>
-												立即备份
-											</Button>
-										</div>
+								<Panel
+									title={
+										<>
+											<span className="icon-[lucide--lock] size-3.5 text-primary" />
+											定时加密备份
+										</>
+									}
+								>
+									<SettingRow
+										title="备份服务"
+										description="定时导出并加密存放需要一个备份服务进程（含调度、保留策略与主密码派生密钥），尚未实现"
+									>
+										<ReadonlyValue>未接入</ReadonlyValue>
 									</SettingRow>
 								</Panel>
 
-								<Panel title={<><span className="icon-[lucide--square-terminal] size-3.5 text-primary" />导入 ~/.ssh/config</>}>
+								<Panel
+									title={
+										<>
+											<span className="icon-[lucide--square-terminal] size-3.5 text-primary" />
+											导入 ~/.ssh/config
+										</>
+									}
+								>
 									<div className="space-y-3 px-3 py-3">
 										<div className="flex items-end gap-2">
-											<Field label="配置文件路径" hint="支持通配与 Include 指令" className="flex-1">
-												<Input value={sshConfig} onChange={(e) => setSshConfig(e.target.value)} spellCheck={false} />
+											<Field label="配置文件路径" className="flex-1">
+												<Input value={sshConfigPath} onChange={(e) => setSshConfigPath(e.target.value)} spellCheck={false} />
 											</Field>
-											<Button variant="primary" icon="icon-[lucide--file-input]" disabled={importing} onClick={runImport}>
-												{importing ? "解析中…" : "导入"}
+											<Button variant="primary" icon="icon-[lucide--file-input]" disabled>
+												导入
 											</Button>
 										</div>
-
-										<Checkbox
-											checked={dedupe}
-											onChange={setDedupe}
-											label="按 Host 别名去重，已存在的主机只更新地址与端口"
-										/>
-
-										{importing && <ProgressBar value={70} />}
+										<p className="text-[10.5px] leading-4 text-faint">
+											读取本机文件需要新增原生命令（Rust 端 fs 读取），本轮未接线，按钮已禁用。
+										</p>
 									</div>
 								</Panel>
 
-								<Panel title={<><span className="icon-[lucide--sparkles] size-3.5 text-primary" />关于与版本更新</>}>
+								<Panel
+									title={
+										<>
+											<span className="icon-[lucide--sparkles] size-3.5 text-primary" />
+											关于与版本更新
+										</>
+									}
+								>
 									<SettingRow title="当前版本" description={`${PLATFORM_LABEL} · 更新服务尚未接入`}>
 										<div className="flex items-center gap-2">
 											<span className="font-mono text-[11.5px] text-surface-foreground">v{__APP_VERSION__}</span>
@@ -883,104 +870,61 @@ export default function Settings() {
 				</div>
 			</div>
 
-			{/* 修改主密码 */}
+			{/* 设置 / 修改解锁密码 */}
 			<Modal
 				open={pwdOpen}
 				onClose={() => setPwdOpen(false)}
-				title="修改主密码"
+				title={hasPassword ? "修改解锁密码" : "设置解锁密码"}
 				icon="icon-[lucide--key-round]"
 				footer={
 					<>
 						<Button onClick={() => setPwdOpen(false)}>取消</Button>
-						<Button
-							variant="primary"
-							icon="icon-[lucide--check]"
-							onClick={() => {
-								setPwdOpen(false);
-								toast({ title: "主密码已更新", description: "凭据库已用新密钥重新加密。", tone: "success" });
-							}}
-						>
-							确认修改
+						<Button variant="primary" icon="icon-[lucide--check]" disabled={pwdBusy} onClick={() => void submitPassword()}>
+							{pwdBusy ? "保存中…" : "确认"}
 						</Button>
 					</>
 				}
 			>
 				<div className="space-y-3">
-					<Field label="当前主密码" required>
-						<Input type="password" defaultValue="••••••••••••" />
+					{hasPassword && (
+						<Field label="当前密码" required>
+							<Input
+								type="password"
+								autoFocus
+								value={pwdCurrent}
+								onChange={(e) => setPwdCurrent(e.target.value)}
+								placeholder="输入当前解锁密码"
+							/>
+						</Field>
+					)}
+					<Field label="新密码" hint="至少 8 位" required>
+						<Input
+							type="password"
+							autoFocus={!hasPassword}
+							value={pwdNew}
+							onChange={(e) => setPwdNew(e.target.value)}
+							placeholder="输入新的解锁密码"
+						/>
 					</Field>
-					<Field label="新主密码" hint="至少 12 位" required>
-						<Input type="password" placeholder="输入新的主密码" />
-					</Field>
-					<Field label="确认新主密码" required>
-						<Input type="password" placeholder="再次输入" />
-					</Field>
-					<div className="flex items-center gap-1.5 rounded border border-warning/40 bg-warning/10 px-2.5 py-2 text-[10.5px] text-warning">
-						<span className="icon-[lucide--triangle-alert] size-3.5 shrink-0" />
-						修改主密码会重新加密本地凭据库，已同步的备份需要用新密码才能打开。
-					</div>
-				</div>
-			</Modal>
-
-			{/* known_hosts 管理 */}
-			<Drawer
-				open={knownOpen}
-				onClose={() => setKnownOpen(false)}
-				title="known_hosts 管理"
-				subtitle="~/.ssh/known_hosts · 首次连接确认后的指纹"
-				width={520}
-				footer={
-					<>
-						<Button onClick={() => setKnownOpen(false)}>关闭</Button>
-						<Button
-							variant="danger"
-							icon="icon-[lucide--trash-2]"
-							onClick={() => {
-								setKnownHosts([]);
-								toast({ title: "已清空全部指纹记录", description: "下次连接所有主机都会重新确认指纹。", tone: "warning" });
+					<Field label="确认新密码" required>
+						<Input
+							type="password"
+							value={pwdConfirm}
+							onChange={(e) => setPwdConfirm(e.target.value)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") void submitPassword();
 							}}
-						>
-							清空全部
-						</Button>
-					</>
-				}
-			>
-				<div className="divide-y divide-border">
-					{knownHosts.length === 0 ? (
-						<div className="flex flex-col items-center gap-1.5 px-4 py-10 text-center">
-							<span className="icon-[lucide--shield-off] size-5 text-faint" />
-							<span className="text-[12px] text-surface-foreground">没有已信任的指纹</span>
-							<span className="text-[11px] text-muted">下次连接任意主机时都会弹出指纹确认。</span>
+							placeholder="再次输入"
+						/>
+					</Field>
+					{pwdError && (
+						<div className="flex items-center gap-1.5 rounded border border-danger/40 bg-danger/10 px-2.5 py-2 text-[10.5px] text-danger">
+							<span className="icon-[lucide--triangle-alert] size-3.5 shrink-0" />
+							{pwdError}
 						</div>
-					) : (
-						knownHosts.map((k) => (
-							<div key={k.host} className="flex items-center justify-between gap-3 px-4 py-2.5">
-								<div className="min-w-0">
-									<div className="flex items-center gap-2">
-										<span className="text-[12px] font-medium text-surface-foreground">{k.host}</span>
-										<Badge>{k.algo}</Badge>
-									</div>
-									<div className="mt-0.5 truncate font-mono text-[10.5px] text-faint">
-										{k.addr} · {k.fp}
-									</div>
-								</div>
-								<button
-									type="button"
-									title="删除该指纹"
-									aria-label="删除该指纹"
-									onClick={() => {
-										setKnownHosts((prev) => prev.filter((x) => x.host !== k.host));
-										toast({ title: `已移除 ${k.host} 的指纹记录`, tone: "warning" });
-									}}
-									className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-muted transition-colors hover:bg-surface-raised hover:text-danger"
-								>
-									<span className="icon-[lucide--trash-2] size-3.5" />
-								</button>
-							</div>
-						))
 					)}
 				</div>
-			</Drawer>
+			</Modal>
 		</WindowChrome>
 	);
 }

@@ -7,7 +7,8 @@ import { Modal } from "@/components/ui/Overlay";
 import { Checkbox } from "@/components/ui/Toggle";
 import { AUTH_LABEL, type AuthMethod, type ConnectionStatus } from "@/data/types";
 import { cn } from "@/lib/cn";
-import { describeProbe, probeSupported, type ProbeReport } from "@/lib/probe";
+import { copySensitive } from "@/lib/clipboard";
+import { describeProbe, formatMs, probeSupported, type ProbeReport } from "@/lib/probe";
 import { secretAvailable, secretDelete, secretLoad, secretSave } from "@/lib/secret";
 import {
 	listenAuthPrompts,
@@ -26,6 +27,7 @@ import { useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
 import { useProbeStore } from "@/store/probe";
 import { useSessionsStore } from "@/store/sessions";
+import { useSettingsStore } from "@/store/settings";
 import { toast } from "@/store/toast";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
@@ -403,6 +405,18 @@ export default function Connect() {
 			?.writeText(text)
 			.then(() => toast({ title, tone: "success" }))
 			.catch(() => toast({ title: "复制失败，请手动选择文本", tone: "warning" }));
+	};
+
+	/** 复制登录密码：敏感内容，按设置页的偏好在 30 秒后自动清空剪贴板 */
+	const copyPassword = async () => {
+		if (!password) return;
+		const autoClear = useSettingsStore.getState().clearClipboard;
+		const ok = await copySensitive(password, () => toast({ title: "剪贴板已清空", tone: "default" }));
+		toast(
+			ok
+				? { title: "密码已复制", description: autoClear ? "30 秒后自动清空剪贴板" : undefined, tone: "success" }
+				: { title: "复制失败，请手动选择文本", tone: "warning" },
+		);
 	};
 
 	const probeNow = async () => {
@@ -919,6 +933,17 @@ export default function Connect() {
 												}}
 												className="mt-2 font-mono"
 											/>
+											<div className="mt-1.5 flex items-center justify-end">
+												<Button
+													size="sm"
+													variant="ghost"
+													icon="icon-[lucide--copy]"
+													disabled={password === ""}
+													onClick={() => void copyPassword()}
+												>
+													复制密码
+												</Button>
+											</div>
 											{/* 从钥匙串读到了才提示，没保存过的用户不被打扰 */}
 											{loadedFromKeychain && (
 												<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-success">
@@ -1474,7 +1499,13 @@ function buildSteps(
 		? sshStep("tcp", STAGE_LABEL.tcp)
 		: report
 			? report.reachable
-				? { id: "tcp", label: STAGE_LABEL.tcp, state: "done", detail: `TCP ${Math.round(report.avg_ms)} ms` }
+				? {
+						id: "tcp",
+						label: STAGE_LABEL.tcp,
+						state: "done",
+						// 口径写清楚：这是本机 TCP 建连耗时，不是到主机的往返
+						detail: `TCP 建连 ${formatMs(report.median_ms)} ms`,
+					}
 				: { id: "tcp", label: STAGE_LABEL.tcp, state: "failed", detail: report.error ?? "TCP 不可达" }
 			: { id: "tcp", label: STAGE_LABEL.tcp, state: probeState, detail: probeDetail };
 

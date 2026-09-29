@@ -4,7 +4,7 @@ import { EmptyState, Segmented, StatusDot } from "@/components/ui/Display";
 import { Input, Select } from "@/components/ui/Input";
 import type { Host } from "@/data/types";
 import { cn } from "@/lib/cn";
-import { describeProbe, latencyTier, latencyTierClass, probeSupported } from "@/lib/probe";
+import { describeProbe, formatMs, probeSupported } from "@/lib/probe";
 import { filterHosts, useHostsStore, type HostScope } from "@/store/hosts";
 import { useProbeStore } from "@/store/probe";
 import { toast } from "@/store/toast";
@@ -32,8 +32,9 @@ const QUICK_VIEWS: { scope: HostScope; label: string; icon: string }[] = [
 	{ scope: "jump", label: "跳板节点", icon: "icon-[lucide--waypoints]" },
 ];
 
-/** 延迟单元格：有实测结果就显示实测，没有就回落到种子数据。
- *  实测结论是「TCP 可达」，不等于 SSH 可用，所以 tooltip 里写明口径。 */
+/** 延迟单元格：有实测结果就显示实测，没有就回落到主机自身的字段。
+ *  实测的口径是「TCP 建连」，只说明端口这边有回应，判不了快慢（本机代理会替远端
+ *  握手），所以这里按可达性上色，不按耗时上色；真正的往返看连接后的状态栏。 */
 function LatencyCell({
 	host,
 	showDot,
@@ -58,11 +59,13 @@ function LatencyCell({
 	}
 
 	if (report) {
-		const tier = latencyTier(report);
 		return (
-			<span className={cn(base, latencyTierClass[tier], className)} title={describeProbe(report)}>
+			<span
+				className={cn(base, report.reachable ? "text-surface-foreground" : "text-danger", className)}
+				title={describeProbe(report)}
+			>
 				{showDot && <StatusDot status={report.reachable ? "connected" : "failed"} size={6} />}
-				{report.reachable ? `${Math.round(report.avg_ms)} ms` : "不可达"}
+				{report.reachable ? `TCP ${formatMs(report.median_ms)} ms` : "不可达"}
 			</span>
 		);
 	}

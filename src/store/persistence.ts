@@ -2,6 +2,7 @@ import { loadConfig, saveConfig, type PersistedConfig } from "@/lib/persist";
 import { useForwardsStore } from "./forwards";
 import { useHostsStore } from "./hosts";
 import { useKeysStore } from "./keys";
+import { useSettingsStore } from "./settings";
 import { useSnippetsStore } from "./snippets";
 import { useThemeStore } from "./theme";
 
@@ -12,7 +13,9 @@ import { useThemeStore } from "./theme";
  * 运行：任一持久化字段变化后去抖保存，且内容没变就不写盘。
  * ========================================================================== */
 
-function snapshot(): PersistedConfig {
+/** 当前内存里的完整配置（写盘、导出配置都用这一份，保证两边永远一致） */
+export function snapshotConfig(): PersistedConfig {
+	const preferences = useSettingsStore.getState().toPreferences();
 	return {
 		version: 1,
 		hosts: useHostsStore.getState().hosts,
@@ -20,11 +23,11 @@ function snapshot(): PersistedConfig {
 		keys: useKeysStore.getState().keys,
 		snippets: useSnippetsStore.getState().snippets,
 		forwards: useForwardsStore.getState().rules,
-		preferences: { accent: useThemeStore.getState().accent },
+		preferences: { accent: useThemeStore.getState().accent, ...preferences },
 	};
 }
 
-const snapshotText = () => JSON.stringify(snapshot());
+const snapshotText = () => JSON.stringify(snapshotConfig());
 
 export async function hydrateStores(): Promise<void> {
 	try {
@@ -33,8 +36,10 @@ export async function hydrateStores(): Promise<void> {
 		useKeysStore.getState().setAll(config.keys);
 		useSnippetsStore.getState().setAll(config.snippets);
 		useForwardsStore.getState().setAll(config.forwards);
-		// 强调色来自配置文件，渲染前先落到 <html data-accent>，首帧就是用户选的那套
+		// 强调色与终端/安全/数据偏好都来自配置文件，渲染前先灌进 store，
+		// 首帧就是用户选的那套（xterm 也才会以正确字号/配色挂载）
 		useThemeStore.getState().setAccent(config.preferences.accent);
+		useSettingsStore.getState().hydrate(config.preferences);
 		// 立刻把规范化后的配置写回一次：
 		// 首次启动会因此创建配置文件，老文件缺字段也会被补齐。
 		await saveConfig(config);
@@ -70,6 +75,7 @@ export function startAutosave(): () => void {
 		useSnippetsStore.subscribe(schedule),
 		useForwardsStore.subscribe(schedule),
 		useThemeStore.subscribe(schedule),
+		useSettingsStore.subscribe(schedule),
 	];
 
 	return () => {
@@ -78,7 +84,7 @@ export function startAutosave(): () => void {
 	};
 }
 
-/** 手动立即写盘（设置页的「立即备份」等场景用） */
+/** 手动立即写盘（导入配置后立刻落盘等场景用） */
 export async function flushNow(): Promise<void> {
-	await saveConfig(snapshot());
+	await saveConfig(snapshotConfig());
 }

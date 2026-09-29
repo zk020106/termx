@@ -9,6 +9,8 @@ import { isTauri, spawnLocalShell, type PtyHandle } from "@/lib/tauri";
  *     它的首屏输出（提示符）也就永久丢了 —— 表现为原生壳里终端一片空白。
  *  2. 分屏布局变化、标签切换都会重建终端组件；会话独立存活后，
  *     重新挂载只需回放缓冲即可接着用，符合需求书「断线/切换后终端内容保留」的取向。
+ *     缓冲记的是**整段会话输出**（不只是没人看的那一段）：切到别的界面再回来时，
+ *     只回放空窗期的数据会让终端一片空白，看起来像 shell 死了。
  *
  * 生命周期：最后一个订阅者离开后延迟销毁，避免「卸载→立刻重挂载」误杀 shell。
  * ========================================================================== */
@@ -19,7 +21,8 @@ const MAX_BUFFER = 64 * 1024;
 
 interface Entry {
 	handle: PtyHandle | null;
-	buffer: string;
+	/** 整段会话输出（只留末尾 MAX_BUFFER 字符）：终端重挂载时靠它回放 */
+	replay: string;
 	subs: Set<(chunk: string) => void>;
 	exitSubs: Set<(code: number | null) => void>;
 	killTimer: number | null;
@@ -29,7 +32,7 @@ interface Entry {
 const entries = new Map<string, Entry>();
 
 export interface PtyAttachment {
-	/** 重新挂载时用于回放的既有输出 */
+	/** 重新挂载时用于回放的整段既有输出 */
 	replay: string;
 	/** 会话是否真正起来了（false 时调用方应降级为演示模式） */
 	ready: Promise<boolean>;
@@ -57,7 +60,7 @@ export function attachPty(
 		const exitSubs = new Set<(code: number | null) => void>();
 		const created: Entry = {
 			handle: null,
-			buffer: "",
+			replay: "",
 			subs,
 			exitSubs,
 			killTimer: null,
@@ -69,11 +72,9 @@ export function attachPty(
 			cols,
 			rows,
 			(chunk) => {
-				// 没有订阅者时（两次挂载之间的空窗）先缓冲，等重新挂载后回放
-				if (subs.size === 0) {
-					created.buffer = (created.buffer + chunk).slice(-MAX_BUFFER);
-					return;
-				}
+				// 不管有没有订阅者都累积：重新挂载的终端要能回放整段会话，
+				// 只记空窗期的话，切走再回来就是一片空白
+				created.replay = (created.replay + chunk).slice(-MAX_BUFFER);
 				for (const sub of subs) sub(chunk);
 			},
 			(code) => {
@@ -99,7 +100,7 @@ export function attachPty(
 	entry.exitSubs.add(onExit);
 
 	const current = entry;
-	const replay = current.buffer;
+	const replay = current.replay;
 
 	return {
 		replay,

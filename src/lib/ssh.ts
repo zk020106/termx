@@ -83,6 +83,65 @@ export function sshSupported(): boolean {
 	return isTauri();
 }
 
+/**
+ * 一条已认证连接上的往返延迟。
+ *
+ * 口径：一次 SSH keepalive 全局请求从发出到收到答复，也就是**端到端的真实往返**。
+ * 这跟 probe.ts 的 TCP 建连耗时是两码事：后者可能被本机代理就地握完，与远端无关，
+ * 而已经建立的这条连接必须真的把数据送到对端再回来。
+ */
+export interface SshRttReport {
+	/** 会话键（就是前端的标签页 id） */
+	key: string;
+	/** 口径标识：恒为 ssh_round_trip */
+	caliber: "ssh_round_trip";
+	/** 实际发出去的次数；首包超时后就不再继续，所以可能小于请求的次数 */
+	sent: number;
+	received: number;
+	loss: number;
+	min_ms: number;
+	avg_ms: number;
+	/** 中位数：样本少时比平均值更稳，展示用它 */
+	median_ms: number;
+	max_ms: number;
+	jitter_ms: number;
+	samples: number[];
+	error: string | null;
+}
+
+/**
+ * 在已认证会话上量一次 SSH 往返。会话不存在、或对端不应答时返回 null，
+ * 由调用方决定回落到什么口径 —— 这里不编数字。
+ */
+export async function sshPingRtt(
+	key: string,
+	options: { samples?: number; timeoutMs?: number } = {},
+): Promise<SshRttReport | null> {
+	if (!isTauri()) return null;
+	const { invoke } = await import("@tauri-apps/api/core");
+	try {
+		return await invoke<SshRttReport>("ssh_ping_rtt", {
+			key,
+			samples: options.samples ?? 3,
+			timeoutMs: options.timeoutMs ?? 1000,
+		});
+	} catch {
+		return null;
+	}
+}
+
+/** 把 SSH 往返压成一句事实描述：中位数、区间、抖动、丢包 */
+export function describeRtt(report: SshRttReport): string {
+	if (report.received === 0) return report.error ?? "没有收到 keepalive 答复";
+
+	const head = `SSH 往返 ${Math.round(report.median_ms)} ms（最低 ${Math.round(
+		report.min_ms,
+	)} / 最高 ${Math.round(report.max_ms)}，${report.received}/${report.sent} 次）`;
+	const jitter = report.jitter_ms > 0 ? ` · 抖动 ±${report.jitter_ms.toFixed(1)} ms` : "";
+	const loss = report.loss > 0 ? ` · 丢包 ${Math.round(report.loss * 100)}%` : "";
+	return `${head}${jitter}${loss}`;
+}
+
 /** 旧的 password 字段 → 密码凭据；没给密码就是没有凭据 */
 function credentialFromPassword(password: string | undefined): Credential | null {
 	return typeof password === "string" ? { method: "password", password } : null;

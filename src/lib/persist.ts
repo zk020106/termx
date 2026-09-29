@@ -1,5 +1,5 @@
-import type { Accent, ForwardRule, Host, HostGroup, Snippet, SshKey } from "@/data/types";
-import { isAccent } from "@/data/types";
+﻿import type { ForwardRule, Host, HostGroup, Snippet, SshKey } from "@/data/types";
+import { normalizePreferences, type Preferences } from "@/data/preferences";
 import { isTauri } from "./tauri";
 
 /* =============================================================================
@@ -9,14 +9,9 @@ import { isTauri } from "./tauri";
  *         %APPDATA%\dev.termx.app\termx.json），由 Rust 侧原子写入。
  * 浏览器：退化为 localStorage，语义一致（同样是本机持久化），便于纯前端调试。
  *
- * 只存用户自己的东西：主机、分组、密钥、片段、转发规则、界面偏好。
+ * 只存用户自己的东西：主机、分组、密钥、片段、转发规则、界面与终端偏好。
  * 凭据类机密（密码、私钥口令）不进这个文件，交操作系统钥匙串。
  * ========================================================================== */
-
-/** 界面偏好：与主题同属本机配置，跟着配置文件一起走 */
-export interface UiPreferences {
-	accent: Accent;
-}
 
 export interface PersistedConfig {
 	version: 1;
@@ -25,7 +20,7 @@ export interface PersistedConfig {
 	keys: SshKey[];
 	snippets: Snippet[];
 	forwards: ForwardRule[];
-	preferences: UiPreferences;
+	preferences: Preferences;
 }
 
 export function emptyConfig(): PersistedConfig {
@@ -36,17 +31,17 @@ export function emptyConfig(): PersistedConfig {
 		keys: [],
 		snippets: [],
 		forwards: [],
-		preferences: { accent: "indigo" },
+		// 每次都给一份全新的默认偏好，避免共享对象被就地改坏
+		preferences: normalizePreferences(null),
 	};
 }
 
 const LS_KEY = "termx.config";
 
-/** 把读到的对象补齐成完整结构，旧文件缺字段也不至于炸 */
-function normalize(raw: Partial<PersistedConfig> | null): PersistedConfig {
+/** 把读到的对象补齐成完整结构，旧文件缺字段也不至于炸（导入配置时也用它） */
+export function normalizeConfig(raw: Partial<PersistedConfig> | null): PersistedConfig {
 	const base = emptyConfig();
 	if (!raw) return base;
-	const accent = raw.preferences?.accent;
 	return {
 		version: 1,
 		hosts: Array.isArray(raw.hosts) ? raw.hosts : [],
@@ -54,7 +49,8 @@ function normalize(raw: Partial<PersistedConfig> | null): PersistedConfig {
 		keys: Array.isArray(raw.keys) ? raw.keys : [],
 		snippets: Array.isArray(raw.snippets) ? raw.snippets : [],
 		forwards: Array.isArray(raw.forwards) ? raw.forwards : [],
-		preferences: { accent: isAccent(accent) ? accent : base.preferences.accent },
+		// 偏好逐项校验：老配置文件只有 accent，也能补齐成完整结构
+		preferences: normalizePreferences(raw.preferences),
 	};
 }
 
@@ -62,12 +58,12 @@ export async function loadConfig(): Promise<PersistedConfig> {
 	if (isTauri()) {
 		const { invoke } = await import("@tauri-apps/api/core");
 		const raw = await invoke<Partial<PersistedConfig> | null>("config_load");
-		return normalize(raw);
+		return normalizeConfig(raw);
 	}
 
 	try {
 		const text = localStorage.getItem(LS_KEY);
-		return normalize(text ? (JSON.parse(text) as Partial<PersistedConfig>) : null);
+		return normalizeConfig(text ? (JSON.parse(text) as Partial<PersistedConfig>) : null);
 	} catch {
 		return emptyConfig();
 	}

@@ -29,6 +29,7 @@ pub fn run() {
             ssh::ssh_connect,
             ssh::ssh_write,
             ssh::ssh_resize,
+            ssh::ssh_ping_rtt,
             ssh::ssh_disconnect,
             ssh::ssh_trust_host,
             ssh::ssh_replace_host_key,

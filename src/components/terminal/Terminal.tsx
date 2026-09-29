@@ -12,9 +12,11 @@ import {
 	type SshAttachment,
 } from "./sshCache";
 import { useHostsStore } from "@/store/hosts";
+import { useSettingsStore } from "@/store/settings";
 import { useThemeStore } from "@/store/theme";
+import { fontStack, scrollbackLines } from "@/data/preferences";
 import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
-import { buildXtermTheme, fg, readMonoFont, readPalette } from "./terminalTheme";
+import { fg, noteColor, readPalette, xtermThemeFor } from "./terminalTheme";
 
 /* =============================================================================
  * 终端分屏格 —— xterm 6 的 React 封装。
@@ -67,6 +69,7 @@ export function Terminal({
 }) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const termRef = useRef<XTerm | null>(null);
+	const fitRef = useRef<FitAddon | null>(null);
 	const attachRef = useRef<PtyAttachment | null>(null);
 	/** 当前这格没有真实 PTY（浏览器预览 / PTY 启动失败）：只显示说明，不伪造输出 */
 	const noPtyRef = useRef(false);
@@ -76,6 +79,15 @@ export function Terminal({
 	const resolvedTheme = useThemeStore((s) => s.resolved);
 	const accent = useThemeStore((s) => s.accent);
 
+	/* 终端环境偏好：全部来自设置页的 store，改动会立刻作用到已打开的终端 */
+	const fontFamily = useSettingsStore((s) => s.fontFamily);
+	const fontSize = useSettingsStore((s) => s.fontSize);
+	const lineHeight = useSettingsStore((s) => s.lineHeight);
+	const scrollback = useSettingsStore((s) => s.scrollback);
+	const cursorStyle = useSettingsStore((s) => s.cursorStyle);
+	const scheme = useSettingsStore((s) => s.scheme);
+	const bell = useSettingsStore((s) => s.bell);
+
 	useEffect(() => {
 		const container = containerRef.current;
 		if (!container) return;
@@ -83,16 +95,17 @@ export function Terminal({
 		const palette = readPalette();
 		const term = new XTerm({
 			cursorBlink: true,
-			cursorStyle: "bar",
-			fontFamily: readMonoFont(),
-			fontSize: 12,
-			lineHeight: 1.6,
+			cursorStyle,
+			fontFamily: fontStack(fontFamily),
+			fontSize,
+			lineHeight,
 			letterSpacing: 0,
-			scrollback: 5000,
+			scrollback: scrollbackLines(scrollback),
 			smoothScrollDuration: 0,
-			theme: buildXtermTheme(palette),
+			theme: xtermThemeFor(scheme, palette),
 		});
 		const fit = new FitAddon();
+		fitRef.current = fit;
 		term.loadAddon(fit);
 		term.loadAddon(new WebLinksAddon());
 		term.open(container);
@@ -113,7 +126,8 @@ export function Terminal({
 
 		const writeLine = (text: string) => term.write(`${text}\r\n`);
 		/** 说明性文字：不带任何伪造的命令输出 */
-		const writeNote = (text: string) => writeLine(fg(palette.faint, text));
+		const note = noteColor(scheme, palette);
+		const writeNote = (text: string) => writeLine(fg(note, text));
 
 		// 这一格连的是哪台主机：有真实 SSH 会话就走 SSH，否则才考虑本地 PTY
 		const sshKey = hostId ? sshKeyForHost(hostId) : null;
@@ -139,9 +153,7 @@ export function Terminal({
 				sshKey,
 				(chunk) => term.write(chunk),
 				(code) =>
-					writeLine(
-						fg(palette.faint, code === null ? "远端会话已结束" : `远端会话已结束（退出码 ${code}）`),
-					),
+					writeLine(fg(note, code === null ? "远端会话已结束" : `远端会话已结束（退出码 ${code}）`)),
 			);
 			sshRef.current = attachment;
 			attachRef.current = null;
@@ -158,7 +170,7 @@ export function Terminal({
 				term.cols,
 				term.rows,
 				(chunk) => term.write(chunk),
-				(code) => writeLine(fg(palette.faint, `会话已结束（退出码 ${code ?? 0}）`)),
+				(code) => writeLine(fg(note, `会话已结束（退出码 ${code ?? 0}）`)),
 			);
 			attachRef.current = attached;
 			sshRef.current = null;
@@ -204,16 +216,46 @@ export function Terminal({
 			matchesRef.current = [];
 			cursorRef.current = 0;
 			termRef.current = null;
+			fitRef.current = null;
 			term.dispose();
 		};
 	}, [paneId, hostId]);
 
-	// 主题或强调色切换时重取 token（设计 token 挂在 <html data-theme data-accent> 上，
-	// 必须重新解析，xterm 才会拿到新的语法高亮 / 图标着色）
+	/* 终端环境偏好改动 → 立即改已打开终端的 xterm 运行时选项，不需要重开会话。
+	   字号/字体/行高会影响网格，改完必须重新 fit，否则列数还是旧值。 */
 	useEffect(() => {
 		const term = termRef.current;
-		if (term) term.options.theme = buildXtermTheme(readPalette());
-	}, [resolvedTheme, accent]);
+		if (!term) return;
+		term.options.fontFamily = fontStack(fontFamily);
+		term.options.fontSize = fontSize;
+		term.options.lineHeight = lineHeight;
+		term.options.scrollback = scrollbackLines(scrollback);
+		term.options.cursorStyle = cursorStyle;
+		window.requestAnimationFrame(() => {
+			try {
+				fitRef.current?.fit();
+			} catch {
+				/* 容器不可见时跳过 */
+			}
+		});
+	}, [fontFamily, fontSize, lineHeight, scrollback, cursorStyle]);
+
+	/* 响铃：xterm 只上报 BEL 事件、自己不出声，这里合成一声短促提示音 */
+	useEffect(() => {
+		const term = termRef.current;
+		if (!term) return;
+		const sub = term.onBell(() => {
+			if (bell) playBell();
+		});
+		return () => sub.dispose();
+	}, [bell]);
+
+	// 主题 / 强调色切换时重取 token；终端配色方案则决定用哪一套色板。
+	// 设计 token 挂在 <html data-theme data-accent> 上，必须重新解析才能拿到新颜色。
+	useEffect(() => {
+		const term = termRef.current;
+		if (term) term.options.theme = xtermThemeFor(scheme, readPalette());
+	}, [resolvedTheme, accent, scheme]);
 
 	useImperativeHandle(
 		ref,
@@ -228,7 +270,10 @@ export function Terminal({
 				term.clear();
 			},
 			copySelection: async () => {
-				const text = termRef.current?.getSelection() ?? "";
+				const selected = termRef.current?.getSelection() ?? "";
+				if (!selected) return false;
+				// 「复制时去除末尾换行」：避免粘贴到远端时直接执行命令
+				const text = useSettingsStore.getState().trimNewline ? selected.replace(/[\r\n]+$/, "") : selected;
 				if (!text) return false;
 				try {
 					await navigator.clipboard.writeText(text);
@@ -305,6 +350,33 @@ export function Terminal({
 	);
 
 	return <div ref={containerRef} className={className} data-pane={paneId} data-host={hostId ?? undefined} />;
+}
+
+/** 响铃发声：WebAudio 合成，不引入音频文件（xterm 自身只上报 BEL 事件） */
+let bellContext: AudioContext | null = null;
+
+function playBell(): void {
+	try {
+		const Ctor = window.AudioContext;
+		if (!Ctor) return;
+		bellContext ??= new Ctor();
+		const ctx = bellContext;
+		if (ctx.state === "suspended") void ctx.resume();
+		const osc = ctx.createOscillator();
+		const gain = ctx.createGain();
+		osc.type = "sine";
+		osc.frequency.value = 880;
+		const now = ctx.currentTime;
+		gain.gain.setValueAtTime(0.0001, now);
+		gain.gain.exponentialRampToValueAtTime(0.06, now + 0.01);
+		gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+		osc.connect(gain);
+		gain.connect(ctx.destination);
+		osc.start(now);
+		osc.stop(now + 0.13);
+	} catch {
+		/* 音频设备不可用就算了，响铃不该影响终端 */
+	}
 }
 
 /** 提示符：优先按主机信息推导（deploy@order-api-01:~$），本地终端给 PowerShell 风格 */
