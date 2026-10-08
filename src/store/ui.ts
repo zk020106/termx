@@ -17,6 +17,7 @@ interface UiState {
 	activity: ActivityId;
 
 	toggleSidebar: () => void;
+	setSidebarOpen: (open: boolean) => void;
 	setSidebarWidth: (width: number) => void;
 	setRightPanelTab: (tab: RightPanelTab) => void;
 	toggleEmbeddedSftp: () => void;
@@ -33,6 +34,7 @@ export const useUiStore = create<UiState>((set) => ({
 	activity: "hosts",
 
 	toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+	setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
 	setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
 	setRightPanelTab: (rightPanelTab) => set({ rightPanelTab }),
 	toggleEmbeddedSftp: () => set((s) => ({ embeddedSftpOpen: !s.embeddedSftpOpen })),

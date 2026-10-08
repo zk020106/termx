@@ -10,10 +10,19 @@ mod ssh_auth;
 use pty::PtyState;
 use sftp::SftpState;
 use ssh::SshState;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例守护：重复启动时不闪退，自动唤起已存在的主窗口
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         // 文件选择器：界面上「选择私钥文件」用它（前端 @tauri-apps/plugin-dialog）
         .plugin(tauri_plugin_dialog::init())
         .manage(PtyState::default())

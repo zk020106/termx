@@ -60,6 +60,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 				rightClick: state.rightClick,
 				trimNewline: state.trimNewline,
 				scheme: state.scheme,
+				sftpFollowActiveTab: state.sftpFollowActiveTab,
 			},
 			security: {
 				keychain: state.keychain,

@@ -10,7 +10,6 @@ import { StatusDot } from "@/components/ui/Display";
 import { Input } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Overlay";
 import {
-	CONNECTION_LABEL,
 	type Host,
 	type SessionTab,
 	type SplitLayout,
@@ -18,7 +17,8 @@ import {
 } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { getHostVisual } from "@/lib/hostVisual";
-import { useHostStatus, connVisual } from "@/lib/status";
+import { probeHost } from "@/lib/probe";
+import { useHostStatus } from "@/lib/status";
 import { useForwardsStore } from "@/store/forwards";
 import { filterHosts, useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
@@ -69,6 +69,12 @@ interface TabMenuState {
 	tabId: string;
 }
 
+interface HostMenuState {
+	x: number;
+	y: number;
+	host: Host;
+}
+
 export default function Workspace() {
 	const tabs = useSessionsStore((s) => s.tabs);
 	const panes = useSessionsStore((s) => s.panes);
@@ -87,12 +93,18 @@ export default function Workspace() {
 	const embeddedSftpOpen = useUiStore((s) => s.embeddedSftpOpen);
 	const toggleEmbeddedSftp = useUiStore((s) => s.toggleEmbeddedSftp);
 	const rightClick = useSettingsStore((s) => s.rightClick);
+	const sftpFollowActiveTab = useSettingsStore((s) => s.sftpFollowActiveTab);
+	const setTerminal = useSettingsStore((s) => s.setTerminal);
 
 	const [searchOpen, setSearchOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	const [match, setMatch] = useState<TerminalMatchInfo>({ index: -1, count: 0 });
 	const [menu, setMenu] = useState<MenuState | null>(null);
 	const [tabMenu, setTabMenu] = useState<TabMenuState | null>(null);
+	const [hostMenu, setHostMenu] = useState<HostMenuState | null>(null);
+	const [deleteConfirmHost, setDeleteConfirmHost] = useState<Host | null>(null);
+	const [forwardHostFilter, setForwardHostFilter] = useState<string | null>(null);
+	const [pinnedSftpTabId, setPinnedSftpTabId] = useState<string | null>(null);
 	const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
 	const [renameValue, setRenameValue] = useState("");
 	const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null);
@@ -109,6 +121,27 @@ export default function Workspace() {
 	const gridPanes = activeTab ? panesForTab(activeTab, panes) : [];
 	const focusId = gridPanes.some((p) => p.id === focusedPaneId) ? focusedPaneId : (gridPanes[0]?.id ?? "");
 	const broadcasting = Boolean(activeTab?.broadcasting);
+
+	/** SFTP 挂载的实际会话：受 settings.sftpFollowActiveTab 影响 */
+	const effectiveSftpTab = useMemo(() => {
+		if (sftpFollowActiveTab) {
+			return activeTab ?? tabs[0] ?? null;
+		}
+		if (pinnedSftpTabId) {
+			const found = tabs.find((t) => t.id === pinnedSftpTabId);
+			if (found) return found;
+		}
+		return activeTab ?? tabs[0] ?? null;
+	}, [sftpFollowActiveTab, pinnedSftpTabId, activeTab, tabs]);
+
+	const effectiveSftpHost = useMemo(() => {
+		if (!effectiveSftpTab?.hostId) return null;
+		return hostStore.hosts.find((h) => h.id === effectiveSftpTab.hostId) ?? null;
+	}, [effectiveSftpTab?.hostId, hostStore.hosts]);
+
+	const effectiveSftpHostLabel = effectiveSftpHost
+		? `${effectiveSftpHost.username}@${effectiveSftpHost.name}`
+		: (effectiveSftpTab?.title ?? "本地终端");
 
 	const isMaximized = Boolean(maximizedPaneId && gridPanes.some((p) => p.id === maximizedPaneId));
 	const effectiveMaximizedPaneId = isMaximized ? maximizedPaneId : null;
@@ -202,6 +235,14 @@ export default function Workspace() {
 				}
 				if (tabMenu) {
 					setTabMenu(null);
+					return;
+				}
+				if (hostMenu) {
+					setHostMenu(null);
+					return;
+				}
+				if (deleteConfirmHost) {
+					setDeleteConfirmHost(null);
 					return;
 				}
 				if (renamingTabId) {
@@ -350,15 +391,117 @@ export default function Workspace() {
 				setActiveTab(live.id);
 				const first = panesOfTab(live.id)[0];
 				if (first) focusPane(first.id);
+				setPinnedSftpTabId(live.id);
 				toast({ title: `已切到 ${host.name} 的会话`, tone: "default" });
 				return;
 			}
 			const newTabId = useSessionsStore.getState().openSession(host.id);
 			setActiveTab(newTabId);
+			setPinnedSftpTabId(newTabId);
 			toast({ title: `正在连接 ${host.name}`, description: `${host.username}@${host.hostname}:${host.port}`, tone: "default" });
 		},
 		[setActiveTab, focusPane],
 	);
+
+	const onOpenHostInNewTab = useCallback(
+		(host: Host) => {
+			const newTabId = useSessionsStore.getState().openSession(host.id);
+			setActiveTab(newTabId);
+			setPinnedSftpTabId(newTabId);
+			toast({ title: `已在新标签连接 ${host.name}`, tone: "default" });
+		},
+		[setActiveTab],
+	);
+
+	const onSplitWithHost = useCallback(
+		(host: Host, direction: "horizontal" | "vertical") => {
+			if (!activeTab) {
+				onOpenHostInNewTab(host);
+				return;
+			}
+			if (effectiveMaximizedPaneId) setMaximizedPaneId(null);
+			const newPaneId = useSessionsStore.getState().splitPaneWithHost(activeTab.id, host.id, direction);
+			if (!newPaneId) {
+				toast({ title: "已达到最大分屏数 (最多 4 格)", tone: "warning" });
+				return;
+			}
+			toast({
+				title: direction === "horizontal" ? `已向右分屏连接 ${host.name}` : `已向下分屏连接 ${host.name}`,
+				tone: "default",
+			});
+		},
+		[activeTab, effectiveMaximizedPaneId, onOpenHostInNewTab],
+	);
+
+	const handleOpenSftp = useCallback(
+		(host: Host) => {
+			let target = liveTabForHost(host.id);
+			if (!target) {
+				const newTabId = useSessionsStore.getState().openSession(host.id);
+				target = useSessionsStore.getState().tabs.find((t) => t.id === newTabId) ?? null;
+			}
+			if (target) {
+				setPinnedSftpTabId(target.id);
+				if (sftpFollowActiveTab) {
+					setActiveTab(target.id);
+				}
+			}
+			if (!useUiStore.getState().embeddedSftpOpen) {
+				useUiStore.getState().toggleEmbeddedSftp();
+			}
+			toast({ title: `已激活 ${host.name} 的 SFTP 文件管理`, tone: "default" });
+		},
+		[sftpFollowActiveTab, setActiveTab],
+	);
+
+	const handleOpenForward = useCallback((host: Host) => {
+		setForwardHostFilter(host.id);
+		useUiStore.getState().setSidebarOpen(true);
+		useUiStore.getState().setActivity("forward");
+		toast({ title: `已切换至 ${host.name} 的端口转发`, tone: "default" });
+	}, []);
+
+	const handleProbeHost = useCallback(
+		async (host: Host) => {
+			toast({ title: `正在探测 ${host.name} 的网络连通性…`, tone: "default" });
+			try {
+				const report = await probeHost({ id: host.id, host: host.hostname, port: host.port });
+				if (report) {
+					if (report.reachable) {
+						const latency = Math.round(report.median_ms);
+						useHostsStore.getState().upsertHost({ ...host, reachable: true, latencyMs: latency });
+						toast({
+							title: `${host.name} 探测成功`,
+							description: `TCP 建连 ${latency}ms (丢包 ${Math.round(report.loss * 100)}%)`,
+							tone: "success",
+						});
+					} else {
+						useHostsStore.getState().upsertHost({ ...host, reachable: false });
+						toast({
+							title: `${host.name} 无法连接`,
+							description: report.error ?? "连接超时或对端关闭",
+							tone: "danger",
+						});
+					}
+				} else {
+					toast({ title: "已在网页模式中模拟探测", description: "原生探测需在客户端运行", tone: "warning" });
+				}
+			} catch (e) {
+				toast({ title: "探测失败", description: String(e), tone: "danger" });
+			}
+		},
+		[],
+	);
+
+	const handleHostContextMenu = useCallback((event: ReactMouseEvent, host: Host) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setHostMenu({
+			x: Math.min(event.clientX, window.innerWidth - 220),
+			y: Math.min(event.clientY, window.innerHeight - 380),
+			host,
+		});
+	}, []);
 
 	/* 真实会话的生命周期 → 标签状态更新 */
 	useEffect(
@@ -419,14 +562,23 @@ export default function Workspace() {
 		: "grid-cols-1 grid-rows-1";
 	const activeHostLabel = activeHost ? `${activeHost.username}@${activeHost.name}` : "本地终端";
 
+	const navigate = useNavigate();
+
 	const sidebarContent = useMemo(() => {
 		switch (activity) {
 			case "snippets":
-				return <SnippetsSidebar />;
+				return <SnippetsSidebar activeHost={activeHost} />;
 			case "forward":
-				return <ForwardSidebar />;
+				return (
+					<ForwardSidebar
+						activeHost={activeHost}
+						filterHostId={forwardHostFilter}
+						onClearFilter={() => setForwardHostFilter(null)}
+						onOpenAddRule={(hostId) => navigate(`/forward?hostId=${hostId ?? activeHost?.id ?? ""}`)}
+					/>
+				);
 			case "keys":
-				return <KeysSidebar />;
+				return <KeysSidebar activeHost={activeHost} />;
 			case "transfers":
 				return <TransfersSidebar />;
 			case "sftp":
@@ -438,12 +590,27 @@ export default function Workspace() {
 						hostSearchRef={hostSearchRef}
 						activeHostId={activeTab?.hostId}
 						onOpenHost={onOpenHost}
+						onOpenHostInNewTab={onOpenHostInNewTab}
+						onOpenSftp={handleOpenSftp}
+						onOpenForward={handleOpenForward}
+						onHostContextMenu={handleHostContextMenu}
 						onAddHost={() => setEditingHostId("new")}
 						onEditHost={(h) => setEditingHostId(h.id)}
 					/>
 				);
 		}
-	}, [activity, activeTab?.hostId, activeHost?.name, onOpenHost]);
+	}, [
+		activity,
+		activeTab,
+		activeHost,
+		forwardHostFilter,
+		onOpenHost,
+		onOpenHostInNewTab,
+		handleOpenSftp,
+		handleOpenForward,
+		handleHostContextMenu,
+		navigate,
+	]);
 
 	return (
 		<WindowChrome>
@@ -579,6 +746,11 @@ export default function Workspace() {
 						<div className="min-h-0 flex-1 overflow-hidden">
 							<HostWorkbench
 								onOpenHost={onOpenHost}
+								onOpenHostInNewTab={onOpenHostInNewTab}
+								onSplitWithHost={onSplitWithHost}
+								onOpenSftp={handleOpenSftp}
+								onOpenForward={handleOpenForward}
+								onHostContextMenu={handleHostContextMenu}
 								onNewTerminal={onNewTab}
 								onAddHost={(groupId) => {
 									setEditingGroupId(groupId ?? null);
@@ -643,12 +815,13 @@ export default function Workspace() {
 
 							{/* 终端分屏网格 + 底部内嵌 SFTP */}
 							<div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-								<div className={cn("grid min-h-0 flex-1 gap-px bg-border", gridClass)}>
+								<div className={cn("grid min-h-0 flex-1 gap-px bg-border/40", gridClass)}>
 									{displayPanes.map((pane) => (
 										<TerminalPane
 											key={pane.id}
 											pane={pane}
 											focused={pane.id === focusId}
+											isSplit={gridPanes.length > 1}
 											broadcasting={broadcasting}
 											offline={pane.status === "disconnected" || pane.status === "failed"}
 											status={pane.status}
@@ -671,13 +844,34 @@ export default function Workspace() {
 
 								{embeddedSftpOpen && (
 									<EmbeddedSftpDrawer
-										sessionKey={activeTab?.sessionKey ?? null}
-										status={activeTab?.status}
-										hostTitle={activeHostLabel}
-										hostId={activeTab?.hostId ?? null}
+										sessionKey={effectiveSftpTab?.sessionKey ?? null}
+										status={effectiveSftpTab?.status}
+										hostTitle={effectiveSftpHostLabel}
+										hostId={effectiveSftpTab?.hostId ?? null}
 										onClose={toggleEmbeddedSftp}
 										onReconnect={() => {
-											if (activeTab) useSessionsStore.getState().reconnectTab(activeTab.id);
+											if (effectiveSftpTab) useSessionsStore.getState().reconnectTab(effectiveSftpTab.id);
+										}}
+										isFollowing={sftpFollowActiveTab}
+										onToggleFollow={() => {
+											setTerminal({ sftpFollowActiveTab: !sftpFollowActiveTab });
+											toast({
+												title: !sftpFollowActiveTab ? "SFTP 已开启跟随活跃终端" : "SFTP 已锁定当前会话",
+												tone: "default",
+											});
+										}}
+										availableSessions={tabs.map((t) => ({
+											tabId: t.id,
+											sessionKey: t.sessionKey,
+											hostId: t.hostId,
+											title: t.title,
+											status: t.status,
+										}))}
+										onSelectSession={(tabId) => {
+											setPinnedSftpTabId(tabId);
+											if (sftpFollowActiveTab) {
+												setActiveTab(tabId);
+											}
 										}}
 									/>
 								)}
@@ -697,7 +891,7 @@ export default function Workspace() {
 								}}
 							/>
 							<div
-								className="fixed z-50 w-[210px] rounded-card border border-border bg-surface-raised py-1 shadow-xl shadow-black/30"
+								className="fixed z-50 w-[215px] rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover backdrop-blur-md ring-1 ring-black/5"
 								style={{ left: menu.x, top: menu.y }}
 							>
 								<MenuHeader title="终端" subtitle={activeHost?.name ?? "本地终端"} />
@@ -794,7 +988,7 @@ export default function Workspace() {
 								}}
 							/>
 							<div
-								className="fixed z-50 w-[180px] rounded-card border border-border bg-surface-raised py-1 shadow-xl shadow-black/30"
+								className="fixed z-50 w-[185px] rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover backdrop-blur-md ring-1 ring-black/5"
 								style={{ left: tabMenu.x, top: tabMenu.y }}
 							>
 								<MenuHeader title="会话标签" subtitle={tabs.find((t) => t.id === tabMenu.tabId)?.title ?? ""} />
@@ -859,6 +1053,125 @@ export default function Workspace() {
 							</div>
 						</>
 					)}
+
+					{/* 主机全局右键上下文菜单 */}
+					{hostMenu && (
+						<>
+							<div
+								className="fixed inset-0 z-40"
+								onMouseDown={() => setHostMenu(null)}
+								onContextMenu={(event) => {
+									event.preventDefault();
+									setHostMenu(null);
+								}}
+							/>
+							<div
+								className="fixed z-50 w-[215px] rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover backdrop-blur-md ring-1 ring-black/5"
+								style={{ left: hostMenu.x, top: hostMenu.y }}
+							>
+								<MenuHeader title="主机" subtitle={`${hostMenu.host.username}@${hostMenu.host.name}`} />
+								<MenuItem
+									icon="icon-[lucide--terminal]"
+									label="连接终端"
+									onClick={() => {
+										onOpenHost(hostMenu.host);
+										setHostMenu(null);
+									}}
+								/>
+								<MenuItem
+									icon="icon-[lucide--plus-square]"
+									label="在新标签打开"
+									onClick={() => {
+										onOpenHostInNewTab(hostMenu.host);
+										setHostMenu(null);
+									}}
+								/>
+								{!isVaults && (
+									<>
+										<MenuItem
+											icon="icon-[lucide--columns-2]"
+											label="向右分屏打开"
+											onClick={() => {
+												onSplitWithHost(hostMenu.host, "horizontal");
+												setHostMenu(null);
+											}}
+										/>
+										<MenuItem
+											icon="icon-[lucide--rows-2]"
+											label="向下分屏打开"
+											onClick={() => {
+												onSplitWithHost(hostMenu.host, "vertical");
+												setHostMenu(null);
+											}}
+										/>
+									</>
+								)}
+								<MenuSeparator />
+								<MenuItem
+									icon="icon-[lucide--folder-tree]"
+									label="打开 SFTP 文件"
+									onClick={() => {
+										handleOpenSftp(hostMenu.host);
+										setHostMenu(null);
+									}}
+								/>
+								<MenuItem
+									icon="icon-[lucide--arrow-left-right]"
+									label="端口转发规则"
+									onClick={() => {
+										handleOpenForward(hostMenu.host);
+										setHostMenu(null);
+									}}
+								/>
+								<MenuItem
+									icon="icon-[lucide--activity]"
+									label="网络测速 (TCP 探测)"
+									onClick={() => {
+										void handleProbeHost(hostMenu.host);
+										setHostMenu(null);
+									}}
+								/>
+								<MenuSeparator />
+								<MenuItem
+									icon="icon-[lucide--copy]"
+									label="复制 IP 地址"
+									onClick={() => {
+										void navigator.clipboard?.writeText(hostMenu.host.hostname).catch(() => undefined);
+										toast({ title: `已复制 IP：${hostMenu.host.hostname}`, tone: "success" });
+										setHostMenu(null);
+									}}
+								/>
+								<MenuItem
+									icon="icon-[lucide--terminal-square]"
+									label="复制 SSH 登录命令"
+									onClick={() => {
+										const cmd = `ssh -p ${hostMenu.host.port} ${hostMenu.host.username}@${hostMenu.host.hostname}`;
+										void navigator.clipboard?.writeText(cmd).catch(() => undefined);
+										toast({ title: "已复制 SSH 命令", description: cmd, tone: "success" });
+										setHostMenu(null);
+									}}
+								/>
+								<MenuSeparator />
+								<MenuItem
+									icon="icon-[lucide--settings-2]"
+									label="编辑主机配置…"
+									onClick={() => {
+										setEditingHostId(hostMenu.host.id);
+										setHostMenu(null);
+									}}
+								/>
+								<MenuItem
+									icon="icon-[lucide--trash-2]"
+									label="删除主机"
+									danger
+									onClick={() => {
+										setDeleteConfirmHost(hostMenu.host);
+										setHostMenu(null);
+									}}
+								/>
+							</div>
+						</>
+					)}
 				</section>
 			</div>
 
@@ -879,6 +1192,43 @@ export default function Workspace() {
 					}
 				}}
 			/>
+
+			{/* 主机删除确认弹窗 */}
+			<Modal
+				open={deleteConfirmHost !== null}
+				onClose={() => setDeleteConfirmHost(null)}
+				title="删除主机"
+				footer={
+					<div className="flex items-center gap-2">
+						<Button size="sm" onClick={() => setDeleteConfirmHost(null)}>
+							取消
+						</Button>
+						<Button
+							size="sm"
+							variant="danger"
+							onClick={() => {
+								if (deleteConfirmHost) {
+									hostStore.removeHost(deleteConfirmHost.id);
+									toast({ title: `已删除主机「${deleteConfirmHost.name}」`, tone: "default" });
+								}
+								setDeleteConfirmHost(null);
+							}}
+						>
+							确认删除
+						</Button>
+					</div>
+				}
+			>
+				<div className="space-y-2">
+					<div className="text-surface-foreground">
+						确认从主机库中删除「<span className="font-semibold text-danger">{deleteConfirmHost?.name}</span>」吗？
+					</div>
+					<div className="text-[11px] text-faint">
+						连接地址：{deleteConfirmHost?.username}@{deleteConfirmHost?.hostname}:{deleteConfirmHost?.port}。
+						此操作不可撤销，正在进行的终端会话仍可保留至关闭。
+					</div>
+				</div>
+			</Modal>
 		</WindowChrome>
 	);
 }
@@ -888,12 +1238,20 @@ export default function Workspace() {
 function HostsSidebar({
 	activeHostId,
 	onOpenHost,
+	onOpenHostInNewTab,
+	onOpenSftp,
+	onOpenForward,
+	onHostContextMenu,
 	hostSearchRef,
 	onAddHost,
 	onEditHost,
 }: {
 	activeHostId?: string | null;
 	onOpenHost: (host: Host) => void;
+	onOpenHostInNewTab?: (host: Host) => void;
+	onOpenSftp?: (host: Host) => void;
+	onOpenForward?: (host: Host) => void;
+	onHostContextMenu?: (event: ReactMouseEvent, host: Host) => void;
 	hostSearchRef: React.RefObject<HTMLInputElement | null>;
 	onAddHost?: () => void;
 	onEditHost?: (host: Host) => void;
@@ -936,20 +1294,24 @@ function HostsSidebar({
 	);
 
 	const handleOpenSftp = (host: Host) => {
-		onOpenHost(host);
-		if (!embeddedSftpOpen) {
-			toggleEmbeddedSftp();
+		if (onOpenSftp) {
+			onOpenSftp(host);
+		} else {
+			onOpenHost(host);
+			if (!embeddedSftpOpen) {
+				toggleEmbeddedSftp();
+			}
 		}
 	};
 
 	return (
 		<div className="flex h-full flex-col bg-surface-sunk">
-			{/* 顶栏：标题 + 数量徽标 + 新建/全部跳转 */}
-			<div className="flex h-9 shrink-0 items-center justify-between border-b border-border/80 px-3">
-				<div className="flex items-center gap-1.5">
-					<span className="icon-[lucide--server] size-3.5 text-primary" />
-					<span className="text-[12px] font-semibold tracking-tight text-surface-foreground">主机库</span>
-					<span className="rounded-full bg-surface-raised px-1.5 py-0.2 font-mono text-[9px] text-faint">
+			{/* 顶栏：标题 + 数量徽标 + 新建/工作台视图 */}
+			<div className="flex h-10 shrink-0 items-center justify-between border-b border-border/70 px-3 bg-surface-sunk/60">
+				<div className="flex items-center gap-2">
+					<span className="icon-[lucide--server] size-4 text-primary" />
+					<span className="text-[12px] font-semibold text-surface-foreground">主机列表</span>
+					<span className="rounded-full bg-surface px-1.5 py-0.2 font-mono text-[9px] font-medium text-faint border border-border/50">
 						{hostStore.hosts.length}
 					</span>
 				</div>
@@ -957,7 +1319,7 @@ function HostsSidebar({
 					<button
 						type="button"
 						onClick={onAddHost ? onAddHost : () => navigate("/hosts/new")}
-						className="flex size-5.5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors cursor-pointer"
+						className="flex size-6 items-center justify-center rounded-md text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
 						title="新建主机"
 					>
 						<span className="icon-[lucide--plus] size-3.5" />
@@ -965,69 +1327,68 @@ function HostsSidebar({
 					<button
 						type="button"
 						onClick={() => useSessionsStore.getState().setActiveTab("vaults")}
-						className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10.5px] text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors cursor-pointer"
-						title="前往主机库大本营"
+						className="flex size-6 items-center justify-center rounded-md text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
+						title="切换至主机工作台网格大视图"
 					>
-						<span>大本营</span>
-						<span className="icon-[lucide--chevron-right] size-3" />
+						<span className="icon-[lucide--layout-grid] size-3.5" />
 					</button>
 				</div>
 			</div>
 
-			{/* 搜索与快捷筛选条 */}
-			<div className="border-b border-border/50 p-2 space-y-1.5">
+			{/* 搜索与分段筛选条 */}
+			<div className="border-b border-border/60 p-2 space-y-1.5 bg-surface/30">
 				<div className="relative">
-					<span className="icon-[lucide--search] pointer-events-none absolute top-1/2 left-2.5 size-3 -translate-y-1/2 text-muted" />
+					<span className="icon-[lucide--search] pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted" />
 					<input
 						ref={hostSearchRef}
 						value={hostStore.query}
 						onChange={(e) => hostStore.setQuery(e.target.value)}
 						placeholder="搜索主机名、IP、标签…"
-						className="h-7 w-full rounded border border-border bg-surface pr-12 pl-7 font-sans text-[11px] text-surface-foreground transition-colors placeholder:text-faint focus:border-primary focus:outline-none"
+						className="h-7.5 w-full rounded-lg border border-border/70 bg-surface pr-12 pl-8 font-sans text-[11.5px] text-surface-foreground transition-all placeholder:text-faint focus:border-primary focus:bg-surface-raised focus:outline-none shadow-2xs"
 					/>
 					{hostStore.query ? (
 						<button
 							type="button"
 							onClick={() => hostStore.setQuery("")}
-							className="absolute top-1/2 right-1.5 -translate-y-1/2 flex size-4 items-center justify-center rounded-full text-muted hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
+							className="absolute top-1/2 right-2 -translate-y-1/2 flex size-4 items-center justify-center rounded-full text-muted hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
 						>
 							<span className="icon-[lucide--x] size-2.5" />
 						</button>
 					) : (
-						<kbd className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 font-mono text-[9px] text-muted">
+						<kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 font-mono text-[9px] text-faint bg-surface-raised px-1 py-0.2 rounded border border-border/40">
 							Ctrl P
 						</kbd>
 					)}
 				</div>
 
-				{/* 快捷视图胶囊 */}
-				<div className="flex items-center gap-1">
+				{/* 现代分段切换胶囊 (Segmented Control) */}
+				<div className="grid grid-cols-2 gap-1 rounded-lg bg-surface-sunk p-0.5 border border-border/50 text-[10.5px]">
 					<button
 						type="button"
 						onClick={() => setFilterScope("all")}
 						className={cn(
-							"flex h-5 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium transition-all cursor-pointer border select-none",
+							"flex h-5.5 items-center justify-center gap-1.5 rounded-md font-medium transition-all cursor-pointer select-none",
 							filterScope === "all"
-								? "border-primary/40 bg-primary/15 text-primary font-semibold"
-								: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
+								? "bg-surface text-surface-foreground font-semibold shadow-2xs border border-border/40"
+								: "text-muted hover:text-surface-foreground",
 						)}
 					>
-						全部
-						<span className="font-mono text-[9px] opacity-75">{hostStore.hosts.length}</span>
+						<span>全部</span>
+						<span className="font-mono text-[9.5px] opacity-70">({hostStore.hosts.length})</span>
 					</button>
 					<button
 						type="button"
 						onClick={() => setFilterScope("online")}
 						className={cn(
-							"flex h-5 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium transition-all cursor-pointer border select-none",
+							"flex h-5.5 items-center justify-center gap-1.5 rounded-md font-medium transition-all cursor-pointer select-none",
 							filterScope === "online"
-								? "border-primary/40 bg-primary/15 text-primary font-semibold"
-								: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
+								? "bg-surface text-surface-foreground font-semibold shadow-2xs border border-border/40"
+								: "text-muted hover:text-surface-foreground",
 						)}
 					>
-						<span className="size-1.5 rounded-full bg-success inline-block" />
-						在线
-						<span className="font-mono text-[9px] opacity-75">{onlineCount}</span>
+						<span className="size-1.5 rounded-full bg-success inline-block shrink-0" />
+						<span>在线</span>
+						<span className="font-mono text-[9.5px] opacity-70">({onlineCount})</span>
 					</button>
 				</div>
 			</div>
@@ -1050,8 +1411,11 @@ function HostsSidebar({
 										host={host}
 										selected={host.id === activeHostId}
 										onOpen={() => onOpenHost(host)}
+										onOpenInNewTab={() => onOpenHostInNewTab?.(host)}
 										onOpenSftp={() => handleOpenSftp(host)}
+										onOpenForward={() => onOpenForward?.(host)}
 										onEdit={() => (onEditHost ? onEditHost(host) : navigate(`/hosts/${host.id}/edit`))}
+										onContextMenu={(e) => onHostContextMenu?.(e, host)}
 									/>
 								))}
 							</div>
@@ -1080,8 +1444,11 @@ function HostsSidebar({
 													host={host}
 													selected={host.id === activeHostId}
 													onOpen={() => onOpenHost(host)}
+													onOpenInNewTab={() => onOpenHostInNewTab?.(host)}
 													onOpenSftp={() => handleOpenSftp(host)}
+													onOpenForward={() => onOpenForward?.(host)}
 													onEdit={() => (onEditHost ? onEditHost(host) : navigate(`/hosts/${host.id}/edit`))}
+													onContextMenu={(e) => onHostContextMenu?.(e, host)}
 												/>
 											))}
 										</div>
@@ -1107,8 +1474,11 @@ function HostsSidebar({
 												host={host}
 												selected={host.id === activeHostId}
 												onOpen={() => onOpenHost(host)}
+												onOpenInNewTab={() => onOpenHostInNewTab?.(host)}
 												onOpenSftp={() => handleOpenSftp(host)}
+												onOpenForward={() => onOpenForward?.(host)}
 												onEdit={() => (onEditHost ? onEditHost(host) : navigate(`/hosts/${host.id}/edit`))}
+												onContextMenu={(e) => onHostContextMenu?.(e, host)}
 											/>
 										))}
 									</div>
@@ -1166,7 +1536,7 @@ function HostsSidebar({
 	);
 }
 
-function SnippetsSidebar() {
+function SnippetsSidebar({ activeHost }: { activeHost?: Host | null }) {
 	const snippets = useSnippetsStore((s) => s.snippets);
 	const [query, setQuery] = useState("");
 
@@ -1190,7 +1560,10 @@ function SnippetsSidebar() {
 	return (
 		<div className="flex h-full flex-col">
 			<div className="flex h-9 shrink-0 items-center justify-between border-b border-border px-3">
-				<span className="text-[12px] font-medium tracking-tight text-surface-foreground">命令片段</span>
+				<div className="flex items-center gap-1.5">
+					<span className="icon-[lucide--code-2] size-3.5 text-primary" />
+					<span className="text-[12px] font-medium tracking-tight text-surface-foreground">命令片段</span>
+				</div>
 				<Link to="/snippets" className="text-[11px] text-muted hover:text-surface-foreground">
 					管理 &gt;
 				</Link>
@@ -1226,6 +1599,7 @@ function SnippetsSidebar() {
 									className="h-5 px-2 text-[10px]"
 									icon="icon-[lucide--play]"
 									onClick={() => handleSendSnippet(s.command, s.name)}
+									title={`发送到当前活跃终端${activeHost ? ` (${activeHost.name})` : ""}`}
 								>
 									执行
 								</Button>
@@ -1249,79 +1623,191 @@ function SnippetsSidebar() {
 	);
 }
 
-function ForwardSidebar() {
+function ForwardSidebar({
+	activeHost,
+	filterHostId,
+	onClearFilter,
+	onOpenAddRule,
+}: {
+	activeHost?: Host | null;
+	filterHostId?: string | null;
+	onClearFilter?: () => void;
+	onOpenAddRule?: (hostId?: string) => void;
+}) {
 	const rules = useForwardsStore((s) => s.rules);
 	const setRuleState = useForwardsStore((s) => s.setRuleState);
+	const hostStore = useHostsStore();
+
+	const effectiveHostId = filterHostId ?? activeHost?.id ?? null;
+	const [scope, setScope] = useState<"all" | "host">(effectiveHostId ? "host" : "all");
+
+	useEffect(() => {
+		if (filterHostId) setScope("host");
+	}, [filterHostId]);
+
+	const hostInfo = effectiveHostId ? hostStore.hosts.find((h) => h.id === effectiveHostId) : null;
+	const hostRulesCount = effectiveHostId ? rules.filter((r) => r.hostId === effectiveHostId).length : 0;
+
+	const displayedRules = useMemo(() => {
+		if (scope === "host" && effectiveHostId) {
+			return rules.filter((r) => r.hostId === effectiveHostId);
+		}
+		return rules;
+	}, [rules, scope, effectiveHostId]);
 
 	return (
 		<div className="flex h-full flex-col">
 			<div className="flex h-9 shrink-0 items-center justify-between border-b border-border px-3">
-				<span className="text-[12px] font-medium tracking-tight text-surface-foreground">端口转发</span>
-				<Link to="/forward" className="text-[11px] text-muted hover:text-surface-foreground">
-					管理 &gt;
-				</Link>
+				<div className="flex items-center gap-1.5">
+					<span className="icon-[lucide--arrow-left-right] size-3.5 text-primary" />
+					<span className="text-[12px] font-medium tracking-tight text-surface-foreground">端口转发</span>
+				</div>
+				<div className="flex items-center gap-1">
+					{onOpenAddRule && (
+						<button
+							type="button"
+							onClick={() => onOpenAddRule(effectiveHostId ?? undefined)}
+							className="flex size-5.5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors cursor-pointer"
+							title="新建转发规则"
+						>
+							<span className="icon-[lucide--plus] size-3.5" />
+						</button>
+					)}
+					<Link to="/forward" className="text-[11px] text-muted hover:text-surface-foreground">
+						管理 &gt;
+					</Link>
+				</div>
+			</div>
+
+			{/* 范围切换胶囊 */}
+			<div className="flex items-center gap-1 border-b border-border/60 p-2">
+				<button
+					type="button"
+					onClick={() => {
+						setScope("all");
+						onClearFilter?.();
+					}}
+					className={cn(
+						"flex h-5 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium transition-all cursor-pointer border select-none",
+						scope === "all"
+							? "border-primary/40 bg-primary/15 text-primary font-semibold"
+							: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
+					)}
+				>
+					全部规则
+					<span className="font-mono text-[9px] opacity-75">{rules.length}</span>
+				</button>
+
+				{hostInfo && (
+					<button
+						type="button"
+						onClick={() => setScope("host")}
+						className={cn(
+							"flex h-5 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium transition-all cursor-pointer border select-none truncate max-w-[130px]",
+							scope === "host"
+								? "border-primary/40 bg-primary/15 text-primary font-semibold"
+								: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
+						)}
+						title={`当前主机：${hostInfo.name}`}
+					>
+						<span className="truncate">{hostInfo.name}</span>
+						<span className="font-mono text-[9px] opacity-75 shrink-0">{hostRulesCount}</span>
+					</button>
+				)}
 			</div>
 
 			<div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2 space-y-1">
-				{rules.length === 0 ? (
-					<div className="px-2 py-4 text-center text-[11px] text-faint">
-						暂无转发规则。
-						<Link to="/forward" className="text-primary hover:underline ml-1">
-							添加规则
-						</Link>
+				{displayedRules.length === 0 ? (
+					<div className="px-2 py-6 text-center text-[11px] text-faint">
+						{scope === "host" && hostInfo ? (
+							<>
+								主机「{hostInfo.name}」暂无转发规则
+								<div className="mt-2">
+									<Button
+										size="sm"
+										variant="primary"
+										className="h-6 px-2 text-[10.5px]"
+										icon="icon-[lucide--plus]"
+										onClick={() => onOpenAddRule?.(hostInfo.id)}
+									>
+										为该主机添加规则
+									</Button>
+								</div>
+							</>
+						) : (
+							<>
+								暂无转发规则。
+								<Link to="/forward" className="text-primary hover:underline ml-1">
+									添加规则
+								</Link>
+							</>
+						)}
 					</div>
 				) : (
-					rules.map((rule) => (
-						<div
-							key={rule.id}
-							className="rounded border border-border bg-surface p-2 text-[11.5px] transition-colors"
-						>
-							<div className="flex items-center justify-between">
-								<div className="flex items-center gap-1.5">
-									<span
-										className={cn(
-											"size-1.5 rounded-full",
-											rule.state === "running" ? "bg-success" : "bg-muted",
-										)}
-									/>
-									<span className="font-medium text-surface-foreground">{rule.name || "未命名规则"}</span>
+					displayedRules.map((rule) => {
+						const ruleHost = hostStore.hosts.find((h) => h.id === rule.hostId);
+						return (
+							<div
+								key={rule.id}
+								className="rounded border border-border bg-surface p-2 text-[11.5px] transition-colors"
+							>
+								<div className="flex items-center justify-between">
+									<div className="flex items-center gap-1.5 min-w-0">
+										<span
+											className={cn(
+												"size-1.5 rounded-full shrink-0",
+												rule.state === "running" ? "bg-success" : "bg-muted",
+											)}
+										/>
+										<span className="font-medium text-surface-foreground truncate">{rule.name || "未命名规则"}</span>
+									</div>
+									<span className="font-mono text-[9.5px] text-faint uppercase shrink-0">{rule.type}</span>
 								</div>
-								<span className="font-mono text-[9.5px] text-faint uppercase">{rule.type}</span>
+								<div className="mt-1 flex items-center justify-between font-mono text-[10px] text-muted">
+									<span className="truncate">
+										:{rule.bindPort} → {rule.targetHost}:{rule.targetPort}
+									</span>
+									{ruleHost && scope === "all" && (
+										<span className="rounded bg-surface-raised px-1 py-0.2 text-[8.5px] text-faint shrink-0 max-w-[80px] truncate">
+											{ruleHost.name}
+										</span>
+									)}
+								</div>
+								<div className="mt-2 flex items-center justify-end">
+									<Button
+										size="sm"
+										variant={rule.state === "running" ? "danger" : "default"}
+										className="h-5 px-2 text-[10px]"
+										onClick={() => {
+											setRuleState(rule.id, rule.state === "running" ? "stopped" : "running");
+											toast({
+												title: rule.state === "running" ? `已停止 ${rule.name}` : `已启动 ${rule.name}`,
+												tone: "default",
+											});
+										}}
+									>
+										{rule.state === "running" ? "停止" : "启动"}
+									</Button>
+								</div>
 							</div>
-							<div className="mt-1 font-mono text-[10px] text-muted">
-								:{rule.bindPort} → {rule.targetHost}:{rule.targetPort}
-							</div>
-							<div className="mt-2 flex items-center justify-end">
-								<Button
-									size="sm"
-									variant={rule.state === "running" ? "danger" : "default"}
-									className="h-5 px-2 text-[10px]"
-									onClick={() => {
-										setRuleState(rule.id, rule.state === "running" ? "stopped" : "running");
-										toast({
-											title: rule.state === "running" ? `已停止 ${rule.name}` : `已启动 ${rule.name}`,
-											tone: "default",
-										});
-									}}
-								>
-									{rule.state === "running" ? "停止" : "启动"}
-								</Button>
-							</div>
-						</div>
-					))
+						);
+					})
 				)}
 			</div>
 		</div>
 	);
 }
 
-function KeysSidebar() {
+function KeysSidebar({ activeHost }: { activeHost?: Host | null }) {
 	const keys = useKeysStore((s) => s.keys);
 
 	return (
 		<div className="flex h-full flex-col">
 			<div className="flex h-9 shrink-0 items-center justify-between border-b border-border px-3">
-				<span className="text-[12px] font-medium tracking-tight text-surface-foreground">密钥管理</span>
+				<div className="flex items-center gap-1.5">
+					<span className="icon-[lucide--key] size-3.5 text-primary" />
+					<span className="text-[12px] font-medium tracking-tight text-surface-foreground">密钥管理</span>
+				</div>
 				<Link to="/keys" className="text-[11px] text-muted hover:text-surface-foreground">
 					管理 &gt;
 				</Link>
@@ -1336,32 +1822,47 @@ function KeysSidebar() {
 						</Link>
 					</div>
 				) : (
-					keys.map((k) => (
-						<div
-							key={k.id}
-							className="rounded border border-border bg-surface p-2 text-[11.5px] transition-colors"
-						>
-							<div className="flex items-center justify-between">
-								<span className="font-medium text-surface-foreground">{k.name}</span>
-								<span className="font-mono text-[9.5px] text-primary">{k.type}</span>
+					keys.map((k) => {
+						const isHostUsing = Boolean(
+							activeHost?.auth?.method === "key" && activeHost.auth.keyId === k.id,
+						);
+						return (
+							<div
+								key={k.id}
+								className={cn(
+									"rounded border bg-surface p-2 text-[11.5px] transition-colors",
+									isHostUsing ? "border-primary/50 shadow-2xs" : "border-border",
+								)}
+							>
+								<div className="flex items-center justify-between">
+									<div className="flex items-center gap-1.5 min-w-0">
+										<span className="font-medium text-surface-foreground truncate">{k.name}</span>
+										{isHostUsing && (
+											<span className="rounded bg-primary/15 px-1 py-0.2 font-mono text-[8.5px] text-primary shrink-0">
+												当前主机使用
+											</span>
+										)}
+									</div>
+									<span className="font-mono text-[9.5px] text-primary shrink-0">{k.type}</span>
+								</div>
+								<div className="mt-1 truncate font-mono text-[10px] text-muted">{k.fingerprint}</div>
+								<div className="mt-2 flex items-center justify-end">
+									<Button
+										size="sm"
+										variant="ghost"
+										className="h-5 px-2 text-[10px]"
+										icon="icon-[lucide--copy]"
+										onClick={() => {
+											void navigator.clipboard?.writeText(k.publicKey).catch(() => undefined);
+											toast({ title: "已复制公钥", tone: "success" });
+										}}
+									>
+										复制公钥
+									</Button>
+								</div>
 							</div>
-							<div className="mt-1 truncate font-mono text-[10px] text-muted">{k.fingerprint}</div>
-							<div className="mt-2 flex items-center justify-end">
-								<Button
-									size="sm"
-									variant="ghost"
-									className="h-5 px-2 text-[10px]"
-									icon="icon-[lucide--copy]"
-									onClick={() => {
-										void navigator.clipboard?.writeText(k.publicKey).catch(() => undefined);
-										toast({ title: "已复制公钥", tone: "success" });
-									}}
-								>
-									复制公钥
-								</Button>
-							</div>
-						</div>
-					))
+						);
+					})
 				)}
 			</div>
 		</div>
@@ -1437,7 +1938,7 @@ function GroupLabel({
 		<button
 			type="button"
 			onClick={onToggle}
-			className="group flex w-full items-center justify-between rounded px-2 py-1 text-left select-none text-[10.5px] font-medium tracking-wide text-muted hover:bg-surface-raised/70 hover:text-surface-foreground transition-colors cursor-pointer"
+			className="group flex w-full items-center justify-between rounded-lg px-2 py-1 text-left select-none text-[11px] font-semibold tracking-tight text-muted hover:bg-surface hover:text-surface-foreground transition-all cursor-pointer"
 		>
 			<div className="flex items-center gap-1.5 min-w-0">
 				{onToggle && (
@@ -1452,7 +1953,7 @@ function GroupLabel({
 				<span className="truncate">{label}</span>
 			</div>
 			{typeof count === "number" && (
-				<span className="rounded-full bg-surface-raised px-1.5 py-0.2 font-mono text-[9px] text-faint group-hover:text-muted">
+				<span className="rounded-full bg-surface-raised px-1.5 py-0.2 font-mono text-[9px] text-faint group-hover:text-muted border border-border/40">
 					{count}
 				</span>
 			)}
@@ -1464,36 +1965,59 @@ function HostItem({
 	host,
 	selected,
 	onOpen,
+	onOpenInNewTab,
 	onOpenSftp,
+	onOpenForward,
 	onEdit,
+	onContextMenu,
 }: {
 	host: Host;
 	selected: boolean;
 	onOpen: () => void;
+	onOpenInNewTab?: () => void;
 	onOpenSftp?: () => void;
+	onOpenForward?: () => void;
 	onEdit?: () => void;
+	onContextMenu?: (e: ReactMouseEvent) => void;
 }) {
 	const status = useHostStatus(host.id, host.reachable);
 	const visual = getHostVisual(host);
+	const forwardCount = useForwardsStore((s) => s.rules.filter((r) => r.hostId === host.id).length);
 
 	return (
 		<div
 			role="button"
 			tabIndex={0}
 			onClick={onOpen}
+			onAuxClick={(e) => {
+				if (e.button === 1 && onOpenInNewTab) {
+					e.preventDefault();
+					onOpenInNewTab();
+				}
+			}}
+			onContextMenu={onContextMenu}
 			onKeyDown={(event) => event.key === "Enter" && onOpen()}
 			className={cn(
-				"group relative mb-1 flex flex-col gap-1 rounded-md px-2.5 py-1.5 text-[12px] transition-all cursor-pointer border select-none",
+				"group relative mb-1.5 flex flex-col gap-1 rounded-xl p-2 text-[11.5px] transition-all cursor-pointer border select-none",
 				selected
-					? "border-primary/40 bg-primary/10 shadow-2xs text-surface-foreground font-medium"
-					: "border-transparent bg-transparent hover:border-border/60 hover:bg-surface text-muted hover:text-surface-foreground",
+					? "border-primary/60 bg-primary/10 text-surface-foreground shadow-host-active ring-1 ring-primary/30"
+					: "border-border/60 bg-surface/60 hover:border-primary/50 hover:bg-surface hover:shadow-host-hover text-muted hover:text-surface-foreground",
 			)}
 		>
-			{/* 顶行：状态点 + 系统/云平台图标 + 主机名 + 星标 + 状态/快捷操作 */}
+			{selected && (
+				<span className="absolute left-0 top-2 bottom-2 w-0.75 rounded-r-full bg-primary" />
+			)}
+
+			{/* 顶行：状态点 + 系统/云平台图标 + 主机名 + 星标 + 转发胶囊/悬浮操作 */}
 			<div className="flex items-center gap-1.5 min-w-0">
-				<StatusDot status={status} size={6} />
+				<StatusDot status={status} size={6} className="shrink-0" />
 				<span className={cn(visual.icon, visual.color, "size-3.5 shrink-0")} title={visual.platformName} />
-				<span className="min-w-0 flex-1 truncate font-sans text-[11.5px] font-medium tracking-tight text-surface-foreground">
+				<span
+					className={cn(
+						"min-w-0 flex-1 truncate font-sans text-[11.5px] tracking-tight",
+						selected ? "font-semibold text-primary" : "font-medium text-surface-foreground group-hover:text-primary transition-colors",
+					)}
+				>
 					{host.name}
 				</span>
 
@@ -1501,36 +2025,25 @@ function HostItem({
 					<span className="icon-[lucide--star] size-3 shrink-0 text-amber-500 fill-amber-500" />
 				)}
 
-				{/* 默认态：显示连接状态/延迟 */}
-				<div className="flex items-center gap-1 group-hover:hidden shrink-0">
-					{status !== "idle" && status !== "disconnected" && (
-						<span
-							className={cn(
-								"text-[9px] font-mono px-1 py-0.2 rounded font-medium",
-								connVisual[status].text,
-								"bg-surface-raised",
-							)}
+				{/* 默认态：仅在配置了端口转发时显露轻量胶囊 */}
+				{forwardCount > 0 && (
+					<div className="flex items-center gap-1 group-hover:hidden shrink-0">
+						<button
+							type="button"
+							onClick={(e) => {
+								e.stopPropagation();
+								onOpenForward?.();
+							}}
+							className="text-[9px] font-mono px-1.5 py-0.2 rounded-full bg-surface text-primary border border-primary/20 hover:bg-primary/10 transition-colors cursor-pointer"
+							title={onOpenForward ? "查看/配置端口转发" : undefined}
 						>
-							{CONNECTION_LABEL[status]}
-						</span>
-					)}
-					{host.latencyMs !== undefined && host.latencyMs > 0 && (
-						<span className="text-[9px] font-mono text-faint">
-							{host.latencyMs}ms
-						</span>
-					)}
-				</div>
+							{forwardCount} 转发
+						</button>
+					</div>
+				)}
 
-				{/* 悬浮态：快速操作按钮 */}
+				{/* 悬浮态：精炼快捷动作（SFTP、新标签、编辑、更多） */}
 				<div className="hidden group-hover:flex items-center gap-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-					<button
-						type="button"
-						onClick={onOpen}
-						title="打开终端"
-						className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-primary transition-colors cursor-pointer"
-					>
-						<span className="icon-[lucide--terminal] size-3" />
-					</button>
 					{onOpenSftp && (
 						<button
 							type="button"
@@ -1541,14 +2054,34 @@ function HostItem({
 							<span className="icon-[lucide--folder-tree] size-3" />
 						</button>
 					)}
+					{onOpenInNewTab && (
+						<button
+							type="button"
+							onClick={onOpenInNewTab}
+							title="在新标签打开终端"
+							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-primary transition-colors cursor-pointer"
+						>
+							<span className="icon-[lucide--plus-square] size-3" />
+						</button>
+					)}
 					{onEdit && (
 						<button
 							type="button"
 							onClick={onEdit}
 							title="编辑主机配置"
+							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-primary transition-colors cursor-pointer"
+						>
+							<span className="icon-[lucide--pencil] size-3" />
+						</button>
+					)}
+					{onContextMenu && (
+						<button
+							type="button"
+							onClick={(e) => onContextMenu(e)}
+							title="更多选项"
 							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors cursor-pointer"
 						>
-							<span className="icon-[lucide--settings-2] size-3" />
+							<span className="icon-[lucide--more-horizontal] size-3" />
 						</button>
 					)}
 				</div>
@@ -1559,18 +2092,18 @@ function HostItem({
 				<span className="truncate font-mono text-faint group-hover:text-muted">
 					{host.username}@{host.hostname}:{host.port}
 				</span>
-				{host.tags && host.tags.length > 0 && (
-					<div className="flex items-center gap-1 shrink-0">
-						{host.tags.slice(0, 2).map((tag) => (
-							<span
-								key={tag}
-								className="rounded bg-surface-raised px-1 py-0.2 text-[8.5px] font-medium text-faint group-hover:text-muted"
-							>
-								{tag}
-							</span>
-						))}
-					</div>
-				)}
+				<div className="flex items-center gap-1 shrink-0">
+					{host.latencyMs !== undefined && host.latencyMs > 0 && (
+						<span className="rounded bg-surface px-1.5 py-0.2 font-mono text-[9px] text-faint border border-border/50">
+							{host.latencyMs}ms
+						</span>
+					)}
+					{host.tags && host.tags.length > 0 && (
+						<span className="rounded bg-surface px-1.5 py-0.2 text-[9px] font-medium text-faint border border-border/50">
+							{host.tags[0]}
+						</span>
+					)}
+				</div>
 			</div>
 		</div>
 	);
@@ -1669,12 +2202,14 @@ function MenuItem({
 	label,
 	kbd,
 	disabled,
+	danger,
 	onClick,
 }: {
 	icon: string;
 	label: string;
 	kbd?: string;
 	disabled?: boolean;
+	danger?: boolean;
 	onClick: () => void;
 }) {
 	return (
@@ -1683,13 +2218,21 @@ function MenuItem({
 			disabled={disabled}
 			onClick={onClick}
 			className={cn(
-				"flex h-6.5 w-full items-center gap-2 px-2.5 text-left text-[11.5px] transition-colors",
-				disabled ? "cursor-not-allowed text-faint" : "text-surface-foreground hover:bg-surface-sunk",
+				"group flex h-7.5 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[11.5px] transition-all cursor-pointer select-none",
+				disabled && "cursor-not-allowed opacity-40 text-faint",
+				!disabled && !danger && "text-surface-foreground hover:bg-primary/15 hover:text-primary font-normal hover:font-medium",
+				!disabled && danger && "text-danger hover:bg-danger/15 hover:text-danger font-normal hover:font-medium",
 			)}
 		>
-			<span className={cn(icon, "size-3.5 shrink-0", disabled ? "text-faint" : "text-muted")} />
+			<span
+				className={cn(
+					icon,
+					"size-3.5 shrink-0 transition-colors",
+					disabled ? "text-faint" : danger ? "text-danger" : "text-muted group-hover:text-primary",
+				)}
+			/>
 			<span className="flex-1 truncate">{label}</span>
-			{kbd && <span className="font-mono text-[9.5px] text-faint">{kbd}</span>}
+			{kbd && <span className="font-mono text-[9.5px] text-faint group-hover:text-primary/80">{kbd}</span>}
 		</button>
 	);
 }
@@ -1698,6 +2241,11 @@ function MenuItem({
 
 function HostWorkbench({
 	onOpenHost,
+	onOpenHostInNewTab,
+	onSplitWithHost,
+	onOpenSftp,
+	onOpenForward,
+	onHostContextMenu,
 	onNewTerminal,
 	onAddHost,
 	onEditHost,
@@ -1706,6 +2254,11 @@ function HostWorkbench({
 	onReturnToTerminal,
 }: {
 	onOpenHost: (host: Host) => void;
+	onOpenHostInNewTab?: (host: Host) => void;
+	onSplitWithHost?: (host: Host, direction: "horizontal" | "vertical") => void;
+	onOpenSftp?: (host: Host) => void;
+	onOpenForward?: (host: Host) => void;
+	onHostContextMenu?: (event: ReactMouseEvent, host: Host) => void;
 	onNewTerminal: () => void;
 	onAddHost?: (groupId?: string | null) => void;
 	onEditHost?: (host: Host) => void;
@@ -1743,15 +2296,16 @@ function HostWorkbench({
 	}, [allHosts, searchQuery]);
 
 	const validGroupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
-	const ungroupedHosts = useMemo(
-		() => searchedHosts.filter((h) => !h.groupId || !validGroupIds.has(h.groupId)),
-		[searchedHosts, validGroupIds],
-	);
+	const ungroupedHosts = useMemo(() => searchedHosts.filter((h) => !h.groupId || !validGroupIds.has(h.groupId)), [searchedHosts, validGroupIds]);
 
 	const handleOpenSftp = (host: Host) => {
-		onOpenHost(host);
-		if (!useUiStore.getState().embeddedSftpOpen) {
-			useUiStore.getState().toggleEmbeddedSftp();
+		if (onOpenSftp) {
+			onOpenSftp(host);
+		} else {
+			onOpenHost(host);
+			if (!useUiStore.getState().embeddedSftpOpen) {
+				useUiStore.getState().toggleEmbeddedSftp();
+			}
 		}
 	};
 
@@ -2014,8 +2568,12 @@ function HostWorkbench({
 									key={host.id}
 									host={host}
 									onConnect={() => onOpenHost(host)}
+									onOpenInNewTab={() => onOpenHostInNewTab?.(host)}
+									onSplitWithHost={(dir) => onSplitWithHost?.(host, dir)}
 									onOpenSftp={() => handleOpenSftp(host)}
+									onOpenForward={() => onOpenForward?.(host)}
 									onEdit={() => (onEditHost ? onEditHost(host) : navigate(`/hosts/${host.id}/edit`))}
+									onContextMenu={(e) => onHostContextMenu?.(e, host)}
 								/>
 							))}
 						</div>
@@ -2114,8 +2672,12 @@ function HostWorkbench({
 																key={host.id}
 																host={host}
 																onConnect={() => onOpenHost(host)}
+																onOpenInNewTab={() => onOpenHostInNewTab?.(host)}
+																onSplitWithHost={(dir) => onSplitWithHost?.(host, dir)}
 																onOpenSftp={() => handleOpenSftp(host)}
+																onOpenForward={() => onOpenForward?.(host)}
 																onEdit={() => (onEditHost ? onEditHost(host) : navigate(`/hosts/${host.id}/edit`))}
+																onContextMenu={(e) => onHostContextMenu?.(e, host)}
 															/>
 														))}
 													</div>
@@ -2168,8 +2730,12 @@ function HostWorkbench({
 												key={host.id}
 												host={host}
 												onConnect={() => onOpenHost(host)}
+												onOpenInNewTab={() => onOpenHostInNewTab?.(host)}
+												onSplitWithHost={(dir) => onSplitWithHost?.(host, dir)}
 												onOpenSftp={() => handleOpenSftp(host)}
+												onOpenForward={() => onOpenForward?.(host)}
 												onEdit={() => (onEditHost ? onEditHost(host) : navigate(`/hosts/${host.id}/edit`))}
+												onContextMenu={(e) => onHostContextMenu?.(e, host)}
 											/>
 										))}
 									</div>
@@ -2272,16 +2838,25 @@ function HostWorkbench({
 function WorkbenchHostCard({
 	host,
 	onConnect,
+	onOpenInNewTab,
+	onSplitWithHost,
 	onOpenSftp,
+	onOpenForward,
 	onEdit,
+	onContextMenu,
 }: {
 	host: Host;
 	onConnect: () => void;
+	onOpenInNewTab?: () => void;
+	onSplitWithHost?: (direction: "horizontal" | "vertical") => void;
 	onOpenSftp?: () => void;
+	onOpenForward?: () => void;
 	onEdit: () => void;
+	onContextMenu?: (e: ReactMouseEvent) => void;
 }) {
 	const status = useHostStatus(host.id, host.reachable);
 	const visual = getHostVisual(host);
+	const forwardCount = useForwardsStore((s) => s.rules.filter((r) => r.hostId === host.id).length);
 	const isConnected = status === "connected";
 	const isConnecting = status === "connecting" || status === "reconnecting";
 
@@ -2290,75 +2865,158 @@ function WorkbenchHostCard({
 			role="button"
 			tabIndex={0}
 			onClick={onConnect}
+			onAuxClick={(e) => {
+				if (e.button === 1 && onOpenInNewTab) {
+					e.preventDefault();
+					onOpenInNewTab();
+				}
+			}}
+			onContextMenu={onContextMenu}
 			onKeyDown={(e) => e.key === "Enter" && onConnect()}
-			className="group relative flex cursor-pointer flex-col justify-between rounded-2xl border border-border/80 bg-surface-raised/70 p-4 transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/50 hover:bg-surface-raised hover:shadow-md"
+			className="group relative flex cursor-pointer flex-col justify-between rounded-2xl border border-border/80 bg-surface-raised/70 p-4 transition-all duration-200 hover:-translate-y-1 hover:border-primary hover:bg-surface hover:shadow-host-hover"
 		>
-			<div className="flex items-start justify-between gap-3">
+			{/* 卡片头部：图标 + 名称 + 状态 + 地址，右上角仅在悬浮时显示极简的 [编辑] 与 [更多] */}
+			<div className="flex items-start gap-3 min-w-0">
 				<div className="flex size-9.5 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-surface text-muted transition-colors group-hover:border-primary/40 group-hover:text-primary">
 					<span className={cn(visual.icon, visual.color, "size-4.5")} />
 				</div>
-				<div className="min-w-0 flex-1">
-					<div className="flex items-center gap-1.5">
+				<div className="min-w-0 flex-1 group-hover:pr-12 transition-all">
+					<div className="flex items-center gap-1.5 min-w-0">
 						<span className="truncate text-[13px] font-semibold text-surface-foreground group-hover:text-primary transition-colors">
 							{host.name}
 						</span>
-						<StatusDot status={status} size={6} />
-						{status !== "idle" && (
-							<span className="text-[10px] font-mono text-faint">
-								{CONNECTION_LABEL[status]}
-							</span>
-						)}
+						<StatusDot status={status} size={6} className="shrink-0" />
 					</div>
 					<div className="mt-1 font-mono text-[11px] text-muted truncate">
 						{host.username}@{host.hostname}:{host.port}
 					</div>
 				</div>
 
-				<div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-					{onOpenSftp && (
-						<button
-							type="button"
-							onClick={(e) => {
-								e.stopPropagation();
-								onOpenSftp();
-							}}
-							className="flex size-6 items-center justify-center rounded-full text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
-							title="打开 SFTP 文件管理"
-						>
-							<span className="icon-[lucide--folder-tree] size-3.5" />
-						</button>
-					)}
+				{/* 右上角快捷操作：极简尺寸（仅编辑与更多菜单），绝不遮挡标题和状态 */}
+				<div
+					className="absolute top-3 right-3 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+					onClick={(e) => e.stopPropagation()}
+				>
 					<button
 						type="button"
 						onClick={(e) => {
 							e.stopPropagation();
 							onEdit();
 						}}
-						className="flex size-6 items-center justify-center rounded-full text-muted hover:bg-surface hover:text-surface-foreground transition-colors cursor-pointer"
+						className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-surface-foreground transition-colors cursor-pointer"
 						title="编辑配置"
 					>
 						<span className="icon-[lucide--pencil] size-3.5" />
 					</button>
+					{onContextMenu && (
+						<button
+							type="button"
+							onClick={(e) => {
+								e.stopPropagation();
+								onContextMenu(e);
+							}}
+							className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-surface-foreground transition-colors cursor-pointer"
+							title="更多选项 (右键菜单)"
+						>
+							<span className="icon-[lucide--more-horizontal] size-3.5" />
+						</button>
+					)}
 				</div>
 			</div>
 
+			{/* 卡片底栏：左侧属性胶囊 + 右侧快速连接与联动动作组 */}
 			<div className="mt-4 flex items-center justify-between pt-3 border-t border-border/50 text-[11px]">
 				<div className="flex items-center gap-1.5 overflow-hidden">
+					{forwardCount > 0 && (
+						<button
+							type="button"
+							onClick={(e) => {
+								e.stopPropagation();
+								onOpenForward?.();
+							}}
+							className="rounded-full bg-surface px-2.5 py-0.5 font-mono text-[10px] text-primary border border-primary/30 hover:bg-primary/10 transition-colors cursor-pointer"
+							title={`查看/配置 ${forwardCount} 条端口转发`}
+						>
+							{forwardCount} 转发
+						</button>
+					)}
+					{host.latencyMs !== undefined && host.latencyMs > 0 && (
+						<span className="rounded-full bg-surface px-2 py-0.5 font-mono text-[10px] text-faint border border-border/60">
+							{host.latencyMs}ms
+						</span>
+					)}
 					{host.tags.slice(0, 2).map((tag) => (
 						<span key={tag} className="rounded-full bg-surface px-2.5 py-0.5 font-mono text-[10px] text-faint border border-border/60">
 							{tag}
 						</span>
 					))}
-					{host.tags.length === 0 && (
+					{host.tags.length === 0 && forwardCount === 0 && (!host.latencyMs || host.latencyMs === 0) && (
 						<span className="rounded-full bg-surface px-2.5 py-0.5 font-mono text-[10px] text-faint border border-border/60">
 							默认
 						</span>
 					)}
 				</div>
 
-				<div className="flex items-center gap-1 font-medium text-muted transition-all group-hover:text-primary group-hover:translate-x-0.5">
-					<span>{isConnected ? "进入终端" : isConnecting ? "连接中…" : "连接"}</span>
-					<span className={cn("size-3.5", isConnected ? "icon-[lucide--terminal]" : "icon-[lucide--arrow-right]")} />
+				{/* 右侧动作区：悬浮时自然显露 SFTP、分屏、新标签快速操作，右侧为进入/连接主按钮 */}
+				<div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+					<div className="hidden group-hover:flex items-center gap-0.5 mr-0.5">
+						{onOpenSftp && (
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									onOpenSftp();
+								}}
+								className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
+								title="打开 SFTP 文件管理"
+							>
+								<span className="icon-[lucide--folder-tree] size-3.5" />
+							</button>
+						)}
+						{onSplitWithHost && (
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									onSplitWithHost("horizontal");
+								}}
+								className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
+								title="向右分屏打开终端"
+							>
+								<span className="icon-[lucide--columns-2] size-3.5" />
+							</button>
+						)}
+						{onOpenInNewTab && (
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									onOpenInNewTab();
+								}}
+								className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
+								title="在新标签打开终端 (鼠标中键也可触发)"
+							>
+								<span className="icon-[lucide--plus-square] size-3.5" />
+							</button>
+						)}
+					</div>
+
+					<button
+						type="button"
+						onClick={(e) => {
+							e.stopPropagation();
+							onConnect();
+						}}
+						className={cn(
+							"flex items-center gap-1 font-medium transition-all cursor-pointer rounded px-1.5 py-0.5",
+							isConnected
+								? "bg-primary/10 text-primary hover:bg-primary/20"
+								: "text-muted hover:text-primary group-hover:translate-x-0.5",
+						)}
+					>
+						<span>{isConnected ? "进入终端" : isConnecting ? "连接中…" : "连接"}</span>
+						<span className={cn("size-3.5", isConnected ? "icon-[lucide--terminal]" : "icon-[lucide--arrow-right]")} />
+					</button>
 				</div>
 			</div>
 		</div>

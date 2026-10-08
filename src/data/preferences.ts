@@ -62,6 +62,8 @@ export interface TerminalPreferences {
 	/** 复制终端选区时去掉末尾换行 */
 	trimNewline: boolean;
 	scheme: TerminalSchemeId;
+	/** 底部内嵌 SFTP 是否随当前活跃终端标签自动切换主机目录 */
+	sftpFollowActiveTab: boolean;
 }
 
 /** 解锁密码的校验材料：只存盐与 PBKDF2 摘要，不存密码本身 */
@@ -104,6 +106,7 @@ export const DEFAULT_TERMINAL: TerminalPreferences = {
 	rightClick: "menu",
 	trimNewline: true,
 	scheme: "theme",
+	sftpFollowActiveTab: true,
 };
 
 export const DEFAULT_SECURITY: SecurityPreferences = {
@@ -187,6 +190,7 @@ export function normalizePreferences(raw: unknown): Preferences {
 			rightClick: pick(terminal.rightClick, RIGHT_CLICK_ACTIONS, DEFAULT_TERMINAL.rightClick),
 			trimNewline: pickBoolean(terminal.trimNewline, DEFAULT_TERMINAL.trimNewline),
 			scheme: pick(terminal.scheme, TERMINAL_SCHEME_IDS, DEFAULT_TERMINAL.scheme),
+			sftpFollowActiveTab: pickBoolean(terminal.sftpFollowActiveTab, DEFAULT_TERMINAL.sftpFollowActiveTab),
 		},
 		security: {
 			keychain: pickBoolean(security.keychain, DEFAULT_SECURITY.keychain),

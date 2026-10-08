@@ -33,6 +33,16 @@ interface EmbeddedSftpDrawerProps {
 	hostId: string | null;
 	onClose: () => void;
 	onReconnect?: () => void;
+	isFollowing?: boolean;
+	onToggleFollow?: () => void;
+	availableSessions?: Array<{
+		tabId: string;
+		sessionKey: string | null;
+		hostId: string | null;
+		title: string;
+		status: ConnectionStatus;
+	}>;
+	onSelectSession?: (tabId: string) => void;
 }
 
 export function EmbeddedSftpDrawer({
@@ -42,8 +52,13 @@ export function EmbeddedSftpDrawer({
 	hostId,
 	onClose,
 	onReconnect,
+	isFollowing,
+	onToggleFollow,
+	availableSessions,
+	onSelectSession,
 }: EmbeddedSftpDrawerProps) {
 	const navigate = useNavigate();
+	const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
 
 	// 抽屉高度与拖拽缩放
 	const [height, setHeight] = useState<number>(270);
@@ -292,12 +307,16 @@ export function EmbeddedSftpDrawer({
 					<div className="h-0.5 w-12 rounded-full bg-border group-hover/resizer:bg-primary transition-colors" />
 				</div>
 				<div className="flex h-7.5 shrink-0 items-center justify-between border-b border-border bg-surface-raised px-3 text-[11px]">
-					<div className="flex items-center gap-2">
-						<span className="icon-[lucide--folder-tree] size-3.5 text-primary" />
-						<span className="font-medium text-surface-foreground">{hostTitle}</span>
-						<span className="text-border">·</span>
-						<span className="font-sans text-faint">内嵌 SFTP</span>
-					</div>
+					<SftpSessionPill
+						hostTitle={hostTitle}
+						status={status}
+						isFollowing={isFollowing}
+						onToggleFollow={onToggleFollow}
+						availableSessions={availableSessions}
+						onSelectSession={onSelectSession}
+						isOpen={sessionMenuOpen}
+						onToggleOpen={() => setSessionMenuOpen((v) => !v)}
+					/>
 					<IconButton icon="icon-[lucide--x]" label="关闭" className="size-5" onClick={onClose} />
 				</div>
 				<div className="flex flex-1 flex-col items-center justify-center p-6 text-muted">
@@ -322,12 +341,16 @@ export function EmbeddedSftpDrawer({
 					<div className="h-0.5 w-12 rounded-full bg-border group-hover/resizer:bg-primary transition-colors" />
 				</div>
 				<div className="flex h-7.5 shrink-0 items-center justify-between border-b border-border bg-surface-raised px-3 text-[11px]">
-					<div className="flex items-center gap-2">
-						<span className="icon-[lucide--folder-tree] size-3.5 text-muted" />
-						<span className="font-medium text-surface-foreground">{hostTitle}</span>
-						<span className="text-border">·</span>
-						<span className="font-sans text-faint">内嵌 SFTP (离线)</span>
-					</div>
+					<SftpSessionPill
+						hostTitle={hostTitle}
+						status={status}
+						isFollowing={isFollowing}
+						onToggleFollow={onToggleFollow}
+						availableSessions={availableSessions}
+						onSelectSession={onSelectSession}
+						isOpen={sessionMenuOpen}
+						onToggleOpen={() => setSessionMenuOpen((v) => !v)}
+					/>
 					<IconButton icon="icon-[lucide--x]" label="关闭" className="size-5" onClick={onClose} />
 				</div>
 				<div className="flex flex-1 flex-col items-center justify-center p-6 text-center">
@@ -371,8 +394,16 @@ export function EmbeddedSftpDrawer({
 			{/* 头部控制条 */}
 			<div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-surface-raised px-2.5 text-[11px]">
 				<div className="flex min-w-0 flex-1 items-center gap-2">
-					<span className="icon-[lucide--folder-tree] size-3.5 text-primary shrink-0" />
-					<span className="font-medium text-surface-foreground truncate max-w-[120px]">{hostTitle}</span>
+					<SftpSessionPill
+						hostTitle={hostTitle}
+						status={status}
+						isFollowing={isFollowing}
+						onToggleFollow={onToggleFollow}
+						availableSessions={availableSessions}
+						onSelectSession={onSelectSession}
+						isOpen={sessionMenuOpen}
+						onToggleOpen={() => setSessionMenuOpen((v) => !v)}
+					/>
 					<span className="text-border/80">/</span>
 
 					{/* 路径与面包屑 */}
@@ -888,3 +919,114 @@ export function EmbeddedSftpDrawer({
 		</div>
 	);
 }
+
+function SftpSessionPill({
+	hostTitle,
+	status,
+	isFollowing,
+	onToggleFollow,
+	availableSessions,
+	onSelectSession,
+	isOpen,
+	onToggleOpen,
+}: {
+	hostTitle: string;
+	status?: ConnectionStatus;
+	isFollowing?: boolean;
+	onToggleFollow?: () => void;
+	availableSessions?: Array<{
+		tabId: string;
+		sessionKey: string | null;
+		hostId: string | null;
+		title: string;
+		status: ConnectionStatus;
+	}>;
+	onSelectSession?: (tabId: string) => void;
+	isOpen: boolean;
+	onToggleOpen: () => void;
+}) {
+	return (
+		<div className="relative flex items-center gap-1.5 shrink-0">
+			<div className="flex items-center gap-1.5">
+				<span className="icon-[lucide--folder-tree] size-3.5 text-primary shrink-0" />
+				{status && (
+					<span
+						className={cn(
+							"size-1.5 rounded-full shrink-0",
+							status === "connected"
+								? "bg-success"
+								: status === "connecting" || status === "reconnecting"
+								? "bg-warning"
+								: "bg-muted",
+						)}
+					/>
+				)}
+				{availableSessions && availableSessions.length > 1 ? (
+					<button
+						type="button"
+						onClick={onToggleOpen}
+						className="flex items-center gap-1 font-medium text-surface-foreground hover:bg-surface px-1.5 py-0.5 rounded cursor-pointer transition-colors max-w-[130px]"
+						title="点击切换 SFTP 关联的主机会话"
+					>
+						<span className="truncate">{hostTitle}</span>
+						<span className="icon-[lucide--chevron-down] size-3 text-muted shrink-0" />
+					</button>
+				) : (
+					<span className="font-medium text-surface-foreground truncate max-w-[130px]">{hostTitle}</span>
+				)}
+			</div>
+
+			{isOpen && availableSessions && (
+				<>
+					<div className="fixed inset-0 z-30" onClick={onToggleOpen} />
+					<div className="absolute top-full left-0 mt-1 z-40 w-52 rounded-lg border border-border bg-surface-raised p-1 shadow-lg shadow-black/20">
+						<div className="px-2 py-1 text-[10px] text-faint border-b border-border mb-1">
+							选择 SFTP 关联的主机会话
+						</div>
+						{availableSessions.map((s) => (
+							<button
+								key={s.tabId}
+								type="button"
+								onClick={() => {
+									onSelectSession?.(s.tabId);
+									onToggleOpen();
+								}}
+								className="flex w-full items-center justify-between rounded px-2 py-1 text-[11px] text-left hover:bg-surface text-surface-foreground transition-colors cursor-pointer"
+							>
+								<span className="truncate">{s.title}</span>
+								<span
+									className={cn(
+										"size-1.5 rounded-full shrink-0 ml-1.5",
+										s.status === "connected"
+											? "bg-success"
+											: s.status === "connecting" || s.status === "reconnecting"
+											? "bg-warning"
+											: "bg-muted",
+									)}
+								/>
+							</button>
+						))}
+					</div>
+				</>
+			)}
+
+			{onToggleFollow && (
+				<button
+					type="button"
+					onClick={onToggleFollow}
+					className={cn(
+						"flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] transition-colors border cursor-pointer select-none",
+						isFollowing
+							? "border-primary/40 bg-primary/10 text-primary font-medium"
+							: "border-amber-500/40 bg-amber-500/10 text-amber-500 font-medium",
+					)}
+					title={isFollowing ? "当前设置：跟随活跃终端切换（点击锁定当前会话）" : "当前设置：已固定当前会话（点击开启跟随活跃终端）"}
+				>
+					<span className={cn("size-2.5 shrink-0", isFollowing ? "icon-[lucide--link]" : "icon-[lucide--pin]")} />
+					<span>{isFollowing ? "跟随活跃终端" : "已锁定会话"}</span>
+				</button>
+			)}
+		</div>
+	);
+}
+

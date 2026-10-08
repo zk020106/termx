@@ -35,6 +35,7 @@ export function TerminalPane({
 	isMaximized,
 	onOpenSftp,
 	onClear,
+	isSplit = false,
 }: {
 	pane: TerminalPaneModel;
 	focused: boolean;
@@ -52,6 +53,7 @@ export function TerminalPane({
 	isMaximized?: boolean;
 	onOpenSftp?: () => void;
 	onClear?: () => void;
+	isSplit?: boolean;
 }) {
 	const scheme = useSettingsStore((s) => s.scheme);
 	const customColors = schemeColors(scheme);
@@ -76,14 +78,12 @@ export function TerminalPane({
 		>
 			{/* 广播输入中：顶部 2px 警告条 + 标题行胶囊，两道标识保证一眼可见 */}
 			{broadcasting && <span className="pointer-events-none absolute inset-x-0 top-0 z-20 h-[2px] bg-warning" />}
-			{/* 焦点格 1px 主色描边（需求书 06） */}
-			{focused && (
-				<span className="pointer-events-none absolute inset-0 z-20 shadow-[inset_0_0_0_1px_var(--color-primary)]" />
-			)}
 
-			<div className="flex h-7 shrink-0 items-center justify-between gap-2 px-3 pt-1.5 text-[11px]">
-				<span className="flex min-w-0 items-center gap-1.5">
-					<span className={cn("truncate font-mono", focused ? "text-primary" : "text-primary/75")}>{prompt}</span>
+			{/* 分屏模式下才显示各格独立标题控制栏；单屏模式下全沉浸展示，由顶部标签栏承载信息 */}
+			{isSplit && (
+				<div className="flex h-6.5 shrink-0 items-center justify-between gap-2 border-b border-border/40 bg-surface-sunk/30 px-2.5 text-[10.5px]">
+					<span className="flex min-w-0 items-center gap-1.5">
+						<span className={cn("truncate font-mono", focused ? "text-surface-foreground font-medium" : "text-muted")}>{prompt}</span>
 					{broadcasting && (
 						<span className="flex shrink-0 items-center gap-1 rounded-[3px] bg-warning/20 px-1 py-px text-[9.5px] font-medium text-warning">
 							<span className="icon-[lucide--radio] size-2.5" />
@@ -186,9 +186,10 @@ export function TerminalPane({
 					)}
 				</div>
 			</div>
+		)}
 
 			{/* 终端本体 / 标签内连接认证 */}
-			<div className={cn("min-h-0 flex-1", isConnecting ? "p-0" : "px-3 pb-2.5", !focused && !isConnecting && "opacity-80")}>
+			<div className={cn("min-h-0 flex-1", isConnecting ? "p-0" : "p-1.5", !focused && !isConnecting && "opacity-90")}>
 				{isConnecting ? (
 					<InTabConnect
 						paneId={pane.id}

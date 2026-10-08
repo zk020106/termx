@@ -33,6 +33,7 @@ interface SessionsState {
 	focusPane: (paneId: string) => void;
 	appendLine: (paneId: string, line: TerminalLine) => void;
 	splitPane: (tabId?: string, direction?: "horizontal" | "vertical") => string | null;
+	splitPaneWithHost: (targetTabId: string, hostId: string | null, direction?: "horizontal" | "vertical") => string | null;
 	closePane: (paneId: string) => void;
 }
 
@@ -191,6 +192,43 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 			title: host ? `${host.username}@${host.name}` : "本地终端",
 			subtitle: host ? `${host.username}@${host.hostname}:${host.port}` : "本地 shell",
 			status: tab.hostId ? "connecting" : "connected",
+			lines: [],
+		};
+
+		const nextCount = currentPanes.length + 1;
+		const nextLayout: SplitLayout =
+			nextCount <= 1 ? "single" : nextCount === 2 ? (direction === "vertical" ? "vertical" : "horizontal") : "grid";
+
+		set((state) => ({
+			panes: [...state.panes, pane],
+			focusedPaneId: id,
+			tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, layout: nextLayout } : t)),
+		}));
+
+		return id;
+	},
+
+	splitPaneWithHost: (targetTabId, hostId, direction = "horizontal") => {
+		const s = get();
+		const tabId = targetTabId ?? s.activeTabId;
+		const tab = s.tabs.find((t) => t.id === tabId);
+		if (!tab) return null;
+
+		const currentPanes = s.panes.filter((p) => p.tabId === tabId);
+		if (currentPanes.length >= 4) return null; // 最多 4 分屏
+
+		const id = `pane-${++seq}`;
+		const sessionKey = hostId ? newSshSessionKey(hostId) : null;
+		const host = hostId ? useHostsStore.getState().hosts.find((h) => h.id === hostId) : null;
+
+		const pane: TerminalPane = {
+			id,
+			tabId,
+			hostId,
+			sessionKey,
+			title: host ? `${host.username}@${host.name}` : "本地终端",
+			subtitle: host ? `${host.username}@${host.hostname}:${host.port}` : "本地 shell",
+			status: hostId ? "connecting" : "connected",
 			lines: [],
 		};
 

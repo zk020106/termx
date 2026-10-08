@@ -173,6 +173,7 @@ export default function Settings() {
 	const rightClick = useSettingsStore((s) => s.rightClick);
 	const trimNewline = useSettingsStore((s) => s.trimNewline);
 	const scheme = useSettingsStore((s) => s.scheme);
+	const sftpFollowActiveTab = useSettingsStore((s) => s.sftpFollowActiveTab);
 	const keychain = useSettingsStore((s) => s.keychain);
 	const clearClipboard = useSettingsStore((s) => s.clearClipboard);
 	const autoLock = useSettingsStore((s) => s.autoLock);
@@ -537,6 +538,13 @@ export default function Settings() {
 											checked={trimNewline}
 											onChange={(value) => setTerminal({ trimNewline: value })}
 											label="复制时去除末尾换行"
+										/>
+									</SettingRow>
+									<SettingRow title="SFTP 联动跟随活跃终端" description="切换终端标签时，底部 SFTP 面板自动切换为对应主机的远程目录">
+										<Switch
+											checked={sftpFollowActiveTab}
+											onChange={(value) => setTerminal({ sftpFollowActiveTab: value })}
+											label="SFTP 联动跟随活跃终端"
 										/>
 									</SettingRow>
 								</div>

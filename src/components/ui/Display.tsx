@@ -1,4 +1,4 @@
-import type { ConnectionStatus } from "@/data/types";
+import { CONNECTION_LABEL, type ConnectionStatus } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { connVisual } from "@/lib/status";
 import type { ReactNode } from "react";
@@ -13,16 +13,19 @@ export function StatusDot({
 	status,
 	className,
 	size = 6,
+	title,
 }: {
 	status: ConnectionStatus;
 	className?: string;
 	size?: number;
+	title?: string;
 }) {
 	const visual = connVisual[status];
 	return (
 		<span
 			role="img"
 			aria-label={status}
+			title={title ?? CONNECTION_LABEL[status]}
 			style={{ width: size, height: size }}
 			className={cn("inline-block shrink-0 rounded-full", visual.dot, visual.pulse && "animate-pulse", className)}
 		/>
