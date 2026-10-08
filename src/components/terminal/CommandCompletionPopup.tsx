@@ -36,7 +36,7 @@ export function CommandCompletionPopup({
 	return (
 		<div
 			style={{
-				left: Math.max(8, Math.min(position.x, window.innerWidth - 360)),
+				left: Math.max(8, Math.min(position.x - 8, window.innerWidth - 350)),
 				top: position.y + 4,
 			}}
 			className="absolute z-30 flex w-[330px] flex-col overflow-hidden rounded-xl border border-border/80 bg-surface/96 shadow-popover backdrop-blur-md ring-1 ring-black/5 animate-in fade-in-0 zoom-in-95 duration-100 select-none text-[11.5px]"

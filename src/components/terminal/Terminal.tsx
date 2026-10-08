@@ -228,10 +228,12 @@ export function Terminal({
 			const list = useCommandsStore.getState().querySuggestions(raw, hostId, 6);
 			setSuggestions(list);
 			setSelectedIndex(0);
-			setShowPopup(list.length > 0);
+			// 仿 Warp：单项最佳匹配时优先呈现行内 Ghost Text，避免弹出单行冗余卡片；多项候选时才展开气泡供挑选
+			const shouldShowPopup = list.length > 1;
+			setShowPopup(shouldShowPopup);
 			completionStateRef.current.suggestions = list;
 			completionStateRef.current.selectedIndex = 0;
-			completionStateRef.current.showPopup = list.length > 0;
+			completionStateRef.current.showPopup = shouldShowPopup;
 			updateCursorPosition();
 		};
 
@@ -588,11 +590,15 @@ export function Terminal({
 					style={{
 						left: cursorCoords.x,
 						top: cursorCoords.y,
+						height: `${cursorCoords.height}px`,
+						display: "flex",
+						alignItems: "center",
 						fontFamily: fontStack(fontFamily),
 						fontSize: `${fontSize}px`,
-						lineHeight: `${fontSize * lineHeight}px`,
+						lineHeight: 1,
+						letterSpacing: "0px",
 					}}
-					className="pointer-events-none absolute z-20 select-none whitespace-pre font-mono text-faint opacity-45 italic"
+					className="pointer-events-none absolute z-20 select-none whitespace-pre font-mono text-faint opacity-50"
 				>
 					{ghostRemainder}
 				</div>
