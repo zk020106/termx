@@ -64,6 +64,10 @@ export interface TerminalPreferences {
 	scheme: TerminalSchemeId;
 	/** 底部内嵌 SFTP 是否随当前活跃终端标签自动切换主机目录 */
 	sftpFollowActiveTab: boolean;
+	/** 是否开启命令智能补全与预测 (Warp / VS Code 风格) */
+	commandSuggestions: boolean;
+	/** 是否在光标后呈现行内幽灵文本 (Ghost Text) */
+	ghostText: boolean;
 }
 
 /** 解锁密码的校验材料：只存盐与 PBKDF2 摘要，不存密码本身 */
@@ -107,6 +111,8 @@ export const DEFAULT_TERMINAL: TerminalPreferences = {
 	trimNewline: true,
 	scheme: "theme",
 	sftpFollowActiveTab: true,
+	commandSuggestions: true,
+	ghostText: true,
 };
 
 export const DEFAULT_SECURITY: SecurityPreferences = {
@@ -191,6 +197,8 @@ export function normalizePreferences(raw: unknown): Preferences {
 			trimNewline: pickBoolean(terminal.trimNewline, DEFAULT_TERMINAL.trimNewline),
 			scheme: pick(terminal.scheme, TERMINAL_SCHEME_IDS, DEFAULT_TERMINAL.scheme),
 			sftpFollowActiveTab: pickBoolean(terminal.sftpFollowActiveTab, DEFAULT_TERMINAL.sftpFollowActiveTab),
+			commandSuggestions: pickBoolean(terminal.commandSuggestions, DEFAULT_TERMINAL.commandSuggestions),
+			ghostText: pickBoolean(terminal.ghostText, DEFAULT_TERMINAL.ghostText),
 		},
 		security: {
 			keychain: pickBoolean(security.keychain, DEFAULT_SECURITY.keychain),

@@ -174,6 +174,8 @@ export default function Settings() {
 	const trimNewline = useSettingsStore((s) => s.trimNewline);
 	const scheme = useSettingsStore((s) => s.scheme);
 	const sftpFollowActiveTab = useSettingsStore((s) => s.sftpFollowActiveTab);
+	const commandSuggestions = useSettingsStore((s) => s.commandSuggestions);
+	const ghostText = useSettingsStore((s) => s.ghostText);
 	const keychain = useSettingsStore((s) => s.keychain);
 	const clearClipboard = useSettingsStore((s) => s.clearClipboard);
 	const autoLock = useSettingsStore((s) => s.autoLock);
@@ -545,6 +547,20 @@ export default function Settings() {
 											checked={sftpFollowActiveTab}
 											onChange={(value) => setTerminal({ sftpFollowActiveTab: value })}
 											label="SFTP 联动跟随活跃终端"
+										/>
+									</SettingRow>
+									<SettingRow title="命令预测与补全 (Warp / VS Code 风格)" description="根据历史执行频次与 Snippets 实时弹出推荐补全气泡">
+										<Switch
+											checked={commandSuggestions}
+											onChange={(value) => setTerminal({ commandSuggestions: value })}
+											label="命令预测与补全"
+										/>
+									</SettingRow>
+									<SettingRow title="行内幽灵文本预测 (Ghost Text)" description="在光标后呈现半透明淡灰色预测文字，按 Tab 或 → 键一键采纳">
+										<Switch
+											checked={ghostText}
+											onChange={(value) => setTerminal({ ghostText: value })}
+											label="行内幽灵文本预测"
 										/>
 									</SettingRow>
 								</div>

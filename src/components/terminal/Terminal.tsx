@@ -14,8 +14,11 @@ import { useHostsStore } from "@/store/hosts";
 import { useSettingsStore } from "@/store/settings";
 import { useThemeStore } from "@/store/theme";
 import { fontStack, scrollbackLines } from "@/data/preferences";
-import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import { fg, noteColor, readPalette, xtermThemeFor } from "./terminalTheme";
+import { CommandCompletionPopup } from "./CommandCompletionPopup";
+import { useCommandsStore, type CommandSuggestion } from "@/store/commands";
+import { cn } from "@/lib/cn";
 
 /* =============================================================================
  * 终端分屏格 —— xterm 6 的 React 封装。
@@ -93,6 +96,55 @@ export function Terminal({
 	const cursorStyle = useSettingsStore((s) => s.cursorStyle);
 	const scheme = useSettingsStore((s) => s.scheme);
 	const bell = useSettingsStore((s) => s.bell);
+	const commandSuggestions = useSettingsStore((s) => s.commandSuggestions);
+	const ghostText = useSettingsStore((s) => s.ghostText);
+
+	const [inputBuffer, setInputBuffer] = useState("");
+	const inputBufferRef = useRef("");
+	const [suggestions, setSuggestions] = useState<CommandSuggestion[]>([]);
+	const [selectedIndex, setSelectedIndex] = useState(0);
+	const [showPopup, setShowPopup] = useState(false);
+	const [cursorCoords, setCursorCoords] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+
+	const completionStateRef = useRef({
+		inputBuffer: "",
+		suggestions: [] as CommandSuggestion[],
+		selectedIndex: 0,
+		showPopup: false,
+		commandSuggestions,
+		ghostText,
+	});
+
+	completionStateRef.current.commandSuggestions = commandSuggestions;
+	completionStateRef.current.ghostText = ghostText;
+
+	const handleApplySuggestion = useCallback(
+		(suggestion: CommandSuggestion) => {
+			const current = inputBufferRef.current;
+			const targetCmd = suggestion.command;
+			const sshKey = sessionKey ?? null;
+			const usingSsh = Boolean(sshKey && hasSshSession(sshKey));
+
+			if (targetCmd.toLowerCase().startsWith(current.toLowerCase())) {
+				const remainder = targetCmd.slice(current.length);
+				if (usingSsh && sshKey) writeSsh(sshKey, remainder);
+				else writePty(paneId, remainder);
+			} else {
+				const backspaces = "\x7f".repeat(current.length);
+				if (usingSsh && sshKey) writeSsh(sshKey, backspaces + targetCmd);
+				else writePty(paneId, backspaces + targetCmd);
+			}
+
+			inputBufferRef.current = targetCmd;
+			setInputBuffer(targetCmd);
+			setShowPopup(false);
+			setSuggestions([]);
+			completionStateRef.current.showPopup = false;
+			completionStateRef.current.suggestions = [];
+			completionStateRef.current.inputBuffer = targetCmd;
+		},
+		[paneId, sessionKey],
+	);
 
 	useEffect(() => {
 		const container = containerRef.current;
@@ -140,7 +192,153 @@ export function Terminal({
 		const sshKey = sessionKey ?? null;
 		const usingSsh = Boolean(sshKey && hasSshSession(sshKey));
 
+		const updateCursorPosition = () => {
+			if (!container || !term) return;
+			const cursorEl = container.querySelector(".xterm-cursor");
+			if (cursorEl) {
+				const cursorRect = cursorEl.getBoundingClientRect();
+				const containerRect = container.getBoundingClientRect();
+				setCursorCoords({
+					x: Math.max(0, cursorRect.left - containerRect.left),
+					y: Math.max(0, cursorRect.top - containerRect.top),
+					width: cursorRect.width || 8,
+					height: cursorRect.height || 18,
+				});
+				return;
+			}
+			const cellWidth = (term as any)._core?._renderService?.dimensions?.css?.cell?.width ?? 7.5;
+			const cellHeight = (term as any)._core?._renderService?.dimensions?.css?.cell?.height ?? 19;
+			setCursorCoords({
+				x: Math.max(0, term.buffer.active.cursorX * cellWidth),
+				y: Math.max(0, term.buffer.active.cursorY * cellHeight),
+				width: cellWidth,
+				height: cellHeight,
+			});
+		};
+
+		const triggerSuggestions = (raw: string) => {
+			const { commandSuggestions: enabled } = completionStateRef.current;
+			if (!enabled || !raw.trim()) {
+				setSuggestions([]);
+				setShowPopup(false);
+				completionStateRef.current.suggestions = [];
+				completionStateRef.current.showPopup = false;
+				return;
+			}
+			const list = useCommandsStore.getState().querySuggestions(raw, hostId, 6);
+			setSuggestions(list);
+			setSelectedIndex(0);
+			setShowPopup(list.length > 0);
+			completionStateRef.current.suggestions = list;
+			completionStateRef.current.selectedIndex = 0;
+			completionStateRef.current.showPopup = list.length > 0;
+			updateCursorPosition();
+		};
+
+		const cursorSub = term.onCursorMove(updateCursorPosition);
+
+		// 键盘拦截：处理 Tab / 方向键 / Enter / Esc (Warp / VS Code 风格体验)
+		term.attachCustomKeyEventHandler((event) => {
+			if (term.buffer.active.type === "alternate") return true;
+
+			const state = completionStateRef.current;
+			if (event.type === "keydown") {
+				// 1. 如果补全气泡处于展开状态
+				if (state.showPopup && state.suggestions.length > 0) {
+					if (event.key === "ArrowDown") {
+						event.preventDefault();
+						const next = (state.selectedIndex + 1) % state.suggestions.length;
+						state.selectedIndex = next;
+						setSelectedIndex(next);
+						return false;
+					}
+					if (event.key === "ArrowUp") {
+						event.preventDefault();
+						const next = (state.selectedIndex - 1 + state.suggestions.length) % state.suggestions.length;
+						state.selectedIndex = next;
+						setSelectedIndex(next);
+						return false;
+					}
+					if (event.key === "Escape") {
+						event.preventDefault();
+						state.showPopup = false;
+						setShowPopup(false);
+						return false;
+					}
+					if (event.key === "Tab" || event.key === "Enter") {
+						event.preventDefault();
+						const chosen = state.suggestions[state.selectedIndex];
+						if (chosen) {
+							handleApplySuggestion(chosen);
+							return false;
+						}
+					}
+				}
+
+				// 2. 如果仅显示行内幽灵文本 (Ghost Text) 且用户按下 Tab 或 →
+				const best = state.suggestions[0];
+				if (
+					state.ghostText &&
+					best &&
+					state.inputBuffer.trim() &&
+					best.command.toLowerCase().startsWith(state.inputBuffer.trim().toLowerCase()) &&
+					!state.showPopup
+				) {
+					if (event.key === "Tab" || event.key === "ArrowRight") {
+						event.preventDefault();
+						handleApplySuggestion(best);
+						return false;
+					}
+				}
+			}
+			return true;
+		});
+
 		const dataSub = term.onData((data) => {
+			if (term.buffer.active.type === "alternate") {
+				inputBufferRef.current = "";
+				setInputBuffer("");
+				setShowPopup(false);
+				if (usingSsh && sshKey) writeSsh(sshKey, data);
+				else writePty(paneId, data);
+				return;
+			}
+
+			if (data === "\r") {
+				const cmd = inputBufferRef.current.trim();
+				if (cmd) {
+					useCommandsStore.getState().recordCommand(cmd, hostId);
+				}
+				inputBufferRef.current = "";
+				setInputBuffer("");
+				setShowPopup(false);
+				setSuggestions([]);
+				completionStateRef.current.inputBuffer = "";
+				completionStateRef.current.showPopup = false;
+				completionStateRef.current.suggestions = [];
+			} else if (data === "\x7f" || data === "\b") {
+				const next = inputBufferRef.current.slice(0, -1);
+				inputBufferRef.current = next;
+				setInputBuffer(next);
+				completionStateRef.current.inputBuffer = next;
+				triggerSuggestions(next);
+			} else if (data === "\x03" || data === "\x15" || data === "\x0c") {
+				// Ctrl+C, Ctrl+U, Ctrl+L
+				inputBufferRef.current = "";
+				setInputBuffer("");
+				setShowPopup(false);
+				setSuggestions([]);
+				completionStateRef.current.inputBuffer = "";
+				completionStateRef.current.showPopup = false;
+				completionStateRef.current.suggestions = [];
+			} else if (data.length === 1 && data.charCodeAt(0) >= 32) {
+				const next = inputBufferRef.current + data;
+				inputBufferRef.current = next;
+				setInputBuffer(next);
+				completionStateRef.current.inputBuffer = next;
+				triggerSuggestions(next);
+			}
+
 			// 只有真实会话才接收按键：SSH 会话优先，其次本地 PTY；
 			// 两者都没有时既不回显也不伪造输出。
 			if (usingSsh && sshKey) {
@@ -214,6 +412,7 @@ export function Terminal({
 			window.cancelAnimationFrame(raf);
 			dataSub.dispose();
 			resizeSub.dispose();
+			cursorSub.dispose();
 			// 只解绑订阅；会话本身由 ptyCache / sshCache 持有，避免误杀
 			attachRef.current?.detach();
 			attachRef.current = null;
@@ -364,7 +563,57 @@ export function Terminal({
 		[],
 	);
 
-	return <div ref={containerRef} className={className} data-pane={paneId} data-host={hostId ?? undefined} />;
+	const selectedSuggestion = suggestions[selectedIndex] ?? suggestions[0];
+	const ghostRemainder =
+		ghostText &&
+		selectedSuggestion &&
+		inputBuffer.trim() &&
+		selectedSuggestion.command.toLowerCase().startsWith(inputBuffer.trim().toLowerCase())
+			? selectedSuggestion.command.slice(inputBuffer.trim().length)
+			: null;
+
+	return (
+		<div
+			className={cn("relative h-full w-full overflow-hidden", className)}
+			onMouseDown={() => {
+				setShowPopup(false);
+				completionStateRef.current.showPopup = false;
+			}}
+		>
+			<div ref={containerRef} className="h-full w-full" data-pane={paneId} data-host={hostId ?? undefined} />
+
+			{/* Warp 风格行内幽灵文本 (Ghost Text) */}
+			{ghostRemainder && cursorCoords && (
+				<div
+					style={{
+						left: cursorCoords.x,
+						top: cursorCoords.y,
+						fontFamily: fontStack(fontFamily),
+						fontSize: `${fontSize}px`,
+						lineHeight: `${fontSize * lineHeight}px`,
+					}}
+					className="pointer-events-none absolute z-20 select-none whitespace-pre font-mono text-faint opacity-45 italic"
+				>
+					{ghostRemainder}
+				</div>
+			)}
+
+			{/* VS Code 风格光标下方 IntelliSense 补全气泡 */}
+			{showPopup && cursorCoords && suggestions.length > 0 && (
+				<CommandCompletionPopup
+					suggestions={suggestions}
+					selectedIndex={selectedIndex}
+					onSelect={handleApplySuggestion}
+					onHoverIndex={(idx) => {
+						setSelectedIndex(idx);
+						completionStateRef.current.selectedIndex = idx;
+					}}
+					position={{ x: cursorCoords.x, y: cursorCoords.y + cursorCoords.height }}
+					currentInput={inputBuffer}
+				/>
+			)}
+		</div>
+	);
 }
 
 /** 响铃发声：WebAudio 合成，不引入音频文件（xterm 自身只上报 BEL 事件） */

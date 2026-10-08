@@ -61,6 +61,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 				trimNewline: state.trimNewline,
 				scheme: state.scheme,
 				sftpFollowActiveTab: state.sftpFollowActiveTab,
+				commandSuggestions: state.commandSuggestions,
+				ghostText: state.ghostText,
 			},
 			security: {
 				keychain: state.keychain,
