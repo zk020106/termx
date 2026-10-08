@@ -52,6 +52,8 @@ interface Entry {
 	phase: SshPhase | null;
 	phaseSubs: Set<(phase: SshPhase) => void>;
 	connected: boolean;
+	/** 该会话是否曾成功建立过连接 */
+	wasConnected: boolean;
 	/** 远端会话已经结束（shell 退出 / 通道关闭） */
 	exited: boolean;
 	failed: string | null;
@@ -71,6 +73,7 @@ function ensureEntry(key: string): Entry {
 			phase: null,
 			phaseSubs: new Set(),
 			connected: false,
+			wasConnected: false,
 			exited: false,
 			failed: null,
 			unlisten: null,
@@ -126,6 +129,11 @@ export function hasSshSession(key: string): boolean {
 	return sessions.get(key)?.connected ?? false;
 }
 
+/** 会话是否曾经成功连上过（用于区分是初次建连中，还是中途掉线） */
+export function sshSessionWasConnected(key: string): boolean {
+	return sessions.get(key)?.wasConnected ?? false;
+}
+
 /** 上一次失败原因，用于界面提示 */
 export function sshFailure(key: string): string | null {
 	return sessions.get(key)?.failed ?? null;
@@ -140,6 +148,8 @@ export interface SshOpenResult {
 	fingerprint?: string;
 }
 
+const mockSshBuffers = new Map<string, { buffer: string; host: string; user: string }>();
+
 /**
  * 发起连接。订阅事件 → 调后端 → 等首个 success 阶段。
  * 期间所有输出都进缓冲，终端挂上来即可回放。
@@ -153,12 +163,36 @@ export async function openSshSession(
 
 	if (entry.connected) return { ok: true };
 
-	// 重试（例如用户刚确认完指纹）：清掉上一次的失败与退出标记，
-	// 否则这个键会被判成"不活着"，界面上的「聚焦已有会话」就会失灵
 	entry.failed = null;
 	entry.exited = false;
 
-	// 先挂监听再发起连接：否则登录横幅会在监听就绪前发出而丢失
+	// Web 浏览器预览模式：模拟 SSH 握手并连接成功
+	const { isTauri } = await import("@/lib/tauri");
+	if (!isTauri()) {
+		onPhase?.({ phase: "tcp", ok: true, detail: "正在建立 TCP 连接…", kind: null, fingerprint: null });
+		await new Promise((r) => setTimeout(r, 200));
+		onPhase?.({ phase: "handshake", ok: true, detail: "SSH-2.0 握手完成…", kind: null, fingerprint: null });
+		await new Promise((r) => setTimeout(r, 200));
+		onPhase?.({ phase: "auth", ok: true, detail: "凭据验证通过…", kind: null, fingerprint: null });
+		await new Promise((r) => setTimeout(r, 150));
+
+		entry.connected = true;
+		entry.wasConnected = true;
+		const host = options.host;
+		const user = options.username || "root";
+		mockSshBuffers.set(key, { buffer: "", host, user });
+
+		entry.replay =
+			`\r\n\x1b[38;2;0;100;224m[TermX SSH]\x1b[0m 已成功连接到 ${host} (Web 模拟会话)\r\n` +
+			`Linux ${host} 6.1.0-22-amd64 #1 SMP PREEMPT_DYNAMIC Debian\r\n` +
+			`Last login: ${new Date().toLocaleString()} from 192.168.1.100\r\n\r\n` +
+			`\x1b[32m${user}@${host}\x1b[0m:\x1b[34m~\x1b[0m$ `;
+
+		emitLifecycle(key, "connected");
+		return { ok: true };
+	}
+
+	// 原生桌面端逻辑：先挂监听再发起连接
 	if (!entry.unlisten) {
 		entry.unlisten = await listenSsh(key, {
 			onPhase: (phase) => {
@@ -166,15 +200,14 @@ export async function openSshSession(
 				for (const sub of entry.phaseSubs) sub(phase);
 				onPhase?.(phase);
 				if (phase.phase === "failed") entry.failed = phase.detail;
-				if (phase.phase === "shell" && phase.ok) entry.connected = true;
+				if (phase.phase === "shell" && phase.ok) {
+					entry.connected = true;
+					entry.wasConnected = true;
+				}
 				if (phase.phase === "failed") emitLifecycle(key, "failed");
 				else if (phase.phase === "shell" && phase.ok) emitLifecycle(key, "connected");
 			},
 			onData: (chunk) => {
-				// 关键：不管此刻有没有终端挂着都累积整段输出。
-				// 只累积「没人看的那一段」的话，切到别的界面再回到工作区时，
-				// 之前已经画在终端上的内容就永久丢了——切回来是一片空白，
-				// 看起来就像会话没了。这里保留末尾 MAX_BUFFER，重新挂载时整段回放。
 				entry.replay = (entry.replay + chunk).slice(-MAX_BUFFER);
 				for (const sub of entry.subs) sub(chunk);
 			},
@@ -252,6 +285,74 @@ export function attachSsh(
 export function writeSsh(key: string, data: string): boolean {
 	const entry = sessions.get(key);
 	if (!entry?.connected) return false;
+
+	const mock = mockSshBuffers.get(key);
+	if (mock) {
+		// Web 模拟交互
+		const prompt = `\x1b[32m${mock.user}@${mock.host}\x1b[0m:\x1b[34m~\x1b[0m$ `;
+		const emit = (chunk: string) => {
+			entry.replay = (entry.replay + chunk).slice(-MAX_BUFFER);
+			for (const sub of entry.subs) sub(chunk);
+		};
+
+		for (let i = 0; i < data.length; i++) {
+			const char = data[i];
+			const code = data.charCodeAt(i);
+
+			if (char === "\r" || char === "\n") {
+				emit("\r\n");
+				const cmd = mock.buffer.trim();
+				mock.buffer = "";
+
+				if (cmd) {
+					const [name, ...args] = cmd.split(" ");
+					switch (name.toLowerCase()) {
+						case "help":
+							emit("支持的远程命令测试：help, ls, whoami, uname, top, uptime, clear, echo, ping\r\n");
+							break;
+						case "ls":
+							emit("docker-compose.yml   nginx.conf   src   dist   logs   package.json\r\n");
+							break;
+						case "whoami":
+							emit(`${mock.user}\r\n`);
+							break;
+						case "uname":
+							emit(`Linux ${mock.host} 6.1.0-22-amd64 #1 SMP PREEMPT_DYNAMIC Debian\r\n`);
+							break;
+						case "uptime":
+							emit(` ${new Date().toLocaleTimeString()} up 42 days, 3 users, load average: 0.12, 0.08, 0.05\r\n`);
+							break;
+						case "clear":
+							emit("\x1b[2J\x1b[H");
+							break;
+						case "echo":
+							emit(args.join(" ") + "\r\n");
+							break;
+						case "ping":
+							emit(`PING ${args[0] || "1.1.1.1"}: 56 data bytes\r\n64 bytes: icmp_seq=1 ttl=58 time=12.4 ms\r\n`);
+							break;
+						default:
+							emit(`bash: ${name}: command not found\r\n`);
+							break;
+					}
+				}
+				emit(prompt);
+			} else if (code === 127 || char === "\b") {
+				if (mock.buffer.length > 0) {
+					mock.buffer = mock.buffer.slice(0, -1);
+					emit("\b \b");
+				}
+			} else if (code === 3) {
+				mock.buffer = "";
+				emit("^C\r\n" + prompt);
+			} else if (code >= 32) {
+				mock.buffer += char;
+				emit(char);
+			}
+		}
+		return true;
+	}
+
 	void sshWrite(key, data);
 	return true;
 }

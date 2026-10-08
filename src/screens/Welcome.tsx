@@ -5,10 +5,10 @@ import { cn } from "@/lib/cn";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
+import { useSessionsStore } from "@/store/sessions";
 
 /* 首次启动（对应 termx.vetd/frames/welcome.tsx，需求书 06）。
- * 整页界面，不套 WindowChrome。四步流程：欢迎 → 导入会话 → 手动新建 → 设置主密码（可跳过），
- * 可前进/后退；右下角为骨架期评审用的状态切换器（也支持 ?step=1..4 深链）。 */
+ * 整页界面，不套 WindowChrome。四步流程：欢迎 → 导入会话 → 手动新建 → 设置主密码（可跳过），可前进/后退。 */
 
 interface ImportSource {
 	id: string;
@@ -57,7 +57,10 @@ export default function Welcome() {
 		setPicked((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
 
 	// 引导结束后回首页（主机库）：那里才有「连哪台」的下一步
-	const finish = () => navigate("/hosts");
+	const finish = () => {
+		useSessionsStore.getState().setActiveTab("vaults");
+		navigate("/workspace");
+	};
 
 	const next = () => {
 		if (step === 2) {
@@ -465,26 +468,6 @@ export default function Welcome() {
 				</div>
 
 				<div className="flex justify-center">{rightColumn()}</div>
-			</div>
-
-			{/* 状态切换器（骨架期评审工具） */}
-			<div className="absolute right-3 bottom-3 flex items-center gap-1.5 rounded-control border border-border bg-surface-raised/95 px-2 py-1 shadow-lg">
-				<span className="font-mono text-[9px] tracking-wider text-faint uppercase">状态</span>
-				{STEPS.map((item, index) => (
-					<button
-						key={item.label}
-						type="button"
-						onClick={() => setStep(index)}
-						className={cn(
-							"rounded px-1.5 py-0.5 text-[10.5px] transition-colors",
-							index === step
-								? "border border-border bg-surface font-medium text-surface-foreground"
-								: "text-muted hover:text-surface-foreground",
-						)}
-					>
-						{index + 1} {item.label}
-					</button>
-				))}
 			</div>
 		</div>
 	);

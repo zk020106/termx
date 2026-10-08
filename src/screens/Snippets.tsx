@@ -6,7 +6,7 @@ import { Drawer, Modal } from "@/components/ui/Overlay";
 import { SNIPPET_TARGET_LABEL, type Host, type Snippet, type SnippetTarget } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
-import { useSessionsStore } from "@/store/sessions";
+import { useSessionsStore, writeToActiveTerminal } from "@/store/sessions";
 import { draftSnippet, extractVariables, useSnippetsStore } from "@/store/snippets";
 import { toast } from "@/store/toast";
 import { useEffect, useMemo, useState } from "react";
@@ -26,22 +26,6 @@ const TARGETS: SnippetTarget[] = ["current", "selected", "all"];
 
 const VAR_GLOBAL = /\$\{[A-Za-z0-9_-]+\}/g;
 const VAR_TOKEN = /^\$\{[A-Za-z0-9_-]+\}$/;
-
-/** 评审用状态切换器：一次点选切到某个必查状态 */
-type ReviewState = "list" | "new" | "edit" | "noresult";
-
-const REVIEW_STATES: { value: ReviewState; label: string }[] = [
-	{ value: "list", label: "列表" },
-	{ value: "new", label: "新建" },
-	{ value: "edit", label: "编辑" },
-	{ value: "noresult", label: "无结果" },
-];
-
-/** 深链 `#/snippets?state=new`：让截图工具能直接打开某个评审状态 */
-function readReviewState(): ReviewState | null {
-	const value = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("state");
-	return REVIEW_STATES.some((item) => item.value === value) ? (value as ReviewState) : null;
-}
 
 /** 把命令切成「普通文本 / 变量占位」两类片段，用于模板与预览高亮 */
 function tokenize(command: string): { text: string; isVar: boolean }[] {
@@ -69,7 +53,6 @@ export default function Snippets() {
 	const [draft, setDraft] = useState<Snippet | null>(null);
 	const [draftTouched, setDraftTouched] = useState(false);
 	const [deleteOpen, setDeleteOpen] = useState(false);
-	const [review, setReview] = useState<ReviewState>("list");
 
 	/* ------------------------------ 派生数据 ------------------------------ */
 
@@ -237,12 +220,21 @@ export default function Snippets() {
 
 	const handleSend = () => {
 		if (!selected || !canSend) return;
-		void navigator.clipboard?.writeText(resolvedCommand).catch(() => undefined);
-		toast({
-			title: "命令已复制，终端注入尚未接入",
-			description: `目标：${targetInfo.label} · PTY 注入要等 SSH 会话层接入，请先手动粘贴执行。`,
-			tone: "warning",
-		});
+		const ok = writeToActiveTerminal(resolvedCommand + "\n");
+		if (ok) {
+			toast({
+				title: `已注入终端执行：${selected.name}`,
+				description: resolvedCommand,
+				tone: "success",
+			});
+		} else {
+			void navigator.clipboard?.writeText(resolvedCommand).catch(() => undefined);
+			toast({
+				title: "终端未就绪，命令已复制到剪贴板",
+				description: "当前没有活跃的终端会话，请先切换到工作区。",
+				tone: "warning",
+			});
+		}
 	};
 
 	const handleCopy = () => {
@@ -263,41 +255,6 @@ export default function Snippets() {
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
 	});
-
-	/** 状态切换器：一键进入某个必查状态 */
-	const applyReview = (next: ReviewState) => {
-		setReview(next);
-		setDraft(null);
-		setQuery("");
-		setGroup(ALL_GROUPS);
-		setTarget("current");
-		switch (next) {
-			case "list":
-				break;
-			case "new":
-				openNew();
-				break;
-			case "edit": {
-				const editing = library.find((item) => item.id === selectedId) ?? library[0];
-				if (!editing) {
-					toast({ title: "还没有片段可编辑", description: "先新建一个命令片段。", tone: "warning" });
-					break;
-				}
-				setSelectedId(editing.id);
-				openEdit(editing);
-				break;
-			}
-			case "noresult":
-				setQuery("内网穿透");
-				break;
-		}
-	};
-
-	/* 深链预置状态（`#/snippets?state=new` 等），首帧后套用一次 */
-	useEffect(() => {
-		const preset = readReviewState();
-		if (preset) applyReview(preset);
-	}, []);
 
 	/* -------------------------------- 渲染 -------------------------------- */
 
@@ -466,7 +423,7 @@ export default function Snippets() {
 								<label className="mb-1 text-[11.5px] text-muted">发送目标会话</label>
 								{!hasSessions ? (
 									<div className="flex items-start gap-2 rounded border border-border bg-surface p-2.5 text-[11px] leading-relaxed text-muted">
-										<span className="icon-[lucide--terminal-off] mt-px size-3.5 shrink-0 text-faint" />
+										<span className="icon-[lucide--square-terminal] mt-px size-3.5 shrink-0 text-faint" />
 										<span>还没有已连接的终端：先在主机库打开一个会话。</span>
 									</div>
 								) : (
@@ -638,31 +595,6 @@ export default function Snippets() {
 								</div>
 							))
 						)}
-					</div>
-
-					{/* 评审用状态切换器（骨架期工具，永远浮在抽屉之上） */}
-					<div className="relative z-50 shrink-0 border-t border-border px-2 py-1.5">
-						<div className="mb-1 flex items-center gap-1 text-[10px] font-medium tracking-wider text-faint uppercase">
-							<span className="icon-[lucide--layers] size-3" />
-							状态（评审）
-						</div>
-						<div className="grid grid-cols-4 gap-1">
-							{REVIEW_STATES.map((item) => (
-								<button
-									key={item.value}
-									type="button"
-									onClick={() => applyReview(item.value)}
-									className={cn(
-										"h-5 truncate rounded border text-[10px] transition-colors",
-										review === item.value
-											? "border-primary/40 bg-primary/15 font-medium text-primary"
-											: "border-border bg-surface text-muted hover:bg-surface-raised hover:text-surface-foreground",
-									)}
-								>
-									{item.label}
-								</button>
-							))}
-						</div>
 					</div>
 				</aside>
 

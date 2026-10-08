@@ -2,174 +2,142 @@
 @plugin "@iconify/tailwind4";
 
 /* =============================================================================
- * TermX — 设计系统落地层
+ * TermX — Meta Design System 落地层
  *
- * 来源：termx.vetd/theme.css（Vetta 设计画布）与 termx.vetd/DESIGN.md（Linear 体系）
- * 结构：
- *   1) :root / [data-theme] 定义 --tx-* 原始语义变量（可随主题切换）
- *   2) [data-accent] 在六套强调色色板之间切换：--tx-primary（主色，大面积底色）
- *      与 --tx-accent（同色相的亮色，小面积标记），默认 indigo
- *   3) @theme 把 --tx-* 映射为 Tailwind 的 --color-*，从而生成 bg-surface /
- *      text-muted / border-border 等工具类
- *
- * 注意：主题与强调色属性必须挂在 <html> 上，--color-* 的 var 引用才解析到正确的值。
- * 规则：帧里禁止硬编码 hex，一律使用 token。
+ * 规范来源：getdesign.md/meta/design-md (DESIGN.md)
+ * 核心特征：
+ *   - 配色：Meta 标志性深邃高对比画布（暗色 #0a1317 / 亮色 #ffffff）
+ *   - 主色：Meta Cobalt Blue (#0064e0) 作为核心交互与 CTA 主色
+ *   - 控件与卡片：药丸状按钮（Pill CTA）、柔和微圆角卡片（16px）、发丝级分割线（#dee3e9 / #232d36）
+ *   - 语义状态：Meta Success (#31a24c)、Meta Warning (#f7b928)、Meta Critical (#e41e3f)
  * ========================================================================== */
 
 :root,
 :root[data-theme="dark"] {
 	color-scheme: dark;
 
-	/* Linear 核心 */
-	--tx-surface: oklch(14% 0.006 260);
-	--tx-surface-raised: oklch(17.5% 0.008 260);
-	--tx-surface-sunk: oklch(11% 0.005 260);
-	--tx-surface-foreground: oklch(96% 0.002 260);
-	--tx-muted: oklch(66% 0.008 260);
-	--tx-faint: oklch(46% 0.01 260);
-	--tx-border: oklch(24% 0.008 260);
+	/* Meta Dark Surface System (ink-deep) */
+	--tx-surface: #0a1317;
+	--tx-surface-raised: #151d24;
+	--tx-surface-sunk: #060a0d;
+	--tx-surface-foreground: #f1f4f7;
+	--tx-muted: #8595a4;
+	--tx-faint: #5d6c7b;
+	--tx-border: #232d36;
 
-	/* 强调色色板：六套预置（深色一套，浅色在下方覆盖）。
-	 * --tx-swatch-* 只描述色板本身，--tx-accent 始终指向「当前选中」的那套。 */
-	--tx-swatch-indigo: oklch(68% 0.16 274);
-	--tx-swatch-indigo-soft: oklch(23% 0.06 274);
-	--tx-swatch-cyan: oklch(76% 0.12 205);
-	--tx-swatch-cyan-soft: oklch(22% 0.04 205);
-	--tx-swatch-emerald: oklch(72% 0.15 155);
-	--tx-swatch-emerald-soft: oklch(23% 0.04 155);
-	--tx-swatch-amber: oklch(76% 0.14 65);
-	--tx-swatch-amber-soft: oklch(24% 0.05 65);
-	--tx-swatch-rose: oklch(70% 0.17 25);
-	--tx-swatch-rose-soft: oklch(23% 0.06 25);
-	--tx-swatch-steel: oklch(74% 0.02 260);
-	--tx-swatch-steel-soft: oklch(24% 0.01 260);
+	/* Meta Accent Swatches */
+	--tx-swatch-indigo: #0064e0;
+	--tx-swatch-indigo-soft: rgba(0, 100, 224, 0.16);
+	--tx-swatch-cyan: #0091ff;
+	--tx-swatch-cyan-soft: rgba(0, 145, 255, 0.16);
+	--tx-swatch-emerald: #31a24c;
+	--tx-swatch-emerald-soft: rgba(49, 162, 76, 0.16);
+	--tx-swatch-amber: #f2a918;
+	--tx-swatch-amber-soft: rgba(242, 169, 24, 0.16);
+	--tx-swatch-rose: #f0284a;
+	--tx-swatch-rose-soft: rgba(240, 40, 74, 0.16);
+	--tx-swatch-steel: #5d6c7b;
+	--tx-swatch-steel-soft: rgba(93, 108, 123, 0.16);
 
-	/* 强调色当「主色」用：按钮底色、选中态、焦点框都是大面积上色，色板那套亮色
-	 * 直接当底压白字只有 2.0–2.9:1，所以按色相保留、把明度落到 54–57%，
-	 * 并把彩度收敛进 sRGB 色域（oklch 超域会被浏览器裁掉，白算对比度）。
-	 * 目标：--tx-primary-foreground（oklch 99% 0 0）压上去 ≥4.5:1，实测 4.61–4.77:1。 */
-	--tx-primary-indigo: oklch(56% 0.19 274); /* 与改造前的深色主色一致，默认观感不变 */
-	--tx-primary-cyan: oklch(54% 0.092 205);
-	--tx-primary-emerald: oklch(54% 0.133 155);
-	--tx-primary-amber: oklch(56% 0.126 65);
-	--tx-primary-rose: oklch(57% 0.19 25);
-	--tx-primary-steel: oklch(55% 0.02 260);
+	/* Meta Primary (Cobalt Blue #0064e0) */
+	--tx-primary: #0064e0;
+	--tx-primary-foreground: #ffffff;
+	--tx-accent: #0091ff;
+	--tx-accent-soft: rgba(0, 100, 224, 0.16);
 
-	/* 主色前景：同一枚近白在 6 套主色上都够（见上），无需逐色分叉 */
-	--tx-primary-foreground: oklch(99% 0 0);
-	/* 默认主色（强调色为 indigo 时） */
-	--tx-primary: var(--tx-primary-indigo);
+	/* Meta Semantics */
+	--tx-danger: #e41e3f;
+	--tx-danger-soft: rgba(228, 30, 63, 0.16);
+	--tx-warning: #f7b928;
+	--tx-warning-soft: rgba(247, 185, 40, 0.16);
+	--tx-success: #31a24c;
+	--tx-success-soft: rgba(49, 162, 76, 0.16);
 
-	/* 默认强调色：Linear 经典靛蓝 */
-	--tx-accent: var(--tx-swatch-indigo);
-	--tx-accent-soft: var(--tx-swatch-indigo-soft);
-	--tx-danger: oklch(62% 0.21 25);
-	--tx-danger-soft: oklch(22% 0.06 25);
-	--tx-warning: oklch(74% 0.15 65);
-	--tx-warning-soft: oklch(24% 0.05 65);
-	--tx-success: oklch(72% 0.15 155);
-	--tx-success-soft: oklch(23% 0.04 155);
-
-	/* 终端画布（深浅主题下都保持近黑，见需求书 08） */
-	--tx-term: oklch(12% 0.006 260);
-	--tx-term-ink: oklch(91% 0.004 260);
+	/* Terminal Canvas */
+	--tx-term: #070c0f;
+	--tx-term-ink: #f1f4f7;
 }
 
-/* 浅色模式：首版只覆盖基础语义层，逐屏复核属于后续课题 */
 :root[data-theme="light"] {
 	color-scheme: light;
 
-	--tx-surface: oklch(97.5% 0.002 260);
-	--tx-surface-raised: oklch(99.4% 0.001 260);
-	--tx-surface-sunk: oklch(94.5% 0.003 260);
-	--tx-surface-foreground: oklch(24% 0.01 260);
-	--tx-muted: oklch(48% 0.012 260);
-	--tx-faint: oklch(62% 0.01 260);
-	--tx-border: oklch(88% 0.004 260);
+	/* Meta Light Surface System (canvas & surface-soft) */
+	--tx-surface: #ffffff;
+	--tx-surface-raised: #f1f4f7;
+	--tx-surface-sunk: #eef2f6;
+	--tx-surface-foreground: #0a1317;
+	--tx-muted: #4b4c4f;
+	--tx-faint: #8595a4;
+	--tx-border: #dee3e9;
 
-	--tx-swatch-indigo: oklch(52% 0.19 274);
-	--tx-swatch-indigo-soft: oklch(93% 0.035 274);
-	--tx-swatch-cyan: oklch(55% 0.11 205);
-	--tx-swatch-cyan-soft: oklch(93% 0.035 205);
-	--tx-swatch-emerald: oklch(53% 0.14 155);
-	--tx-swatch-emerald-soft: oklch(94% 0.04 155);
-	--tx-swatch-amber: oklch(56% 0.13 65);
-	--tx-swatch-amber-soft: oklch(94% 0.05 65);
-	--tx-swatch-rose: oklch(53% 0.19 25);
-	--tx-swatch-rose-soft: oklch(94% 0.04 25);
-	--tx-swatch-steel: oklch(48% 0.02 260);
-	--tx-swatch-steel-soft: oklch(93% 0.008 260);
+	/* Meta Accent Swatches (Light) */
+	--tx-swatch-indigo: #0064e0;
+	--tx-swatch-indigo-soft: rgba(0, 100, 224, 0.1);
+	--tx-swatch-cyan: #0091ff;
+	--tx-swatch-cyan-soft: rgba(0, 145, 255, 0.1);
+	--tx-swatch-emerald: #31a24c;
+	--tx-swatch-emerald-soft: rgba(49, 162, 76, 0.1);
+	--tx-swatch-amber: #f2a918;
+	--tx-swatch-amber-soft: rgba(242, 169, 24, 0.1);
+	--tx-swatch-rose: #e41e3f;
+	--tx-swatch-rose-soft: rgba(228, 30, 63, 0.1);
+	--tx-swatch-steel: #5d6c7b;
+	--tx-swatch-steel-soft: rgba(93, 108, 123, 0.1);
 
-	/* 浅色下的主色：色板本身已经是 48–56% 的深色，基本能直接当底压白字
-	 * （实测 4.68–6.35:1）；只有 cyan 在 55% 处卡在 4.53:1，降 1% 明度留余量。 */
-	--tx-primary-indigo: oklch(52% 0.19 274); /* 与改造前的浅色主色一致，默认观感不变 */
-	--tx-primary-cyan: oklch(54% 0.092 205);
-	--tx-primary-emerald: oklch(53% 0.131 155);
-	--tx-primary-amber: oklch(56% 0.126 65);
-	--tx-primary-rose: oklch(53% 0.19 25);
-	--tx-primary-steel: oklch(48% 0.02 260);
+	/* Meta Primary (Cobalt Blue #0064e0) */
+	--tx-primary: #0064e0;
+	--tx-primary-foreground: #ffffff;
+	--tx-accent: #0064e0;
+	--tx-accent-soft: rgba(0, 100, 224, 0.1);
 
-	/* 主色前景：同一枚近白在 6 套主色上都够（见上），无需逐色分叉 */
-	--tx-primary-foreground: oklch(99% 0 0);
-	/* 默认主色（强调色为 indigo 时） */
-	--tx-primary: var(--tx-primary-indigo);
+	/* Meta Semantics */
+	--tx-danger: #e41e3f;
+	--tx-danger-soft: rgba(228, 30, 63, 0.1);
+	--tx-warning: #f2a918;
+	--tx-warning-soft: rgba(242, 169, 24, 0.1);
+	--tx-success: #31a24c;
+	--tx-success-soft: rgba(49, 162, 76, 0.1);
 
-	/* 默认强调色：Linear 经典靛蓝 */
-	--tx-accent: var(--tx-swatch-indigo);
-	--tx-accent-soft: var(--tx-swatch-indigo-soft);
-	--tx-danger: oklch(55% 0.2 25);
-	--tx-danger-soft: oklch(94% 0.04 25);
-	--tx-warning: oklch(60% 0.14 65);
-	--tx-warning-soft: oklch(94% 0.05 65);
-	--tx-success: oklch(53% 0.14 155);
-	--tx-success-soft: oklch(94% 0.04 155);
+	/* Terminal Canvas */
+	--tx-term: #ffffff;
+	--tx-term-ink: #0a1317;
 }
 
-/* 强调色切换：data-accent 也挂在 <html> 上，和 data-theme 叠加生效。
- * 这一段必须排在两个主题块之后：选择器特异性相同，靠顺序盖过主题块里的默认值。
- *
- * 每个块做两件事：
- *   1) --tx-primary 指向该强调色的主色取值 → bg-primary / text-primary / border-primary
- *      等 127 处用法（按钮、选中态、焦点框、开关、活动栏高亮…）全部跟着变；
- *   2) --tx-accent 仍指向亮色板：小面积标记（文字/图标/描边）需要更亮的同色相，
- *      也避免和 primary 语义重叠（见 Display.tsx 的 primary/accent 两种 tone）。 */
 :root[data-accent="indigo"] {
-	--tx-primary: var(--tx-primary-indigo);
-	--tx-accent: var(--tx-swatch-indigo);
-	--tx-accent-soft: var(--tx-swatch-indigo-soft);
+	--tx-primary: #0064e0;
+	--tx-accent: #0091ff;
+	--tx-accent-soft: rgba(0, 100, 224, 0.16);
 }
 :root[data-accent="cyan"] {
-	--tx-primary: var(--tx-primary-cyan);
-	--tx-accent: var(--tx-swatch-cyan);
-	--tx-accent-soft: var(--tx-swatch-cyan-soft);
+	--tx-primary: #0091ff;
+	--tx-accent: #0091ff;
+	--tx-accent-soft: rgba(0, 145, 255, 0.16);
 }
 :root[data-accent="emerald"] {
-	--tx-primary: var(--tx-primary-emerald);
-	--tx-accent: var(--tx-swatch-emerald);
-	--tx-accent-soft: var(--tx-swatch-emerald-soft);
+	--tx-primary: #31a24c;
+	--tx-accent: #24e400;
+	--tx-accent-soft: rgba(49, 162, 76, 0.16);
 }
 :root[data-accent="amber"] {
-	--tx-primary: var(--tx-primary-amber);
-	--tx-accent: var(--tx-swatch-amber);
-	--tx-accent-soft: var(--tx-swatch-amber-soft);
+	--tx-primary: #f2a918;
+	--tx-accent: #ffe200;
+	--tx-accent-soft: rgba(242, 169, 24, 0.16);
 }
 :root[data-accent="rose"] {
-	--tx-primary: var(--tx-primary-rose);
-	--tx-accent: var(--tx-swatch-rose);
-	--tx-accent-soft: var(--tx-swatch-rose-soft);
+	--tx-primary: #f0284a;
+	--tx-accent: #f0284a;
+	--tx-accent-soft: rgba(240, 40, 74, 0.16);
 }
 :root[data-accent="steel"] {
-	--tx-primary: var(--tx-primary-steel);
-	--tx-accent: var(--tx-swatch-steel);
-	--tx-accent-soft: var(--tx-swatch-steel-soft);
+	--tx-primary: #5d6c7b;
+	--tx-accent: #8595a4;
+	--tx-accent-soft: rgba(93, 108, 123, 0.16);
 }
 
-/* 把原始变量映射为 Tailwind token。用普通 @theme（非 inline），
- * 以保证 --color-* 同时存在于 :root，可直接用于 var(--color-primary) 这类任意值。 */
 @theme {
-	--font-sans: "IBM Plex Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-		"Microsoft YaHei", sans-serif;
-	--font-display: var(--font-sans);
+	--font-sans: "Optimistic Text", "Optimistic VF", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+		Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+	--font-display: "Optimistic Display", "Optimistic VF", var(--font-sans);
 	--font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
 
 	--color-primary: var(--tx-primary);
@@ -185,7 +153,6 @@
 	--color-accent: var(--tx-accent);
 	--color-accent-soft: var(--tx-accent-soft);
 
-	/* 色板预览用：设置页的六个圆点各显本色，不跟随当前选中色 */
 	--color-swatch-indigo: var(--tx-swatch-indigo);
 	--color-swatch-cyan: var(--tx-swatch-cyan);
 	--color-swatch-emerald: var(--tx-swatch-emerald);
@@ -202,8 +169,9 @@
 	--color-term: var(--tx-term);
 	--color-term-ink: var(--tx-term-ink);
 
-	--radius-card: 6px;
-	--radius-control: 6px;
+	/* Meta 规范：卡片圆角 16px，控制台/输入框基础圆角 8px */
+	--radius-card: 16px;
+	--radius-control: 8px;
 }
 
 @layer base {
@@ -217,6 +185,7 @@
 		margin: 0;
 		font-family: var(--font-sans);
 		font-size: 13px;
+		letter-spacing: -0.01em;
 		-webkit-font-smoothing: antialiased;
 		text-rendering: optimizeLegibility;
 	}
@@ -232,20 +201,20 @@
 		user-select: text;
 	}
 
-	/* 细滚动条，符合高密度界面 */
+	/* Meta 风格细滚动条 */
 	* {
 		scrollbar-width: thin;
 		scrollbar-color: var(--color-border) transparent;
 	}
 	*::-webkit-scrollbar {
-		width: 10px;
-		height: 10px;
+		width: 8px;
+		height: 8px;
 	}
 	*::-webkit-scrollbar-thumb {
 		background-color: var(--color-border);
-		border: 3px solid transparent;
+		border: 2px solid transparent;
 		background-clip: content-box;
-		border-radius: 6px;
+		border-radius: 9999px;
 	}
 	*::-webkit-scrollbar-thumb:hover {
 		background-color: var(--color-faint);
@@ -256,11 +225,11 @@
 	}
 
 	:focus-visible {
-		outline: 1px solid var(--color-primary);
+		outline: 2px solid var(--color-primary);
 		outline-offset: 1px;
 	}
 
 	::selection {
-		background: color-mix(in oklch, var(--color-primary) 30%, transparent);
+		background: rgba(0, 100, 224, 0.28);
 	}
 }

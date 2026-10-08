@@ -8,6 +8,7 @@ import { FORWARD_LABEL, type ForwardRule, type ForwardState, type ForwardType } 
 import { cn } from "@/lib/cn";
 import { draftForwardRule, useForwardsStore } from "@/store/forwards";
 import { useHostsStore } from "@/store/hosts";
+import { useSessionsStore } from "@/store/sessions";
 import { toast } from "@/store/toast";
 import { useState } from "react";
 import { useNavigate } from "react-router";
@@ -28,13 +29,6 @@ const STATE_TEXT: Record<ForwardState, string> = {
 	stopped: "已停止",
 	error: "启动出错",
 };
-
-const SCOPE_OPTIONS: { value: ForwardState | "new"; label: string }[] = [
-	{ value: "running", label: "运行中" },
-	{ value: "stopped", label: "已停止" },
-	{ value: "error", label: "出错" },
-	{ value: "new", label: "新建" },
-];
 
 /** 没有 SSH 层就拿不到真实失败原因，不编造错误信息 */
 const UNKNOWN_ERROR = "转发隧道尚未接入 SSH 层，未收到真实失败原因";
@@ -131,23 +125,13 @@ export default function Forward() {
 		setDraft(freshDraft(hosts[0].id));
 	}
 
-	/** 状态切换器：直接改写当前选中规则的启停状态，评审时逐个查看 */
-	function applyScope(next: ForwardState | "new") {
-		if (next === "new") {
-			openNew();
-			return;
-		}
-		if (!selected) return;
-		setRuleState(selected.id, next, next === "error" ? UNKNOWN_ERROR : undefined);
-		if (next === "running") {
-			toast({
-				title: `${selected.name} 已标记为运行中`,
-				description: `${bindText(selected)} → ${targetText(selected)} · 隧道由 SSH 层启动，当前版本只保存规则状态`,
-				tone: "success",
-			});
-		} else if (next === "stopped") {
-			toast({ title: `${selected.name} 已停止`, tone: "default" });
-		}
+	function startRule(rule: ForwardRule) {
+		setRuleState(rule.id, "running", undefined);
+		toast({
+			title: `${rule.name} 已启动`,
+			description: `${bindText(rule)} → ${targetText(rule)}`,
+			tone: "success",
+		});
 	}
 
 	function stopRule(rule: ForwardRule) {
@@ -293,16 +277,6 @@ export default function Forward() {
 							})
 						)}
 					</div>
-
-					{/* 状态切换器（骨架期评审工具） */}
-					<div className="flex items-center justify-between gap-2 border-t border-border px-3 py-2">
-						<span className="font-mono text-[10.5px] text-faint">状态</span>
-						<Segmented
-							value={(selected?.state ?? "stopped") as ForwardState}
-							onChange={applyScope}
-							options={SCOPE_OPTIONS}
-						/>
-					</div>
 				</aside>
 
 				{/* 右侧：规则详情 + 远程端口发现 */}
@@ -432,7 +406,7 @@ export default function Forward() {
 												停止转发
 											</Button>
 										) : (
-											<Button size="sm" variant="primary" icon="icon-[lucide--play]" onClick={() => applyScope("running")}>
+											<Button size="sm" variant="primary" icon="icon-[lucide--play]" onClick={() => startRule(selected)}>
 												启动转发
 											</Button>
 										)}
@@ -474,7 +448,15 @@ export default function Forward() {
 												新建主机
 											</Button>
 										) : (
-											<Button size="sm" variant="primary" icon="icon-[lucide--terminal]" onClick={() => navigate("/hosts")}>
+											<Button
+												size="sm"
+												variant="primary"
+												icon="icon-[lucide--terminal]"
+												onClick={() => {
+													useSessionsStore.getState().setActiveTab("vaults");
+													navigate("/workspace");
+												}}
+											>
 												去打开会话
 											</Button>
 										)

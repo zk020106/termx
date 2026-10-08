@@ -1,20 +1,16 @@
 import { activities, activityFromPath, settingsActivity } from "@/components/chrome/activities";
 import { cn } from "@/lib/cn";
-import { useUiStore } from "@/store/ui";
+import { useSessionsStore } from "@/store/sessions";
 import { Link, useLocation } from "react-router";
 
-/** 活动栏（需求书 04-②）：44px 宽，主机库/文件/转发/片段/密钥/传输，设置固定底部 */
+/** 活动栏：44px 宽，主机/文件/转发/片段/密钥/传输，设置固定底部 */
 export function ActivityBar() {
 	const { pathname } = useLocation();
-	const setActivity = useUiStore((s) => s.setActivity);
-	const sidebarOpen = useUiStore((s) => s.sidebarOpen);
-	const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-
-	// 高亮按**前缀**匹配：/hosts/new、/workspace、/editor 这类子路径要归到对应项
-	const active = activityFromPath(pathname);
+	const tabs = useSessionsStore((s) => s.tabs);
+	const active = activityFromPath(pathname) ?? "hosts";
 
 	return (
-		<nav className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-surface-sunk py-2">
+		<nav className="flex w-11 shrink-0 flex-col items-center gap-1.5 border-r border-border bg-surface-sunk py-2.5">
 			{activities.map((item) => {
 				const on = item.id === active;
 				return (
@@ -24,19 +20,24 @@ export function ActivityBar() {
 						title={item.label}
 						aria-label={item.label}
 						onClick={() => {
-							setActivity(item.id);
-							// 点击当前项 = 收起/展开侧边面板（与 VS Code 一致）
-							if (on) toggleSidebar();
+							if (item.id === "hosts") {
+								useSessionsStore.getState().setActiveTab("vaults");
+							}
 						}}
 						className={cn(
-							"group relative flex size-7 items-center justify-center rounded-control transition-colors",
+							"group relative flex size-7.5 items-center justify-center rounded-xl transition-all duration-150 cursor-pointer",
 							on
-								? "bg-surface-raised text-surface-foreground"
-								: "text-muted hover:bg-surface-raised/60 hover:text-surface-foreground",
+								? "bg-primary/15 text-primary shadow-xs"
+								: "text-muted hover:bg-surface-raised hover:text-surface-foreground",
 						)}
 					>
-						{on && sidebarOpen && <span className="absolute -left-2 h-3.5 w-0.5 rounded-r bg-primary" />}
-						<span className={cn(item.icon, "size-3.5")} />
+						{on && <span className="absolute -left-1.5 h-4 w-0.5 rounded-r-full bg-primary" />}
+						<span className={cn(item.icon, "size-4")} />
+						{item.id === "hosts" && tabs.length > 0 && (
+							<span className="absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-primary font-mono text-[8.5px] font-bold text-white shadow-2xs">
+								{tabs.length}
+							</span>
+						)}
 					</Link>
 				);
 			})}
@@ -46,14 +47,14 @@ export function ActivityBar() {
 				title={settingsActivity.label}
 				aria-label={settingsActivity.label}
 				className={cn(
-					"group relative mt-auto flex size-7 items-center justify-center rounded-control transition-colors",
+					"group relative mt-auto flex size-7.5 items-center justify-center rounded-xl transition-all duration-150 cursor-pointer",
 					active === "settings"
-						? "bg-surface-raised text-surface-foreground"
-						: "text-muted hover:bg-surface-raised/60 hover:text-surface-foreground",
+						? "bg-primary/15 text-primary shadow-xs"
+						: "text-muted hover:bg-surface-raised hover:text-surface-foreground",
 				)}
 			>
-				{active === "settings" && <span className="absolute -left-2 h-3.5 w-0.5 rounded-r bg-primary" />}
-				<span className={cn(settingsActivity.icon, "size-3.5")} />
+				{active === "settings" && <span className="absolute -left-1.5 h-4 w-0.5 rounded-r-full bg-primary" />}
+				<span className={cn(settingsActivity.icon, "size-4")} />
 			</Link>
 		</nav>
 	);

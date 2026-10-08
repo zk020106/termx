@@ -1,7 +1,7 @@
 import { StatusDot } from "@/components/ui/Display";
 import { CONNECTION_LABEL, type ConnectionStatus, type Host } from "@/data/types";
 import { cn } from "@/lib/cn";
-import { describeProbe, formatMs, latencyTier, latencyTierClass, type ProbeReport } from "@/lib/probe";
+import { formatMs, latencyTier, latencyTierClass } from "@/lib/probe";
 import { describeRtt, type SshRttReport } from "@/lib/ssh";
 import { connVisual } from "@/lib/status";
 import { useHostsStore } from "@/store/hosts";
@@ -28,15 +28,13 @@ export function StatusBar() {
 	const visual = connVisual[status];
 	const reconnecting = status === "reconnecting";
 
-	// 连接建立后量真正的往返（SSH keepalive 往返）；没连上时退回主机库的 TCP 建连耗时。
-	// 键必须是**会话键**：标签 id 不是会话身份，同主机两条会话会有两个不同的键
+	// 连接建立后量真正的 SSH 往返（SSH keepalive 往返）
 	const sessionKey = tab?.sessionKey ?? undefined;
 	const rtt = useProbeStore((s) => (sessionKey ? s.rtt[sessionKey] : undefined));
-	const probe = useProbeStore((s) => (host ? s.results[host.id] : undefined));
 	// 只有真的挂着主机的会话才量往返：本地终端会话没有 SSH 连接可发 keepalive
 	useSshRttPolling(sessionKey, status === "connected" && Boolean(sessionKey));
 
-	const latency = latencyReading(rtt, probe, status === "connected", host);
+	const latency = latencyReading(rtt, status === "connected", host);
 
 	return (
 		<footer className="flex h-6 shrink-0 items-center gap-2 border-t border-border bg-surface-sunk px-3 font-mono text-[11px] text-muted">
@@ -107,7 +105,6 @@ export function StatusBar() {
  */
 function latencyReading(
 	rtt: SshRttReport | undefined,
-	probe: ProbeReport | undefined,
 	connected: boolean,
 	host: Host | undefined,
 ): { text: string; className: string; title: string | undefined } | null {
@@ -120,16 +117,6 @@ function latencyReading(
 			className: latencyTierClass[latencyTier(rtt.median_ms)],
 			title: describeRtt(rtt),
 		};
-	}
-
-	if (probe) {
-		return probe.reachable
-			? {
-					text: `TCP ${formatMs(probe.median_ms)} ms`,
-					className: "text-surface-foreground",
-					title: describeProbe(probe),
-				}
-			: { text: "不可达", className: "text-danger", title: describeProbe(probe) };
 	}
 
 	if (host?.latencyMs != null) {

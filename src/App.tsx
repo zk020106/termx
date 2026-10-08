@@ -20,7 +20,6 @@ const Connect = lazy(() => import("@/screens/Connect"));
 const Editor = lazy(() => import("@/screens/Editor"));
 const Forward = lazy(() => import("@/screens/Forward"));
 const HostEdit = lazy(() => import("@/screens/HostEdit"));
-const Hosts = lazy(() => import("@/screens/Hosts"));
 const Keys = lazy(() => import("@/screens/Keys"));
 const Monitor = lazy(() => import("@/screens/Monitor"));
 const Palette = lazy(() => import("@/screens/Palette"));
@@ -41,10 +40,10 @@ export default function App() {
 						<Routes>
 							<Route path="/welcome" element={<Welcome />} />
 
-							{/* 首页 = 主机库；工作区只从「已经有会话」的入口进 */}
-							<Route path="/" element={<Navigate to="/hosts" replace />} />
+							{/* 默认首页 = 终端工作区 */}
+							<Route path="/" element={<Navigate to="/workspace" replace />} />
 							<Route path="/workspace" element={<Workspace />} />
-							<Route path="/hosts" element={<Hosts />} />
+							<Route path="/hosts" element={<Navigate to="/workspace" replace />} />
 							<Route path="/hosts/new" element={<HostEdit />} />
 							<Route path="/hosts/:hostId/edit" element={<HostEdit />} />
 							<Route path="/connect" element={<Connect />} />
@@ -59,8 +58,8 @@ export default function App() {
 							<Route path="/palette" element={<Palette />} />
 							<Route path="/updater" element={<Updater />} />
 
-							{/* 未知路径同样回到首页，而不是丢给用户一个空工作区 */}
-							<Route path="*" element={<Navigate to="/hosts" replace />} />
+							{/* 未知路径回到工作区 */}
+							<Route path="*" element={<Navigate to="/workspace" replace />} />
 						</Routes>
 					</Suspense>
 				</ScreenBoundary>

@@ -4,80 +4,71 @@ import { EmptyState, Segmented, StatusDot } from "@/components/ui/Display";
 import { Input, Select } from "@/components/ui/Input";
 import type { Host } from "@/data/types";
 import { cn } from "@/lib/cn";
-import { describeProbe, formatMs, probeSupported } from "@/lib/probe";
 import { filterHosts, useHostsStore, type HostScope } from "@/store/hosts";
-import { useProbeStore } from "@/store/probe";
 import { liveTabForHost, useSessionsStore } from "@/store/sessions";
+import { useHostStatus } from "@/lib/status";
 import { toast } from "@/store/toast";
-import { useEffect, useState } from "react";
-import { useNavigate, useLocation } from "react-router";
+import { useMemo, useState } from "react";
+import { useNavigate } from "react-router";
 
 /* 主机库（对应 termx.vetd/frames/hosts.tsx）。
- * 覆盖状态（需求书 06）：卡片 / 列表 / 树形三视图（保持选中项）、空状态、
- * 搜索无结果、多选批量操作条、拖拽进行中。
+ * 覆盖状态：卡片 / 列表 / 树形三视图（保持选中项）、空状态、搜索无结果、多选批量操作条、拖拽进行中。
  * 视图 / 分组 / 选中项全部落在 useHostsStore，切换视图不丢选中。 */
 
-type DemoState = "default" | "empty" | "noresult" | "multi" | "dragging";
-
-const DEMO_OPTIONS: { value: DemoState; label: string }[] = [
-	{ value: "default", label: "默认" },
-	{ value: "empty", label: "空状态" },
-	{ value: "noresult", label: "无结果" },
-	{ value: "multi", label: "多选" },
-	{ value: "dragging", label: "拖拽中" },
+const QUICK_VIEWS: { scope: HostScope; label: string; icon: string; iconColor?: string }[] = [
+	{ scope: "online", label: "在线会话", icon: "icon-[lucide--radio]", iconColor: "text-success" },
+	{ scope: "favorites", label: "常用收藏", icon: "icon-[lucide--star]", iconColor: "text-amber-500 fill-amber-500" },
+	{ scope: "jump", label: "跳板节点", icon: "icon-[lucide--git-fork]", iconColor: "text-primary" },
 ];
 
-const QUICK_VIEWS: { scope: HostScope; label: string; icon: string }[] = [
-	{ scope: "online", label: "在线主机", icon: "icon-[lucide--check-circle]" },
-	{ scope: "favorites", label: "常用收藏", icon: "icon-[lucide--star]" },
-	{ scope: "jump", label: "跳板节点", icon: "icon-[lucide--waypoints]" },
-];
+function HostStatusDot({ host, size = 6 }: { host: Host; size?: number }) {
+	const status = useHostStatus(host.id, host.reachable);
+	return <StatusDot status={status} size={size} />;
+}
 
-/** 延迟单元格：有实测结果就显示实测，没有就回落到主机自身的字段。
- *  实测的口径是「TCP 建连」，只说明端口这边有回应，判不了快慢（本机代理会替远端
- *  握手），所以这里按可达性上色，不按耗时上色；真正的往返看连接后的状态栏。 */
 function LatencyCell({
 	host,
-	showDot,
+	showDot = true,
 	className,
 }: {
 	host: Host;
 	showDot?: boolean;
 	className?: string;
 }) {
-	const report = useProbeStore((s) => s.results[host.id]);
-	const probing = useProbeStore((s) => s.probing.includes(host.id));
-
+	const liveStatus = useHostStatus(host.id, host.reachable);
 	const base = "flex items-center gap-1 font-mono text-[10.5px] tabular-nums";
 
-	if (probing) {
+	if (liveStatus === "connecting" || liveStatus === "reconnecting") {
 		return (
 			<span className={cn(base, "text-primary", className)}>
 				<span className="icon-[lucide--activity] size-3 animate-pulse" />
-				测速中
+				连接中…
 			</span>
 		);
 	}
 
-	if (report) {
+	if (liveStatus === "connected") {
 		return (
-			<span
-				className={cn(base, report.reachable ? "text-surface-foreground" : "text-danger", className)}
-				title={describeProbe(report)}
-			>
-				{showDot && <StatusDot status={report.reachable ? "connected" : "failed"} size={6} />}
-				{report.reachable ? `TCP ${formatMs(report.median_ms)} ms` : "不可达"}
+			<span className={cn(base, "text-success font-medium", className)}>
+				{showDot && <StatusDot status="connected" size={6} />}
+				已连接
+			</span>
+		);
+	}
+
+	if (liveStatus === "failed") {
+		return (
+			<span className={cn(base, "text-danger", className)}>
+				{showDot && <StatusDot status="failed" size={6} />}
+				连接失败
 			</span>
 		);
 	}
 
 	return (
-		<span
-			className={cn(base, host.reachable ? "text-success" : "text-faint", className)}
-			title="种子数据；点「测速」获取实测延迟"
-		>
-			{showDot && <StatusDot status={host.reachable ? "connected" : "disconnected"} size={6} />}
-			{host.reachable ? `${host.latencyMs ?? "—"} ms` : "离线"}
+		<span className={cn(base, host.reachable ? "text-surface-foreground" : "text-faint", className)}>
+			{showDot && <StatusDot status={host.reachable ? "idle" : "disconnected"} size={6} />}
+			{host.reachable ? (host.latencyMs ? `${host.latencyMs} ms` : "就绪") : "离线"}
 		</span>
 	);
 }
@@ -86,40 +77,31 @@ export default function Hosts() {
 	const navigate = useNavigate();
 	const store = useHostsStore();
 	const { hosts, groups, view, query, scope, activeGroupId, selectedIds, draggingId } = store;
-	const probingAny = useProbeStore((s) => s.probing.length > 0);
 
-	const [demo, setDemo] = useState<DemoState>("default");
 	const [collapsed, setCollapsed] = useState<string[]>([]);
 	const [moveTarget, setMoveTarget] = useState<string>("");
+	const [creatingGroup, setCreatingGroup] = useState(false);
+	const [newGroupName, setNewGroupName] = useState("");
 
-	/* 状态切换器只驱动 store 里的既有字段，方便评审时逐个查看（骨架期评审工具） */
-	useEffect(() => {
-		const s = useHostsStore.getState();
-		if (demo === "noresult") {
-			s.setQuery("k8s-node");
-			s.clearSelection();
-			s.setDragging(null);
-			return;
-		}
-		if (demo === "multi") {
-			s.setQuery("");
-			s.setSelection(s.hosts.slice(0, 3).map((h) => h.id));
-			s.setDragging(null);
-			return;
-		}
-		if (demo === "dragging") {
-			s.setQuery("");
-			s.clearSelection();
-			s.setDragging(s.hosts[0]?.id ?? null);
-			return;
-		}
-		s.setQuery("");
-		s.clearSelection();
-		s.setDragging(null);
-	}, [demo]);
+	const allTags = useMemo(
+		() => Array.from(new Set(hosts.flatMap((h) => h.tags || []).filter(Boolean))),
+		[hosts],
+	);
 
-	// 首次启动主机库本来就是空的（没有种子数据），这时的空状态是真实状态而非演示
-	const libraryEmpty = demo === "empty" || hosts.length === 0;
+	const handleAddGroup = () => {
+		const trimmed = newGroupName.trim();
+		if (!trimmed) {
+			setCreatingGroup(false);
+			return;
+		}
+		const group = store.addGroup(trimmed);
+		setNewGroupName("");
+		setCreatingGroup(false);
+		store.setActiveGroup(group.id);
+		toast({ title: `已创建分组「${group.name}」`, tone: "success" });
+	};
+
+	const libraryEmpty = hosts.length === 0;
 	const shown = libraryEmpty ? [] : filterHosts(store);
 	const total = libraryEmpty ? 0 : hosts.length;
 	const online = libraryEmpty ? 0 : hosts.filter((h) => h.reachable).length;
@@ -144,88 +126,73 @@ export default function Hosts() {
 			useSessionsStore.getState().setActiveTab(live.id);
 			toast({
 				title: `已切到 ${host.name} 的会话`,
-				description: "这台主机已经有会话，没有新开连接 · 要再开一条用「连接」",
+				description: "这台主机已有会话，没有新开连接",
 				tone: "default",
 			});
 			navigate("/workspace");
 			return;
 		}
+		const newTabId = useSessionsStore.getState().openSession(host.id);
+		useSessionsStore.getState().setActiveTab(newTabId);
 		toast({ title: `正在连接 ${host.name}`, description: `${host.username}@${host.hostname}:${host.port}`, tone: "default" });
-		navigate(`/connect?host=${host.id}`);
+		navigate("/workspace");
 	};
 
-	/**
-	 * 「连接」这台主机（卡片 / 列表 / 树形上的终端图标）：**明确要开新连接**。
-	 * 每次进连接页都会为这次连接生成一个新的会话键，所以同一台主机可以有
-	 * 多条并发连接，已有一条也不会被复用。
-	 */
 	const connectHost = (host: Host) => {
+		const newTabId = useSessionsStore.getState().openSession(host.id);
+		useSessionsStore.getState().setActiveTab(newTabId);
 		toast({
 			title: `新建到 ${host.name} 的连接`,
-			description: liveTabForHost(host.id) ? "已有会话保持不动，这是一条独立的新连接" : `${host.username}@${host.hostname}:${host.port}`,
+			description: `${host.username}@${host.hostname}:${host.port}`,
 			tone: "default",
 		});
-		navigate(`/connect?host=${host.id}`);
+		navigate("/workspace");
 	};
-
-	/** 测速：真实的 TCP 连接延迟探测，结果进 useProbeStore 供各界面共用 */
-	const runProbe = async (targets: Host[]) => {
-		if (targets.length === 0) return;
-		if (!probeSupported()) {
-			toast({
-				title: "测速需要在桌面端运行",
-				description: "浏览器预览里没有原生网络层，跑 pnpm tauri:dev 即可。",
-				tone: "warning",
-			});
-			return;
-		}
-
-		const result = await useProbeStore
-			.getState()
-			.run(targets.map((h) => ({ id: h.id, host: h.hostname, port: h.port })), { attempts: 3, timeoutMs: 1500 });
-
-		if (!result) {
-			toast({ title: "测速失败", description: "原生探测没有返回结果。", tone: "danger" });
-			return;
-		}
-
-		toast({
-			title: `测速完成：${result.ok} 台 TCP 可达`,
-			description: result.fail > 0 ? `${result.fail} 台不可达（悬停延迟可看原因）。` : undefined,
-			tone: result.fail === 0 ? "success" : "warning",
-		});
-	};
-
-	// 自检/深链用：带 ?probe=1 进入主机库时自动对当前筛选结果测一次速（需原生壳）
-	const { search } = useLocation();
-	useEffect(() => {
-		if (new URLSearchParams(search).get("probe") !== "1") return;
-		void runProbe(shown);
-		// 有意只依赖 search：进入时触发一次，之后由按钮驱动
-	}, [search]);
 
 	return (
 		<WindowChrome>
 			<div className="relative flex min-h-0 flex-1">
 				{/* 左侧主机分类导航 */}
-				<aside className="flex w-[210px] shrink-0 flex-col border-r border-border bg-surface-sunk p-2.5">
+				<aside className="flex w-[236px] shrink-0 flex-col border-r border-border bg-surface-sunk p-2.5">
+					{/* 搜索框 */}
 					<div className="relative mb-2">
-						<span className="icon-[lucide--search] pointer-events-none absolute top-2 left-2 size-3 text-muted" />
+						<span className="icon-[lucide--search] pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2 text-muted" />
 						<Input
 							value={query}
 							onChange={(e) => {
 								useHostsStore.getState().setQuery(e.target.value);
-								if (demo === "noresult") setDemo("default");
 							}}
 							placeholder="搜索名称、IP、标签…"
-							className="h-7 pl-6 text-[11px]"
+							className="h-7 pr-7 pl-6 text-[11px]"
 						/>
+						{query && (
+							<button
+								type="button"
+								onClick={() => useHostsStore.getState().setQuery("")}
+								className="absolute top-1/2 right-1.5 -translate-y-1/2 flex size-4 items-center justify-center rounded-full text-muted hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
+							>
+								<span className="icon-[lucide--x] size-2.5" />
+							</button>
+						)}
 					</div>
 
+					{/* 分组列表 */}
 					<div className="mt-1 space-y-0.5">
-						<div className="px-2 py-1 text-[10px] font-medium tracking-wider text-faint uppercase">分组</div>
+						<div className="flex items-center justify-between px-2 py-1 text-[10px] font-semibold tracking-wider text-faint uppercase">
+							<span>主机分组</span>
+							<button
+								type="button"
+								onClick={() => setCreatingGroup(true)}
+								className="flex size-4 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-primary transition-colors cursor-pointer"
+								title="新建分组"
+							>
+								<span className="icon-[lucide--plus] size-3" />
+							</button>
+						</div>
+
 						<GroupRow
 							name="全部主机"
+							icon="icon-[lucide--layout-grid]"
 							count={total}
 							active={activeGroupId === null && scope === "all"}
 							onClick={() => {
@@ -233,32 +200,80 @@ export default function Hosts() {
 								useHostsStore.getState().setActiveGroup(null);
 							}}
 						/>
+
 						{groups.map((g) => (
-							<GroupRow
-								key={g.id}
-								name={g.name}
-								count={groupCount(g.id)}
-								active={activeGroupId === g.id}
-								dropTarget={Boolean(draggingId)}
-								onClick={() => useHostsStore.getState().setActiveGroup(g.id)}
-								onDrop={(hostId) => {
-									const host = useHostsStore.getState().hosts.find((h) => h.id === hostId);
-									if (!host || host.groupId === g.id) return;
-									useHostsStore.getState().upsertHost({ ...host, groupId: g.id });
-									useHostsStore.getState().setDragging(null);
-									toast({ title: `已移动 ${host.name} 到「${g.name}」`, tone: "success" });
-								}}
-							/>
+							<div key={g.id} className="group/item relative">
+								<GroupRow
+									name={g.name}
+									icon="icon-[lucide--folder]"
+									iconColor="text-amber-500"
+									count={groupCount(g.id)}
+									active={activeGroupId === g.id}
+									dropTarget={Boolean(draggingId)}
+									onClick={() => useHostsStore.getState().setActiveGroup(g.id)}
+									onDrop={(hostId) => {
+										const host = useHostsStore.getState().hosts.find((h) => h.id === hostId);
+										if (!host || host.groupId === g.id) return;
+										useHostsStore.getState().upsertHost({ ...host, groupId: g.id });
+										useHostsStore.getState().setDragging(null);
+										toast({ title: `已移动 ${host.name} 到「${g.name}」`, tone: "success" });
+									}}
+								/>
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										store.removeGroup(g.id);
+										toast({ title: `已删除分组「${g.name}」`, tone: "default" });
+									}}
+									className="absolute right-7 top-1/2 -translate-y-1/2 hidden group-hover/item:flex size-4 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-danger cursor-pointer transition-colors"
+									title="删除分组"
+								>
+									<span className="icon-[lucide--trash-2] size-2.5" />
+								</button>
+							</div>
 						))}
+
+						{creatingGroup && (
+							<div className="flex items-center gap-1 px-1 py-1">
+								<input
+									autoFocus
+									value={newGroupName}
+									onChange={(e) => setNewGroupName(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === "Enter") handleAddGroup();
+										if (e.key === "Escape") setCreatingGroup(false);
+									}}
+									placeholder="分组名称..."
+									className="h-6 w-full rounded border border-primary bg-surface px-1.5 text-[11px] text-surface-foreground focus:outline-none"
+								/>
+								<button
+									type="button"
+									onClick={handleAddGroup}
+									className="flex size-6 items-center justify-center rounded bg-primary text-white hover:bg-primary-hover shrink-0 cursor-pointer"
+								>
+									<span className="icon-[lucide--check] size-3" />
+								</button>
+								<button
+									type="button"
+									onClick={() => setCreatingGroup(false)}
+									className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface-raised shrink-0 cursor-pointer"
+								>
+									<span className="icon-[lucide--x] size-3" />
+								</button>
+							</div>
+						)}
 					</div>
 
-					<div className="mt-4 space-y-0.5">
-						<div className="px-2 py-1 text-[10px] font-medium tracking-wider text-faint uppercase">快速视图</div>
+					{/* 快速视图 */}
+					<div className="mt-3.5 space-y-0.5">
+						<div className="px-2 py-1 text-[10px] font-semibold tracking-wider text-faint uppercase">快速视图</div>
 						{QUICK_VIEWS.map((e) => (
 							<GroupRow
 								key={e.scope}
 								name={e.label}
 								icon={e.icon}
+								iconColor={e.iconColor}
 								count={scopeCount(e.scope)}
 								active={scope === e.scope && activeGroupId === null}
 								onClick={() => useHostsStore.getState().setScope(e.scope)}
@@ -266,15 +281,85 @@ export default function Hosts() {
 						))}
 					</div>
 
-					<div className="mt-auto border-t border-border pt-2">
-						<button
-							type="button"
-							onClick={() => toast({ title: "已从 ~/.ssh/config 导入 3 台主机", tone: "success" })}
-							className="flex h-7 w-full items-center justify-center gap-1.5 rounded border border-border bg-surface text-[11px] font-medium text-muted hover:bg-surface-raised hover:text-surface-foreground"
-						>
-							<span className="icon-[lucide--download] size-3" />
-							导入 ~/.ssh/config
-						</button>
+					{/* 标签索引 */}
+					{allTags.length > 0 && (
+						<div className="mt-4 space-y-1">
+							<div className="flex items-center justify-between px-2 py-1 text-[10px] font-semibold tracking-wider text-faint uppercase">
+								<span>标签索引</span>
+								<span className="font-mono text-[9px] text-faint">{allTags.length}</span>
+							</div>
+							<div className="flex flex-wrap gap-1 px-1">
+								{allTags.map((tag) => {
+									const isTagSelected = query.toLowerCase() === tag.toLowerCase();
+									const count = hosts.filter((h) => (h.tags || []).includes(tag)).length;
+									return (
+										<button
+											key={tag}
+											type="button"
+											onClick={() => {
+												if (isTagSelected) {
+													store.setQuery("");
+												} else {
+													store.setQuery(tag);
+												}
+											}}
+											className={cn(
+												"flex h-5 items-center gap-1 rounded-md px-1.5 text-[10px] font-mono transition-colors cursor-pointer border select-none",
+												isTagSelected
+													? "border-primary/40 bg-primary/15 text-primary font-medium"
+													: "border-border/60 bg-surface/60 text-muted hover:border-border hover:bg-surface hover:text-surface-foreground",
+											)}
+										>
+											<span>#{tag}</span>
+											<span className="text-[9px] text-faint">{count}</span>
+										</button>
+									);
+								})}
+							</div>
+						</div>
+					)}
+
+					{/* 底部资产统计与工具卡片 */}
+					<div className="mt-auto border-t border-border/80 pt-2.5">
+						<div className="rounded-lg border border-border/70 bg-surface p-2.5 shadow-2xs">
+							<div className="flex items-center justify-between text-[11px]">
+								<span className="font-semibold text-surface-foreground">资产概览</span>
+								<span className="flex items-center gap-1 font-mono text-[10px] text-success">
+									<span className="size-1.5 rounded-full bg-success animate-pulse" />
+									{online} 台在线
+								</span>
+							</div>
+							<div className="mt-2 grid grid-cols-2 gap-1.5 text-[10px]">
+								<div className="rounded bg-surface-raised/70 px-2 py-1">
+									<div className="text-faint">主机总数</div>
+									<div className="font-mono text-[12px] font-semibold text-surface-foreground">{total}</div>
+								</div>
+								<div className="rounded bg-surface-raised/70 px-2 py-1">
+									<div className="text-faint">已设分组</div>
+									<div className="font-mono text-[12px] font-semibold text-surface-foreground">{groups.length}</div>
+								</div>
+							</div>
+							<div className="mt-2.5 flex items-center gap-1.5">
+								<button
+									type="button"
+									onClick={() => toast({ title: "已从 ~/.ssh/config 导入 3 台主机", tone: "success" })}
+									className="flex h-6.5 flex-1 items-center justify-center gap-1 rounded border border-border bg-surface text-[10.5px] font-medium text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors cursor-pointer"
+									title="导入本地 SSH 配置"
+								>
+									<span className="icon-[lucide--download] size-3" />
+									导入 Config
+								</button>
+								<button
+									type="button"
+									onClick={() => navigate("/keys")}
+									className="flex h-6.5 items-center justify-center gap-1 rounded border border-border bg-surface px-2 text-[10.5px] font-medium text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors cursor-pointer"
+									title="管理 SSH 密钥"
+								>
+									<span className="icon-[lucide--key] size-3" />
+									密钥
+								</button>
+							</div>
+						</div>
 					</div>
 				</aside>
 
@@ -299,16 +384,6 @@ export default function Hosts() {
 						</div>
 
 						<div className="flex items-center gap-2">
-							<Button
-								size="sm"
-								icon="icon-[lucide--gauge]"
-								className="h-6.5 px-2.5"
-								disabled={probingAny}
-								title={probeSupported() ? "对当前筛选出的主机做 TCP 延迟探测" : "测速需在桌面端运行"}
-								onClick={() => void runProbe(shown)}
-							>
-								{probingAny ? "测速中…" : "测速"}
-							</Button>
 							<Segmented
 								value={view}
 								onChange={(v) => useHostsStore.getState().setView(v)}
@@ -462,7 +537,7 @@ export default function Hosts() {
 																draggingId === h.id && "opacity-40",
 															)}
 														>
-															<StatusDot status={h.reachable ? "connected" : "disconnected"} />
+															<HostStatusDot host={h} />
 															<span className="w-[170px] truncate font-mono text-[11.5px] text-surface-foreground">{h.name}</span>
 															<span className="w-[150px] truncate font-mono text-[11px] text-muted">{h.hostname}</span>
 															<span className="flex-1 truncate text-[11px] text-faint">
@@ -504,14 +579,6 @@ export default function Hosts() {
 						<Button size="sm" variant="primary" icon="icon-[lucide--terminal]" onClick={() => navigate("/connect")}>
 							批量连接
 						</Button>
-						<Button
-							size="sm"
-							icon="icon-[lucide--gauge]"
-							disabled={probingAny}
-							onClick={() => void runProbe(hosts.filter((h) => selectedIds.includes(h.id)))}
-						>
-							{probingAny ? "测速中…" : "测速选中"}
-						</Button>
 						<div className="flex items-center gap-1">
 							<Select
 								value={moveTarget}
@@ -540,26 +607,6 @@ export default function Hosts() {
 						</Button>
 					</div>
 				)}
-
-				{/* 状态切换器（骨架期评审工具） */}
-				<div className="absolute right-3 bottom-3 z-30 flex items-center gap-2 rounded-card border border-border bg-surface-raised px-2 py-1.5 shadow-lg">
-					<span className="text-[10px] font-medium tracking-wider text-faint uppercase">状态</span>
-					<div className="flex items-center gap-0.5">
-						{DEMO_OPTIONS.map((o) => (
-							<button
-								key={o.value}
-								type="button"
-								onClick={() => setDemo(o.value)}
-								className={cn(
-									"rounded px-1.5 py-0.5 text-[11px] transition-colors",
-									demo === o.value ? "bg-primary/15 font-medium text-primary" : "text-muted hover:text-surface-foreground",
-								)}
-							>
-								{o.label}
-							</button>
-						))}
-					</div>
-				</div>
 			</div>
 		</WindowChrome>
 	);
@@ -570,6 +617,7 @@ export default function Hosts() {
 function GroupRow({
 	name,
 	icon,
+	iconColor,
 	count,
 	active,
 	dropTarget,
@@ -578,6 +626,7 @@ function GroupRow({
 }: {
 	name: string;
 	icon?: string;
+	iconColor?: string;
 	count: number;
 	active: boolean;
 	dropTarget?: boolean;
@@ -596,18 +645,25 @@ function GroupRow({
 				onDrop(e.dataTransfer.getData("text/plain"));
 			}}
 			className={cn(
-				"flex h-7 cursor-pointer items-center justify-between rounded px-2 text-[12px] transition-colors",
+				"group flex h-7.5 cursor-pointer items-center justify-between rounded-md px-2.5 text-[11.5px] transition-all select-none border",
 				active
-					? "border border-border bg-surface-raised font-medium text-surface-foreground"
-					: "text-muted hover:bg-surface hover:text-surface-foreground",
-				dropTarget && !active && "border border-dashed border-primary/40 bg-primary/5",
+					? "border-primary/30 bg-primary/10 font-semibold text-primary shadow-2xs"
+					: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
+				dropTarget && !active && "border-dashed border-primary/50 bg-primary/10",
 			)}
 		>
-			<span className="flex min-w-0 items-center gap-1.5">
-				{icon && <span className={cn(icon, "size-3 text-muted")} />}
+			<span className="flex min-w-0 items-center gap-2">
+				{icon && <span className={cn(icon, iconColor ?? (active ? "text-primary" : "text-muted"), "size-3.5 shrink-0")} />}
 				<span className="truncate">{name}</span>
 			</span>
-			<span className="font-mono text-[10px] text-faint">{count}</span>
+			<span
+				className={cn(
+					"rounded-full px-1.5 py-0.2 font-mono text-[9px]",
+					active ? "bg-primary/20 text-primary font-medium" : "bg-surface-raised text-faint group-hover:text-muted",
+				)}
+			>
+				{count}
+			</span>
 		</div>
 	);
 }

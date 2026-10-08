@@ -39,6 +39,7 @@ export interface TerminalHandle {
 	getSelection: () => string;
 	copySelection: () => Promise<boolean>;
 	paste: () => Promise<boolean>;
+	selectAll: () => void;
 	clear: () => void;
 	saveScreen: () => void;
 	search: (query: string) => TerminalMatchInfo;
@@ -107,7 +108,7 @@ export function Terminal({
 			letterSpacing: 0,
 			scrollback: scrollbackLines(scrollback),
 			smoothScrollDuration: 0,
-			theme: xtermThemeFor(scheme, palette),
+			theme: xtermThemeFor(scheme, palette, resolvedTheme),
 		});
 		const fit = new FitAddon();
 		fitRef.current = fit;
@@ -131,7 +132,7 @@ export function Terminal({
 
 		const writeLine = (text: string) => term.write(`${text}\r\n`);
 		/** 说明性文字：不带任何伪造的命令输出 */
-		const note = noteColor(scheme, palette);
+		const note = noteColor(scheme, palette, resolvedTheme);
 		const writeNote = (text: string) => writeLine(fg(note, text));
 
 		// 这一格接的是哪条 SSH 会话：会话键由分屏格自己带着。
@@ -260,7 +261,11 @@ export function Terminal({
 	// 设计 token 挂在 <html data-theme data-accent> 上，必须重新解析才能拿到新颜色。
 	useEffect(() => {
 		const term = termRef.current;
-		if (term) term.options.theme = xtermThemeFor(scheme, readPalette());
+		if (!term) return;
+		window.requestAnimationFrame(() => {
+			const palette = readPalette();
+			term.options.theme = xtermThemeFor(scheme, palette, resolvedTheme);
+		});
 	}, [resolvedTheme, accent, scheme]);
 
 	useImperativeHandle(
@@ -274,6 +279,9 @@ export function Terminal({
 				const term = termRef.current;
 				if (!term) return;
 				term.clear();
+			},
+			selectAll: () => {
+				termRef.current?.selectAll();
 			},
 			copySelection: async () => {
 				const selected = termRef.current?.getSelection() ?? "";
@@ -389,7 +397,7 @@ function playBell(): void {
 /** 提示符：优先按主机信息推导（deploy@order-api-01:~$），本地终端给 PowerShell 风格 */
 export function panePrompt(hostId: string | null | undefined, fallbackTitle?: string): string {
 	const title = fallbackTitle?.trim() ?? "";
-	if (!hostId) return title.startsWith("PS ") ? title : "PS C:\\Users\\suantian>";
+	if (!hostId) return title || "local:~$";
 	const host = useHostsStore.getState().hosts.find((h) => h.id === hostId);
 	if (host) return `${host.username}@${host.name}:~$`;
 	return title || "deploy@app:~$";

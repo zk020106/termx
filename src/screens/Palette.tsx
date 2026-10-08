@@ -1,14 +1,12 @@
 import { CommandPalettePanel } from "@/components/chrome/CommandPalette";
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button } from "@/components/ui/Button";
-import { cn } from "@/lib/cn";
 import { useState } from "react";
 import { useSearchParams } from "react-router";
 
 /* 命令面板（对应 termx.vetd/frames/palette.tsx，需求书 06）。
  * 真实入口是 Ctrl+K 触发的 src/components/chrome/CommandPalette.tsx；
- * 本路由用于设计稿比对：渲染「工作区背景 + 打开状态的命令面板」的完整画面，
- * 右下角是骨架期评审用的状态切换器（也支持 ?state=recent|search|command|empty 深链）。 */
+ * 本路由用于设计稿比对：渲染「工作区背景 + 打开状态的命令面板」的完整画面。 */
 
 const STATES = [
 	{ value: "search", label: "搜索分组", query: "order", hint: "结果按主机 / 命令 / 设置分组" },
@@ -22,7 +20,7 @@ type PaletteState = (typeof STATES)[number]["value"];
 
 export default function Palette() {
 	const [search] = useSearchParams();
-	const [state, setState] = useState<PaletteState>(() => {
+	const [state] = useState<PaletteState>(() => {
 		const fromUrl = search.get("state");
 		return STATES.some((s) => s.value === fromUrl) ? (fromUrl as PaletteState) : "search";
 	});
@@ -52,30 +50,6 @@ export default function Palette() {
 						</Button>
 					</div>
 				)}
-
-				{/* 状态切换器（骨架期评审工具） */}
-				<div className="absolute bottom-3 right-3 z-20 flex items-center gap-1.5 rounded-control border border-border bg-surface-raised/95 px-2 py-1 shadow-lg">
-					<span className="font-mono text-[9px] tracking-wider text-faint uppercase">状态</span>
-					{STATES.map((option) => (
-						<button
-							key={option.value}
-							type="button"
-							title={option.hint}
-							onClick={() => {
-								setState(option.value);
-								setOpen(true);
-							}}
-							className={cn(
-								"rounded px-1.5 py-0.5 text-[10.5px] transition-colors",
-								option.value === state && open
-									? "border border-border bg-surface font-medium text-surface-foreground"
-									: "text-muted hover:text-surface-foreground",
-							)}
-						>
-							{option.label}
-						</button>
-					))}
-				</div>
 			</div>
 		</WindowChrome>
 	);

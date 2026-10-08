@@ -92,8 +92,35 @@ export function bg(rgb: string, text: string): string {
 	return `\u001b[48;2;${parts[0]};${parts[1]};${parts[2]}m${text}\u001b[49m`;
 }
 
-/** 组装 xterm 主题：16 色板也映射到设计 token，真实 PTY 输出同样不跑偏 */
-export function buildXtermTheme(palette: TerminalPalette): ITheme {
+/** 组装 xterm 主题：16 色板也映射到设计 token，并适配深浅色模式的高对比度显示 */
+export function buildXtermTheme(palette: TerminalPalette, isLight: boolean = false): ITheme {
+	if (isLight) {
+		return {
+			background: palette.background,
+			foreground: palette.foreground,
+			cursor: palette.primary,
+			cursorAccent: palette.background,
+			selectionBackground: withAlpha(palette.primary, 0.25),
+			selectionInactiveBackground: withAlpha(palette.primary, 0.12),
+			// 浅色模式下的 ANSI 16 色标准高对比度方案
+			black: "#24292f",
+			red: "#cf222e",
+			green: "#1a7f37",
+			yellow: "#9a6700",
+			blue: "#0969da",
+			magenta: "#8250df",
+			cyan: "#1b7c83",
+			white: "#57606a",
+			brightBlack: "#6e7781",
+			brightRed: "#a40e26",
+			brightGreen: "#2da44e",
+			brightYellow: "#bf8700",
+			brightBlue: "#218bff",
+			brightMagenta: "#a475f9",
+			brightCyan: "#3192aa",
+			brightWhite: "#8c959f",
+		};
+	}
 	return {
 		background: palette.background,
 		foreground: palette.foreground,
@@ -149,12 +176,29 @@ export function buildSchemeTheme(colors: SchemeColors): ITheme {
 }
 
 /** 当前该用哪套主题：选了具体方案就用它，否则跟随界面 token */
-export function xtermThemeFor(scheme: TerminalSchemeId, palette: TerminalPalette): ITheme {
+export function xtermThemeFor(
+	scheme: TerminalSchemeId,
+	palette: TerminalPalette,
+	resolvedTheme?: "dark" | "light",
+): ITheme {
 	const colors = schemeColors(scheme);
-	return colors ? buildSchemeTheme(colors) : buildXtermTheme(palette);
+	if (colors) return buildSchemeTheme(colors);
+	const isLight =
+		resolvedTheme === "light" ||
+		(typeof document !== "undefined" && document.documentElement.dataset.theme === "light");
+	return buildXtermTheme(palette, isLight);
 }
 
 /** 终端里那几行说明文字的颜色：跟着当前方案走，避免在方案底色上糊成一团 */
-export function noteColor(scheme: TerminalSchemeId, palette: TerminalPalette): string {
-	return schemeColors(scheme)?.brightBlack ?? palette.faint;
+export function noteColor(
+	scheme: TerminalSchemeId,
+	palette: TerminalPalette,
+	resolvedTheme?: "dark" | "light",
+): string {
+	const colors = schemeColors(scheme);
+	if (colors) return colors.brightBlack;
+	const isLight =
+		resolvedTheme === "light" ||
+		(typeof document !== "undefined" && document.documentElement.dataset.theme === "light");
+	return isLight ? "#6e7781" : palette.faint;
 }

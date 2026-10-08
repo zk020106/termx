@@ -218,22 +218,20 @@ export default function Connect() {
 	/** 主机登记的那把密钥（密钥库只存公钥元数据，没有文件路径，所以仍要用户指定文件） */
 	const registeredKey = useKeysStore((s) => (host?.auth.keyId ? s.keys.find((k) => k.id === host.auth.keyId) : undefined));
 
-	// 进入页面即对这台主机做一次真实 TCP 探测；浏览器内没有 Rust 端，跳过探测
-	const hostname = host?.hostname;
-	const port = host?.port;
-	useEffect(() => {
-		if (!hostId || !hostname || port == null || !supported) return;
-		void runProbe([{ id: hostId, host: hostname, port }]).then((summary) => {
-			setProbeError(summary ? null : "探测未能完成：Rust 端没有返回结果");
-		});
-	}, [hostId, hostname, port, supported, runProbe]);
-
-	// 进页面时问一次系统钥匙串：可用才去读；读到了就预填密码并勾上「记住密码」，
-	// 读不到就什么都不做（不打扰没保存过的用户）。密码只在这里过一下内存。
+	// 从主机配置与系统钥匙串预填凭据
 	const storedHostId = host?.id ?? null;
 	useEffect(() => {
+		if (host?.auth.password) {
+			setPassword(host.auth.password);
+			setRemember(true);
+			setHasSavedSecret(true);
+		}
+		if (host?.auth.keyPath) {
+			setKeyPath(host.auth.keyPath);
+		}
+
 		let alive = true;
-		if (!storedHostId) return; // 类型守卫：没有主机就不问钥匙串
+		if (!storedHostId) return;
 		void (async () => {
 			const available = await secretAvailable();
 			if (!alive) return;
@@ -249,7 +247,7 @@ export default function Connect() {
 		return () => {
 			alive = false;
 		};
-	}, [storedHostId]);
+	}, [storedHostId, host]);
 
 	// 换主机（只是路由参数变了、组件没重挂载）时，回到这台主机登记的认证方式
 	useEffect(() => {
@@ -338,7 +336,15 @@ export default function Connect() {
 						title={hostId ? "找不到这台主机" : "没有指定要连接的主机"}
 						description={hostId ? `主机库里没有 id 为 ${hostId} 的主机。` : undefined}
 						action={
-							<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts")}>
+							<Button
+								size="sm"
+								variant="primary"
+								icon="icon-[lucide--server]"
+								onClick={() => {
+									useSessionsStore.getState().setActiveTab("vaults");
+									navigate("/workspace");
+								}}
+							>
 								去主机库
 							</Button>
 						}
@@ -591,8 +597,19 @@ export default function Connect() {
 			return;
 		}
 
-		// 会话已经建立：先按用户的选择处理钥匙串（失败只提示），再进工作区
+		// 会话已经建立：同步持久化密码与主机配置，再进工作区
 		if (authMethod === "password") await persistSecret();
+		useHostsStore.getState().upsertHost({
+			...host,
+			lastConnectedAt: new Date().toISOString(),
+			auth: {
+				...host.auth,
+				method: authMethod,
+				rememberPassword: authMethod === "password" ? remember : host.auth.rememberPassword,
+				password: authMethod === "password" && remember ? password : (authMethod === "password" && !remember ? undefined : host.auth.password),
+				keyPath: (authMethod === "key" || authMethod === "key-passphrase") ? (keyPath || host.auth.keyPath) : host.auth.keyPath,
+			},
+		});
 		toast({
 			title: "SSH 会话已建立",
 			description: `${host.username}@${host.hostname}:${host.port} · ${AUTH_LABEL[authMethod]}`,
@@ -990,12 +1007,7 @@ export default function Connect() {
 													checked={remember}
 													onChange={setRemember}
 													className={secretUsable === false ? "cursor-not-allowed opacity-45" : undefined}
-													label="记住密码（存入系统钥匙串）"
-													description={
-														secretUsable === false
-															? undefined
-															: "勾选后交给系统钥匙串保管，下次进入本页会预填。"
-													}
+													label="记住密码"
 												/>
 												{secretUsable === false && (
 													<p className="mt-1.5 flex items-start gap-1.5 text-[10.5px] leading-4 text-warning">
@@ -1283,7 +1295,8 @@ export default function Connect() {
 									className="h-7 px-2.5"
 									onClick={() => {
 										toast({ title: `已离开连接页 ${host.name}`, tone: "default" });
-										navigate("/hosts");
+										useSessionsStore.getState().setActiveTab("vaults");
+										navigate("/workspace");
 									}}
 								>
 									返回主机库

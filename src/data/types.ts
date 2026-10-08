@@ -45,9 +45,12 @@ export const AUTH_LABEL: Record<AuthMethod, string> = {
 export interface HostAuth {
 	method: AuthMethod;
 	keyId?: string;
+	keyPath?: string;
 	identityId?: string;
-	/** 密码是否记住，默认不勾选（需求书 07-连接流程） */
+	/** 密码是否记住 */
 	rememberPassword?: boolean;
+	/** 记住的密码 */
+	password?: string;
 }
 
 export interface HostTerminalPrefs {

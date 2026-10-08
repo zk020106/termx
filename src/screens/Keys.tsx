@@ -215,22 +215,6 @@ export default function Keys() {
 		if (readPanel() === "add") openAdd();
 	}, []);
 
-	/** 状态切换器：直接进入对应的评审态 */
-	function choosePanel(next: KeysPanel) {
-		setPanel(next);
-		if (next === "add") {
-			openAdd();
-		} else if (next === "deploy") {
-			if (!selected) {
-				toast({ title: "还没有可部署的密钥", description: "先登记一把公钥，再选择目标主机。", tone: "warning" });
-				setPanel("list");
-				return;
-			}
-			setTargets(hosts.map((host) => host.id));
-			setConfirmOpen(true);
-		}
-	}
-
 	function toggleTarget(hostId: string) {
 		setTargets((prev) => (prev.includes(hostId) ? prev.filter((id) => id !== hostId) : [...prev, hostId]));
 	}
@@ -733,26 +717,6 @@ export default function Keys() {
 						，同时清除它的部署记录。你机器上的私钥文件不受影响。
 					</p>
 				</Modal>
-
-				{/* 状态切换器（骨架期评审工具） */}
-				<div className="absolute right-3 bottom-3 z-30 flex items-center gap-2 rounded-card border border-border bg-surface-raised px-2 py-1.5 shadow-lg">
-					<span className="text-[10px] font-medium tracking-wider text-faint uppercase">状态</span>
-					<div className="flex items-center gap-0.5">
-						{PANEL_OPTIONS.map((option) => (
-							<button
-								key={option.value}
-								type="button"
-								onClick={() => choosePanel(option.value)}
-								className={cn(
-									"rounded px-1.5 py-0.5 text-[11px] transition-colors",
-									panel === option.value ? "bg-primary/15 font-medium text-primary" : "text-muted hover:text-surface-foreground",
-								)}
-							>
-								{option.label}
-							</button>
-						))}
-					</div>
-				</div>
 			</div>
 		</WindowChrome>
 	);

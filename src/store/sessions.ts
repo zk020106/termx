@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { ConnectionStatus, SessionTab, SplitLayout, TerminalLine, TerminalPane } from "@/data/types";
-import { sshSessionAlive, newSshSessionKey } from "@/components/terminal/sshCache";
+import { sshSessionAlive, newSshSessionKey, closeSshSession, writeSsh } from "@/components/terminal/sshCache";
+import { closePty, writePty } from "@/components/terminal/ptyCache";
 import { useHostsStore } from "./hosts";
 
 /* 会话：只承载真实打开的标签与分屏格。
@@ -19,42 +20,43 @@ interface SessionsState {
 	 * 新建一个会话标签。**总是新建**：同一个 hostId 可以开多个标签，
 	 * sessionKey 由发起连接的一方生成（见 sshCache.newSshSessionKey），
 	 * 这里只负责把它随标签与分屏格一起记下来。
-	 * 想「已经有了就聚焦」的调用方请先用 liveTabForHost 判断。
 	 */
-	openSession: (hostId: string, sessionKey?: string | null) => string;
+	openSession: (hostId: string | null, sessionKey?: string | null, customTitle?: string) => string;
 	closeTab: (tabId: string) => void;
 	reopenTab: (tab: SessionTab) => void;
+	reconnectTab: (tabId: string) => void;
 	setActiveTab: (tabId: string) => void;
 	setTabTitle: (tabId: string, title: string) => void;
-	/** 会话建立/断开后同步标签与分屏格的状态（状态始终可见是需求书原则 3） */
 	setStatus: (tabId: string, status: ConnectionStatus) => void;
 	setLayout: (tabId: string, layout: SplitLayout) => void;
 	toggleBroadcast: (tabId: string) => void;
 	focusPane: (paneId: string) => void;
 	appendLine: (paneId: string, line: TerminalLine) => void;
-	splitPane: () => void;
+	splitPane: (tabId?: string, direction?: "horizontal" | "vertical") => string | null;
 	closePane: (paneId: string) => void;
 }
 
 let seq = 0;
 
-export const useSessionsStore = create<SessionsState>((set) => ({
+export const useSessionsStore = create<SessionsState>((set, get) => ({
 	tabs: [],
 	panes: [],
-	activeTabId: "",
+	activeTabId: "vaults",
 	focusedPaneId: "",
 
-	openSession: (hostId, sessionKey = null) => {
-		const host = useHostsStore.getState().hosts.find((h) => h.id === hostId);
+	openSession: (hostId, sessionKey = null, customTitle) => {
+		const host = hostId ? useHostsStore.getState().hosts.find((h) => h.id === hostId) : null;
 		const id = `tab-${++seq}`;
 		const paneId = `pane-${++seq}`;
+		const key = sessionKey ?? (hostId ? newSshSessionKey(hostId) : null);
 
+		const tabTitle = customTitle ?? (host ? host.name : "本地终端");
 		const tab: SessionTab = {
 			id,
 			hostId,
-			sessionKey,
-			title: host?.name ?? "新会话",
-			status: "connecting",
+			sessionKey: key,
+			title: tabTitle,
+			status: hostId ? "connecting" : "connected",
 			layout: "single",
 			broadcasting: false,
 		};
@@ -63,30 +65,86 @@ export const useSessionsStore = create<SessionsState>((set) => ({
 			id: paneId,
 			tabId: id,
 			hostId,
-			sessionKey,
+			sessionKey: key,
 			title: host ? `${host.username}@${host.name}` : "本地终端",
 			subtitle: host ? `${host.username}@${host.hostname}:${host.port}` : "本地 shell",
-			status: "connecting",
+			status: hostId ? "connecting" : "connected",
 			lines: [],
 		};
 
-		set((s) => ({ tabs: [...s.tabs, tab], panes: [...s.panes, pane], activeTabId: id, focusedPaneId: paneId }));
+		set((s) => ({
+			tabs: [...s.tabs, tab],
+			panes: [...s.panes, pane],
+			activeTabId: id,
+			focusedPaneId: paneId,
+		}));
 		return id;
 	},
 
-	closeTab: (tabId) =>
-		set((s) => {
-			const tabs = s.tabs.filter((t) => t.id !== tabId);
-			// 只清掉**这个标签自己的**分屏格。按 hostId 清会把同一台主机的
-			// 另一条会话（另一个标签）的格子一起删掉 —— 那正是多会话下的误伤。
-			const panes = s.panes.filter((p) => p.tabId !== tabId);
-			const activeTabId = s.activeTabId === tabId ? (tabs[0]?.id ?? "") : s.activeTabId;
-			return { tabs, panes, activeTabId };
-		}),
+	closeTab: (tabId) => {
+		const s = get();
+		const tab = s.tabs.find((t) => t.id === tabId);
+		if (!tab) return;
+
+		// 销毁属于该标签的全部 PTY 与 SSH 会话
+		const tabPanes = s.panes.filter((p) => p.tabId === tabId);
+		for (const p of tabPanes) {
+			if (p.sessionKey) void closeSshSession(p.sessionKey);
+			else closePty(p.id);
+		}
+
+		const tabs = s.tabs.filter((t) => t.id !== tabId);
+		const panes = s.panes.filter((p) => p.tabId !== tabId);
+		const activeTabId = s.activeTabId === tabId ? (tabs[tabs.length - 1]?.id ?? "vaults") : s.activeTabId;
+		const focusedPaneId = panes.find((p) => p.tabId === activeTabId)?.id ?? panes[0]?.id ?? "";
+
+		set({ tabs, panes, activeTabId, focusedPaneId });
+	},
 
 	reopenTab: (tab) => set((s) => ({ tabs: [...s.tabs, tab] })),
 
-	setActiveTab: (activeTabId) => set({ activeTabId }),
+	reconnectTab: (tabId) => {
+		const s = get();
+		const tab = s.tabs.find((t) => t.id === tabId);
+		if (!tab) return;
+
+		// 销毁旧会话，派发新 sessionKey，状态重置为 connecting
+		const updatedPanes = s.panes.map((p) => {
+			if (p.tabId !== tabId) return p;
+			if (p.sessionKey) void closeSshSession(p.sessionKey);
+			else closePty(p.id);
+			const newKey = p.hostId ? newSshSessionKey(p.hostId) : null;
+			return {
+				...p,
+				sessionKey: newKey,
+				status: (p.hostId ? "connecting" : "connected") as ConnectionStatus,
+				lines: [],
+			};
+		});
+
+		const newTabKey = tab.hostId
+			? (updatedPanes.find((p) => p.tabId === tabId)?.sessionKey ?? newSshSessionKey(tab.hostId))
+			: null;
+		const updatedTabs = s.tabs.map((t) => {
+			if (t.id !== tabId) return t;
+			return {
+				...t,
+				sessionKey: newTabKey,
+				status: (t.hostId ? "connecting" : "connected") as ConnectionStatus,
+			};
+		});
+
+		set({ tabs: updatedTabs, panes: updatedPanes });
+	},
+
+	setActiveTab: (activeTabId) => {
+		const s = get();
+		const focusedPaneId =
+			activeTabId === "vaults"
+				? s.focusedPaneId
+				: (s.panes.find((p) => p.tabId === activeTabId)?.id ?? s.focusedPaneId);
+		set({ activeTabId, focusedPaneId });
+	},
 
 	setTabTitle: (tabId, title) =>
 		set((s) => ({ tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, title } : t)) })),
@@ -97,8 +155,6 @@ export const useSessionsStore = create<SessionsState>((set) => ({
 			if (!tab) return {};
 			return {
 				tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, status } : t)),
-				// 只更新本标签的分屏格：同一台主机的另一条会话是另一条连接，
-				// 它的状态由它自己决定（按 hostId 批量更新会把别人的状态也改掉）
 				panes: s.panes.map((p) => (p.tabId === tabId ? { ...p, status } : p)),
 			};
 		}),
@@ -113,32 +169,73 @@ export const useSessionsStore = create<SessionsState>((set) => ({
 	appendLine: (paneId, line) =>
 		set((s) => ({ panes: s.panes.map((p) => (p.id === paneId ? { ...p, lines: [...p.lines, line] } : p)) })),
 
-	splitPane: () =>
-		set((s) => {
-			const current = s.panes.find((p) => p.id === s.focusedPaneId);
-			const id = `pane-${++seq}`;
-			// 新格子是**另一条独立会话**：给它一个新的会话键，绝不与已有格子共用。
-			// 共用键就是「一台主机只能有一条连接」的老毛病。凭据不在这一层，
-			// 新格子要等用户在连接页对它发起一次连接（终端会如实说明）。
-			const sessionKey = current?.hostId ? newSshSessionKey(current.hostId) : null;
-			const pane: TerminalPane = {
-				id,
-				tabId: current?.tabId ?? null,
-				hostId: current?.hostId ?? null,
-				sessionKey,
-				title: current?.title ?? "新分屏",
-				subtitle: current?.subtitle,
-				status: current?.status ?? "connected",
-				lines: [],
-			};
-			return { panes: [...s.panes, pane], focusedPaneId: id };
-		}),
+	splitPane: (targetTabId, direction = "horizontal") => {
+		const s = get();
+		const tabId = targetTabId ?? s.activeTabId;
+		const tab = s.tabs.find((t) => t.id === tabId);
+		if (!tab) return null;
 
-	closePane: (paneId) =>
-		set((s) => {
-			const panes = s.panes.filter((p) => p.id !== paneId);
-			return { panes, focusedPaneId: panes[0]?.id ?? "" };
-		}),
+		const currentPanes = s.panes.filter((p) => p.tabId === tabId);
+		if (currentPanes.length >= 4) return null; // 最多 4 分屏
+
+		const id = `pane-${++seq}`;
+		// 新分屏格建立独立会话：本地终端则启动新本地 shell，远程主机则建立独立连接
+		const sessionKey = tab.hostId ? newSshSessionKey(tab.hostId) : null;
+		const host = tab.hostId ? useHostsStore.getState().hosts.find((h) => h.id === tab.hostId) : null;
+
+		const pane: TerminalPane = {
+			id,
+			tabId,
+			hostId: tab.hostId,
+			sessionKey,
+			title: host ? `${host.username}@${host.name}` : "本地终端",
+			subtitle: host ? `${host.username}@${host.hostname}:${host.port}` : "本地 shell",
+			status: tab.hostId ? "connecting" : "connected",
+			lines: [],
+		};
+
+		const nextCount = currentPanes.length + 1;
+		const nextLayout: SplitLayout =
+			nextCount <= 1 ? "single" : nextCount === 2 ? (direction === "vertical" ? "vertical" : "horizontal") : "grid";
+
+		set((state) => ({
+			panes: [...state.panes, pane],
+			focusedPaneId: id,
+			tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, layout: nextLayout } : t)),
+		}));
+
+		return id;
+	},
+
+	closePane: (paneId) => {
+		const s = get();
+		const pane = s.panes.find((p) => p.id === paneId);
+		if (!pane) return;
+
+		// 销毁 PTY 或 SSH 会话
+		if (pane.sessionKey) void closeSshSession(pane.sessionKey);
+		else closePty(pane.id);
+
+		const tabId = pane.tabId;
+		const tab = s.tabs.find((t) => t.id === tabId);
+		const remainingInTab = s.panes.filter((p) => p.tabId === tabId && p.id !== paneId);
+
+		// 如果此标签下的所有分屏都关完了，直接关闭标签
+		if (remainingInTab.length === 0 && tabId) {
+			s.closeTab(tabId);
+			return;
+		}
+
+		const nextLayout: SplitLayout = remainingInTab.length <= 1 ? "single" : remainingInTab.length === 2 ? "horizontal" : "grid";
+		const nextPanes = s.panes.filter((p) => p.id !== paneId);
+		const focusedPaneId = s.focusedPaneId === paneId ? (remainingInTab[0]?.id ?? nextPanes[0]?.id ?? "") : s.focusedPaneId;
+
+		set((state) => ({
+			panes: nextPanes,
+			focusedPaneId,
+			tabs: tab ? state.tabs.map((t) => (t.id === tabId ? { ...t, layout: nextLayout } : t)) : state.tabs,
+		}));
+	},
 }));
 
 /**
@@ -173,3 +270,19 @@ export function paneCountFor(layout: SplitLayout): number {
 			return 4;
 	}
 }
+
+/**
+ * 向当前焦点终端输入数据（字符串或控制序列）。
+ * 如果聚焦的是 SSH 格，则写入 SSH 会话；如果是本地终端，写入 PTY。
+ */
+export function writeToActiveTerminal(data: string): boolean {
+	const s = useSessionsStore.getState();
+	if (!s.focusedPaneId) return false;
+	const pane = s.panes.find((p) => p.id === s.focusedPaneId);
+	if (!pane) return false;
+	if (pane.sessionKey) {
+		return writeSsh(pane.sessionKey, data);
+	}
+	return writePty(pane.id, data);
+}
+

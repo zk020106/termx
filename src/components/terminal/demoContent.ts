@@ -50,7 +50,7 @@ export function resolveVariant(subtitle: string | undefined, fallback: DemoVaria
 
 /** 提示符：mock 里 title 就是 "deploy@order-api-01:~$" */
 export function promptFor(title: string | undefined, variant: DemoVariant): string {
-	if (variant === "shell") return "PS C:\\Users\\suantian>";
+	if (variant === "shell") return "PS C:\\Users\\developer>";
 	const text = title?.trim();
 	if (!text) return "deploy@order-api-01:~$";
 	return text;
@@ -72,11 +72,11 @@ const DEPLOY_LINES: TerminalLine[] = [
 ];
 
 const SHELL_LINES: TerminalLine[] = [
-	{ kind: "input", text: "PS C:\\Users\\suantian> git -C IdeaProjects\\termx status -sb" },
+	{ kind: "input", text: "PS C:\\Users\\developer> git -C termx status -sb" },
 	{ kind: "plain", text: "## main...origin/main" },
 	{ kind: "plain", text: " M src/screens/Workspace.tsx" },
 	{ kind: "plain", text: "?? src/components/terminal/" },
-	{ kind: "input", text: "PS C:\\Users\\suantian> pnpm exec tsc --noEmit" },
+	{ kind: "input", text: "PS C:\\Users\\developer> pnpm exec tsc --noEmit" },
 	{ kind: "ok", text: "OK 0 errors" },
 ];
 

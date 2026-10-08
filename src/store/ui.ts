@@ -7,8 +7,7 @@ interface UiState {
 	/** 侧边面板（活动栏对应的内容区） */
 	sidebarOpen: boolean;
 	sidebarWidth: number;
-	/** 右侧工具面板，默认收起（需求书 04-⑦） */
-	rightPanelOpen: boolean;
+	/** 工具面板页签（/monitor 右栏：监控 / 片段 / AI） */
 	rightPanelTab: RightPanelTab;
 	/** 底部内嵌 SFTP 面板（附着当前连接） */
 	embeddedSftpOpen: boolean;
@@ -19,7 +18,6 @@ interface UiState {
 
 	toggleSidebar: () => void;
 	setSidebarWidth: (width: number) => void;
-	toggleRightPanel: (tab?: RightPanelTab) => void;
 	setRightPanelTab: (tab: RightPanelTab) => void;
 	toggleEmbeddedSftp: () => void;
 	setPaletteOpen: (open: boolean) => void;
@@ -29,7 +27,6 @@ interface UiState {
 export const useUiStore = create<UiState>((set) => ({
 	sidebarOpen: true,
 	sidebarWidth: 260,
-	rightPanelOpen: false,
 	rightPanelTab: "monitor",
 	embeddedSftpOpen: true,
 	paletteOpen: false,
@@ -37,12 +34,7 @@ export const useUiStore = create<UiState>((set) => ({
 
 	toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 	setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
-	toggleRightPanel: (tab) =>
-		set((s) => ({
-			rightPanelOpen: tab ? (s.rightPanelOpen && s.rightPanelTab === tab ? false : true) : !s.rightPanelOpen,
-			rightPanelTab: tab ?? s.rightPanelTab,
-		})),
-	setRightPanelTab: (rightPanelTab) => set({ rightPanelTab, rightPanelOpen: true }),
+	setRightPanelTab: (rightPanelTab) => set({ rightPanelTab }),
 	toggleEmbeddedSftp: () => set((s) => ({ embeddedSftpOpen: !s.embeddedSftpOpen })),
 	setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
 	setActivity: (activity) => set({ activity }),

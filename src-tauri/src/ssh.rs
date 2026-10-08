@@ -126,9 +126,17 @@ fn emit_phase_full(
     );
 }
 
-struct ClientHandler {
+#[derive(Debug)]
+struct SessionError {
+    detail: String,
+    kind: Option<String>,
+    fingerprint: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ClientHandler {
     app: AppHandle,
-    key: String,
+    _key: String,
     host: String,
     port: u16,
     fingerprint: Arc<Mutex<Option<String>>>,
@@ -291,14 +299,15 @@ async fn run_session(
     rx: &mut UnboundedReceiver<SshCommand>,
     pending_keys: &Arc<Mutex<HashMap<String, PublicKey>>>,
     auth_prompts: &AuthPromptRegistry,
-) -> Result<(), String> {
+    sftp: &crate::sftp::SftpState,
+) -> Result<(), SessionError> {
     emit_phase(app, key, "resolve", true, format!("{host}:{port}"));
 
     let fingerprint = Arc::new(Mutex::new(None));
     let verdict: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
     let handler = ClientHandler {
         app: app.clone(),
-        key: key.to_string(),
+        _key: key.to_string(),
         host: host.to_string(),
         port,
         fingerprint: fingerprint.clone(),
@@ -324,18 +333,17 @@ async fn run_session(
                     ),
                     _ => format!("握手失败：{error}"),
                 };
-                emit_phase_full(
-                    app,
-                    key,
-                    "failed",
-                    false,
+                return Err(SessionError {
                     detail,
-                    Some(&kind),
-                    Some(&fingerprint),
-                );
-                return Err("主机密钥未通过校验".to_string());
+                    kind: Some(kind),
+                    fingerprint: Some(fingerprint),
+                });
             }
-            return Err(format!("建立 TCP 连接失败：{error}"));
+            return Err(SessionError {
+                detail: format!("建立 TCP 连接失败：{error}"),
+                kind: None,
+                fingerprint: None,
+            });
         }
     };
     emit_phase(app, key, "tcp", true, format!("已连接到 {host}:{port}"));
@@ -368,21 +376,48 @@ async fn run_session(
     .await;
     // 凭据用完即弃，不跟着会话一直挂在内存里
     drop(credential);
-    outcome?;
+    if let Err(detail) = outcome {
+        return Err(SessionError {
+            detail,
+            kind: None,
+            fingerprint: None,
+        });
+    }
+
+    // 认证通过后，尝试为本会话开辟 SFTP 子系统通道并注册
+    if let Ok(sftp_channel) = session.channel_open_session().await {
+        if sftp_channel.request_subsystem(true, "sftp").await.is_ok() {
+            if let Ok(sftp_sess) = russh_sftp::client::SftpSession::new(sftp_channel.into_stream()).await {
+                sftp.register_sftp(key.to_string(), Arc::new(sftp_sess)).await;
+            }
+        }
+    }
 
     let mut channel = session
         .channel_open_session()
         .await
-        .map_err(|e| format!("打开会话通道失败：{e}"))?;
+        .map_err(|e| SessionError {
+            detail: format!("打开会话通道失败：{e}"),
+            kind: None,
+            fingerprint: None,
+        })?;
 
     channel
         .request_pty(true, "xterm-256color", cols.max(1), rows.max(1), 0, 0, &[])
         .await
-        .map_err(|e| format!("申请 PTY 失败：{e}"))?;
+        .map_err(|e| SessionError {
+            detail: format!("申请 PTY 失败：{e}"),
+            kind: None,
+            fingerprint: None,
+        })?;
     channel
         .request_shell(true)
         .await
-        .map_err(|e| format!("启动远程 shell 失败：{e}"))?;
+        .map_err(|e| SessionError {
+            detail: format!("启动远程 shell 失败：{e}"),
+            kind: None,
+            fingerprint: None,
+        })?;
 
     emit_phase(app, key, "shell", true, format!("远程 shell 已就绪（{cols}x{rows}）"));
 
@@ -441,6 +476,7 @@ async fn run_session(
 pub async fn ssh_connect(
     app: AppHandle,
     state: State<'_, SshState>,
+    sftp_state: State<'_, crate::sftp::SftpState>,
     key: String,
     host: String,
     port: u16,
@@ -455,6 +491,7 @@ pub async fn ssh_connect(
     let sessions = state.sessions.clone();
     let pending = state.pending_keys.clone();
     let auth_prompts = state.auth_prompts.clone();
+    let sftp = sftp_state.inner().clone();
     let task_key = key.clone();
 
     tauri::async_runtime::spawn(async move {
@@ -470,19 +507,31 @@ pub async fn ssh_connect(
             &mut rx,
             &pending,
             &auth_prompts,
+            &sftp,
         )
         .await;
 
         // 认证输入若还挂着（失败退出、超时），一并收掉，别留下永远等不到的通道
         auth_prompts.cancel(&task_key, "会话已结束");
 
+        // 会话退出时注销 SFTP 句柄
+        sftp.unregister_sftp(&task_key).await;
+
         // 先清掉会话条目再报失败：否则界面立刻重试（例如用户刚确认完指纹）会撞上「会话已存在」
         if let Ok(mut map) = sessions.lock() {
             map.remove(&task_key);
         }
 
-        if let Err(message) = result {
-            emit_phase(&app, &task_key, "failed", false, message);
+        if let Err(err) = result {
+            emit_phase_full(
+                &app,
+                &task_key,
+                "failed",
+                false,
+                err.detail,
+                err.kind.as_deref(),
+                err.fingerprint.as_deref(),
+            );
             let _ = app.emit(&format!("ssh://exit/{task_key}"), None::<i32>);
         }
     });

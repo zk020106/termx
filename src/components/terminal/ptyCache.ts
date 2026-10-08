@@ -3,45 +3,120 @@ import { isTauri, spawnLocalShell, type PtyHandle } from "@/lib/tauri";
 /* =============================================================================
  * 终端会话缓存：把 PTY 会话挂在模块级，独立于 React 组件的生命周期。
  *
- * 为什么需要它：
- *  1. React 开发态（StrictMode）会对 effect 做「挂载 → 卸载 → 再挂载」的演练。
- *     如果 PTY 绑在组件上，第一次挂载起的 shell 会随 xterm 一起被丢弃，
- *     它的首屏输出（提示符）也就永久丢了 —— 表现为原生壳里终端一片空白。
- *  2. 分屏布局变化、标签切换都会重建终端组件；会话独立存活后，
- *     重新挂载只需回放缓冲即可接着用，符合需求书「断线/切换后终端内容保留」的取向。
- *     缓冲记的是**整段会话输出**（不只是没人看的那一段）：切到别的界面再回来时，
- *     只回放空窗期的数据会让终端一片空白，看起来像 shell 死了。
- *
- * 生命周期：最后一个订阅者离开后延迟销毁，避免「卸载→立刻重挂载」误杀 shell。
+ * 在原生 Tauri 桌面端：调用 Rust portable-pty 真实 Shell。
+ * 在 Web / 预览环境：自动降级为交互式 Mock Shell，支持输入、历史、常见内置命令。
  * ========================================================================== */
 
-const KILL_DELAY_MS = 1500;
 /** 回放缓冲上限，避免长会话占内存 */
 const MAX_BUFFER = 64 * 1024;
 
+class MockPtyHandle implements PtyHandle {
+	private buffer = "";
+	private prompt = "\x1b[32mtermx@local\x1b[0m:\x1b[34m~\x1b[0m$ ";
+
+	constructor(private onChunk: (chunk: string) => void) {
+		setTimeout(() => {
+			this.onChunk(
+				"\r\n\x1b[38;2;0;100;224m[TermX]\x1b[0m 本地终端 (Web 预览环境就绪)\r\n" +
+				"支持命令：\x1b[32mhelp\x1b[0m、\x1b[32mls\x1b[0m、\x1b[32mwhoami\x1b[0m、\x1b[32mdate\x1b[0m、\x1b[32mclear\x1b[0m\r\n\r\n" +
+				this.prompt,
+			);
+		}, 30);
+	}
+
+	async write(data: string): Promise<void> {
+		for (let i = 0; i < data.length; i++) {
+			const char = data[i];
+			const code = data.charCodeAt(i);
+
+			if (char === "\r" || char === "\n") {
+				this.onChunk("\r\n");
+				const cmd = this.buffer.trim();
+				this.buffer = "";
+				this.exec(cmd);
+				this.onChunk(this.prompt);
+			} else if (code === 127 || char === "\b") {
+				if (this.buffer.length > 0) {
+					this.buffer = this.buffer.slice(0, -1);
+					this.onChunk("\b \b");
+				}
+			} else if (code === 3) {
+				// Ctrl+C
+				this.buffer = "";
+				this.onChunk("^C\r\n" + this.prompt);
+			} else if (code >= 32) {
+				this.buffer += char;
+				this.onChunk(char);
+			}
+		}
+	}
+
+	private exec(cmd: string) {
+		if (!cmd) return;
+		const [name, ...args] = cmd.split(" ");
+		switch (name.toLowerCase()) {
+			case "help":
+				this.onChunk(
+					"TermX 终端模拟命令：\r\n" +
+					"  help        - 显示帮助\r\n" +
+					"  ls          - 列出目录文件\r\n" +
+					"  whoami      - 显示当前用户\r\n" +
+					"  uname [-a]  - 显示系统架构\r\n" +
+					"  date        - 查看当前系统时间\r\n" +
+					"  clear       - 清空屏幕\r\n" +
+					"  ping [host] - 发送网络探测包\r\n" +
+					"  echo [text] - 回显指定文本\r\n",
+				);
+				break;
+			case "ls":
+				this.onChunk("bin   etc   home   lib   opt   root   tmp   usr   var   termx.config\r\n");
+				break;
+			case "whoami":
+				this.onChunk("termx-user\r\n");
+				break;
+			case "uname":
+				this.onChunk("Linux termx-local 6.6.0-x86_64 #1 SMP PREEMPT GNU/Linux\r\n");
+				break;
+			case "date":
+				this.onChunk(new Date().toLocaleString() + "\r\n");
+				break;
+			case "clear":
+				this.onChunk("\x1b[2J\x1b[H");
+				break;
+			case "echo":
+				this.onChunk(args.join(" ") + "\r\n");
+				break;
+			case "ping":
+				this.onChunk(`PING ${args[0] || "127.0.0.1"}: 64 data bytes\r\n64 bytes: icmp_seq=1 ttl=64 time=0.042 ms\r\n`);
+				break;
+			default:
+				this.onChunk(`bash: ${name}: command not found\r\n`);
+				break;
+		}
+	}
+
+	async resize(): Promise<void> {}
+	async kill(): Promise<void> {}
+}
+
 interface Entry {
 	handle: PtyHandle | null;
-	/** 整段会话输出（只留末尾 MAX_BUFFER 字符）：终端重挂载时靠它回放 */
 	replay: string;
 	subs: Set<(chunk: string) => void>;
 	exitSubs: Set<(code: number | null) => void>;
-	killTimer: number | null;
 	ready: Promise<boolean>;
 }
 
 const entries = new Map<string, Entry>();
 
 export interface PtyAttachment {
-	/** 重新挂载时用于回放的整段既有输出 */
 	replay: string;
-	/** 会话是否真正起来了（false 时调用方应降级为演示模式） */
 	ready: Promise<boolean>;
 	detach: () => void;
 }
 
-/** 原生壳内才可能有真实 PTY */
 export function ptySupported(): boolean {
-	return isTauri();
+	return true;
 }
 
 export function attachPty(
@@ -51,8 +126,6 @@ export function attachPty(
 	onData: (chunk: string) => void,
 	onExit: (code: number | null) => void,
 ): PtyAttachment | null {
-	if (!isTauri()) return null;
-
 	let entry = entries.get(paneId);
 
 	if (!entry) {
@@ -63,37 +136,38 @@ export function attachPty(
 			replay: "",
 			subs,
 			exitSubs,
-			killTimer: null,
 			ready: Promise.resolve(false),
 		};
 		entries.set(paneId, created);
 
-		created.ready = spawnLocalShell(
-			cols,
-			rows,
-			(chunk) => {
-				// 不管有没有订阅者都累积：重新挂载的终端要能回放整段会话，
-				// 只记空窗期的话，切走再回来就是一片空白
+		if (isTauri()) {
+			created.ready = spawnLocalShell(
+				cols,
+				rows,
+				(chunk) => {
+					created.replay = (created.replay + chunk).slice(-MAX_BUFFER);
+					for (const sub of subs) sub(chunk);
+				},
+				(code) => {
+					for (const sub of exitSubs) sub(code);
+				},
+			)
+				.then((handle) => {
+					created.handle = handle;
+					return handle !== null;
+				})
+				.catch(() => false);
+		} else {
+			// Web 预览环境：自动挂载交互式 Mock PTY
+			const mock = new MockPtyHandle((chunk) => {
 				created.replay = (created.replay + chunk).slice(-MAX_BUFFER);
 				for (const sub of subs) sub(chunk);
-			},
-			(code) => {
-				for (const sub of exitSubs) sub(code);
-			},
-		)
-			.then((handle) => {
-				created.handle = handle;
-				return handle !== null;
-			})
-			.catch(() => false);
+			});
+			created.handle = mock;
+			created.ready = Promise.resolve(true);
+		}
 
 		entry = created;
-	}
-
-	// 取消待执行的销毁：说明是「卸载→立刻重挂载」而不是真的离开
-	if (entry.killTimer !== null) {
-		window.clearTimeout(entry.killTimer);
-		entry.killTimer = null;
 	}
 
 	entry.subs.add(onData);
@@ -108,25 +182,27 @@ export function attachPty(
 		detach: () => {
 			current.subs.delete(onData);
 			current.exitSubs.delete(onExit);
-			if (current.subs.size > 0) return;
-
-			current.killTimer = window.setTimeout(() => {
-				if (current.subs.size > 0) return;
-				entries.delete(paneId);
-				current.handle?.kill();
-			}, KILL_DELAY_MS);
 		},
 	};
 }
 
-/** 写入键盘输入；会话未就绪时返回 false，调用方应走演示回显 */
+/** 显式关闭 PTY 会话（关闭标签或关闭分屏时调用） */
+export function closePty(paneId: string): void {
+	const entry = entries.get(paneId);
+	if (entry) {
+		entries.delete(paneId);
+		void entry.handle?.kill();
+	}
+}
+
+/** 写入键盘输入 */
 export function writePty(paneId: string, data: string): boolean {
 	const entry = entries.get(paneId);
 	if (!entry?.handle) return false;
-	entry.handle.write(data);
+	void entry.handle.write(data);
 	return true;
 }
 
 export function resizePty(paneId: string, cols: number, rows: number): void {
-	entries.get(paneId)?.handle?.resize(cols, rows);
+	void entries.get(paneId)?.handle?.resize(cols, rows);
 }

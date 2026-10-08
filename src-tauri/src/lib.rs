@@ -3,10 +3,12 @@ mod known_hosts;
 mod probe;
 mod pty;
 mod secret;
+mod sftp;
 mod ssh;
 mod ssh_auth;
 
 use pty::PtyState;
+use sftp::SftpState;
 use ssh::SshState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -16,6 +18,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(PtyState::default())
         .manage(SshState::default())
+        .manage(SftpState::default())
         .invoke_handler(tauri::generate_handler![
             pty::pty_spawn,
             pty::pty_write,
@@ -39,6 +42,24 @@ pub fn run() {
             secret::secret_load,
             secret::secret_delete,
             secret::secret_available,
+            sftp::sftp_list,
+            sftp::sftp_realpath,
+            sftp::sftp_mkdir,
+            sftp::sftp_remove,
+            sftp::sftp_rename,
+            sftp::sftp_chmod,
+            sftp::sftp_read_file,
+            sftp::sftp_write_file,
+            sftp::sftp_upload,
+            sftp::sftp_download,
+            sftp::fs_local_list,
+            sftp::fs_local_home,
+            sftp::fs_local_drives,
+            sftp::fs_local_mkdir,
+            sftp::fs_local_remove,
+            sftp::fs_local_rename,
+            sftp::fs_local_read_file,
+            sftp::fs_local_write_file,
         ])
         .run(tauri::generate_context!())
         .expect("TermX 启动失败");

@@ -3,7 +3,7 @@ import { EmptyState } from "@/components/ui/Display";
 import type { CommandItem } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
-import { liveTabForHost, useSessionsStore } from "@/store/sessions";
+import { liveTabForHost, useSessionsStore, writeToActiveTerminal } from "@/store/sessions";
 import { useSnippetsStore } from "@/store/snippets";
 import { toast } from "@/store/toast";
 import { useUiStore } from "@/store/ui";
@@ -37,7 +37,6 @@ const STATIC_ACTIONS: CommandItem[] = [
 	{ id: "act-toggle-sftp", group: "command", title: "显示 / 隐藏 SFTP 面板", shortcut: "Ctrl Shift S", icon: "icon-[lucide--folder-tree]", keywords: ["sftp", "文件"] },
 	{ id: "act-broadcast", group: "command", title: "广播输入到全部终端", shortcut: "Ctrl Shift I", icon: "icon-[lucide--radio]" },
 	{ id: "act-new-forward", group: "command", title: "新建端口转发规则", icon: "icon-[lucide--waypoints]", keywords: ["forward", "转发"] },
-	{ id: "act-probe", group: "command", title: "对主机库测速", icon: "icon-[lucide--gauge]", keywords: ["测速", "延迟", "ping"] },
 	{ id: "act-lock", group: "command", title: "锁定应用", shortcut: "Ctrl Shift L", icon: "icon-[lucide--lock]" },
 	{ id: "set-appearance", group: "setting", title: "外观与主题", icon: "icon-[lucide--palette]", keywords: ["主题", "深色", "浅色"] },
 	{ id: "set-terminal", group: "setting", title: "终端字体与配色", icon: "icon-[lucide--type]" },
@@ -161,46 +160,78 @@ export function CommandPalettePanel({
 			onClose?.();
 
 			if (item.group === "setting") {
-				toast({ title: `打开设置：${item.title}`, tone: "default" });
 				navigate("/settings");
 				return;
 			}
-			if (item.group === "command") {
-				toast({
-					title: `已执行：${item.title}`,
-					description: item.shortcut ? `快捷键 ${item.shortcut}` : undefined,
-					tone: "success",
-				});
+			if (item.id === "act-new-tab") {
+				const id = useSessionsStore.getState().openSession(null);
+				useSessionsStore.getState().setActiveTab(id);
+				navigate("/workspace");
+				toast({ title: "已新建本地终端", tone: "success" });
 				return;
 			}
-			// 主机项：已经有活着的会话就聚焦那个标签，否则进连接流程
-			// （需求书设计目标：Ctrl+K → 输入几个字母 → 回车即连接）。
-			// 想要**第二条**同主机连接，用主机库里的「新建连接」动作。
+			if (item.id === "act-split-right" || item.id === "act-split-down") {
+				const activeTabId = useSessionsStore.getState().activeTabId;
+				const newPaneId = useSessionsStore.getState().splitPane(activeTabId);
+				navigate("/workspace");
+				if (newPaneId) {
+					toast({ title: "已新增分屏", tone: "success" });
+				} else {
+					toast({ title: "分屏已达上限 (最多 4 格)", tone: "warning" });
+				}
+				return;
+			}
+			if (item.id === "act-toggle-sftp") {
+				useUiStore.getState().toggleEmbeddedSftp();
+				navigate("/workspace");
+				return;
+			}
+			if (item.id === "act-broadcast") {
+				const activeTabId = useSessionsStore.getState().activeTabId;
+				if (activeTabId) {
+					useSessionsStore.getState().toggleBroadcast(activeTabId);
+					const isBroadcasting = useSessionsStore.getState().tabs.find((t) => t.id === activeTabId)?.broadcasting;
+					toast({ title: isBroadcasting ? "已开启广播输入" : "已关闭广播输入", tone: "default" });
+				}
+				navigate("/workspace");
+				return;
+			}
+			if (item.id === "act-new-forward") {
+				navigate("/forward");
+				return;
+			}
 			if (item.id.startsWith("host-")) {
 				const hostId = item.id.slice("host-".length);
 				const live = liveTabForHost(hostId);
 				if (live) {
 					useSessionsStore.getState().setActiveTab(live.id);
-					toast({ title: `已切到 ${item.title} 的会话`, description: "这台主机已经有会话，没有新开连接", tone: "default" });
-					navigate("/workspace");
-					return;
+					toast({ title: `已切到 ${item.title} 的会话`, tone: "default" });
+				} else {
+					const newTabId = useSessionsStore.getState().openSession(hostId);
+					useSessionsStore.getState().setActiveTab(newTabId);
+					toast({ title: `正在连接 ${item.title}`, tone: "default" });
 				}
-				navigate(`/connect?host=${encodeURIComponent(hostId)}`);
+				navigate("/workspace");
 				return;
 			}
 			if (item.id.startsWith("snippet-")) {
-				toast({
-					title: `片段：${item.title}`,
-					description: "到「命令片段」界面选择发送目标后使用。",
-					tone: "default",
-				});
-				navigate("/snippets");
+				const snippetId = item.id.slice("snippet-".length);
+				const snippet = useSnippetsStore.getState().snippets.find((s) => s.id === snippetId);
+				if (snippet) {
+					const ok = writeToActiveTerminal(snippet.command + "\n");
+					if (ok) {
+						toast({ title: `已发送片段到终端：${snippet.name}`, tone: "success" });
+					} else {
+						void navigator.clipboard?.writeText(snippet.command).catch(() => undefined);
+						toast({ title: "命令已复制到剪贴板", description: snippet.command, tone: "default" });
+					}
+				}
+				navigate("/workspace");
 				return;
 			}
-			// 其余是静态快捷动作：目前只做提示，具体实现随对应能力接入
 			toast({
 				title: item.title,
-				description: item.shortcut ? `快捷键 ${item.shortcut}` : "该动作尚未接入。",
+				description: item.shortcut ? `快捷键 ${item.shortcut}` : undefined,
 				tone: "default",
 			});
 		},
