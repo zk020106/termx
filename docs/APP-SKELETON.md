@@ -117,7 +117,7 @@ import { Drawer, Modal, DangerousConfirm, Toaster, Hint } from "@/components/ui/
 | `DangerousConfirm` | `open`，`onClose`，`onConfirm`，`hostName`，`action` — 需手输主机名 |
 | `Toaster` | 无 props，由 `WindowChrome` 挂载 |
 
-图标统一用 Iconify 类名：`className="icon-[lucide--server]"`；发行版图标：`icon-[simple-icons--ubuntu|debian|centos|rockylinux]`。
+图标统一用 Iconify 类名：`className="icon-[lucide--server]"`；发行版图标形如：`icon-[simple-icons--ubuntu]`、`icon-[simple-icons--debian]`。
 
 ### 4.2 状态 —— `@/store/*`
 
