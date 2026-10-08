@@ -126,13 +126,13 @@ function renderHighlightedCommand(command: string, input: string, isSelected: bo
 		const matchPart = command.slice(0, trimmed.length);
 		const restPart = command.slice(trimmed.length);
 		return (
-			<>
+			<span className="whitespace-pre">
 				<span className={cn(isSelected ? "text-primary font-bold" : "text-surface-foreground font-bold")}>
-					{matchPart}
+					{matchPart.replace(/ /g, "\u00A0")}
 				</span>
-				<span className="opacity-80">{restPart}</span>
-			</>
+				<span className="opacity-80">{restPart.replace(/ /g, "\u00A0")}</span>
+			</span>
 		);
 	}
-	return <span>{command}</span>;
+	return <span className="whitespace-pre">{command.replace(/ /g, "\u00A0")}</span>;
 }

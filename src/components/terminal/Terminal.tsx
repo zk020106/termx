@@ -282,8 +282,8 @@ export function Terminal({
 				if (
 					state.ghostText &&
 					best &&
-					state.inputBuffer.trim() &&
-					best.command.toLowerCase().startsWith(state.inputBuffer.trim().toLowerCase()) &&
+					state.inputBuffer &&
+					best.command.toLowerCase().startsWith(state.inputBuffer.toLowerCase()) &&
 					!state.showPopup
 				) {
 					if (event.key === "Tab" || event.key === "ArrowRight") {
@@ -566,12 +566,13 @@ export function Terminal({
 	);
 
 	const selectedSuggestion = suggestions[selectedIndex] ?? suggestions[0];
+	const isPrefixMatch =
+		Boolean(inputBuffer) &&
+		Boolean(selectedSuggestion) &&
+		selectedSuggestion.command.toLowerCase().startsWith(inputBuffer.toLowerCase());
 	const ghostRemainder =
-		ghostText &&
-		selectedSuggestion &&
-		inputBuffer.trim() &&
-		selectedSuggestion.command.toLowerCase().startsWith(inputBuffer.trim().toLowerCase())
-			? selectedSuggestion.command.slice(inputBuffer.trim().length)
+		ghostText && isPrefixMatch && selectedSuggestion
+			? selectedSuggestion.command.slice(inputBuffer.length)
 			: null;
 
 	return (
@@ -597,10 +598,13 @@ export function Terminal({
 						fontSize: `${fontSize}px`,
 						lineHeight: 1,
 						letterSpacing: "0px",
+						whiteSpace: "pre",
 					}}
-					className="pointer-events-none absolute z-20 select-none whitespace-pre font-mono text-faint opacity-50"
+					className="pointer-events-none absolute z-20 select-none font-mono text-faint opacity-50"
 				>
-					{ghostRemainder}
+					<span style={{ whiteSpace: "pre", fontFamily: fontStack(fontFamily) }}>
+						{ghostRemainder.replace(/ /g, "\u00A0")}
+					</span>
 				</div>
 			)}
 
