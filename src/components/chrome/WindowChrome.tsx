@@ -64,14 +64,10 @@ function useGlobalShortcuts(active: boolean) {
 					ui.toggleSidebar();
 					break;
 				case "portForwarding":
-					ui.setSidebarOpen(true);
-					ui.setActivity("forward");
-					navigate("/workspace");
+					navigate("/forward");
 					break;
 				case "snippets":
-					ui.setSidebarOpen(true);
-					ui.setActivity("snippets");
-					navigate("/workspace");
+					navigate("/snippets");
 					break;
 				default:
 					return;

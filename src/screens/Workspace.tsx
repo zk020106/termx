@@ -125,6 +125,7 @@ export default function Workspace() {
 	const toggleBroadcast = useSessionsStore((s) => s.toggleBroadcast);
 	const closeTab = useSessionsStore((s) => s.closeTab);
 	const reopenTab = useSessionsStore((s) => s.reopenTab);
+	const navigate = useNavigate();
 
 	// 只订阅用得到的两项，避免主机库里任何无关状态（搜索词、视图）变化都让整个工作区重渲染
 	const hostStore = {
@@ -596,12 +597,13 @@ export default function Workspace() {
 		[sftpFollowActiveTab, setActiveTab],
 	);
 
-	const handleOpenForward = useCallback((host: Host) => {
-		setForwardHostFilter(host.id);
-		useUiStore.getState().setSidebarOpen(true);
-		useUiStore.getState().setActivity("forward");
-		toast({ title: `已切换至 ${host.name} 的端口转发`, tone: "default" });
-	}, []);
+	const handleOpenForward = useCallback(
+		(host: Host) => {
+			navigate(`/forward?hostId=${host.id}`);
+			toast({ title: `已进入 ${host.name} 的端口转发`, tone: "default" });
+		},
+		[navigate],
+	);
 
 	const handleProbeHost = useCallback(
 		async (host: Host) => {
@@ -814,8 +816,6 @@ export default function Workspace() {
 		? PANE_GRID_CLASS[activeTab.layout]
 		: "grid-cols-1 grid-rows-1";
 	const activeHostLabel = activeHost ? `${activeHost.username}@${activeHost.name}` : "本地终端";
-
-	const navigate = useNavigate();
 
 	const sidebarContent = useMemo(() => {
 		switch (activity) {

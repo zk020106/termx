@@ -4,61 +4,46 @@ import { useSessionsStore } from "@/store/sessions";
 import { useUiStore } from "@/store/ui";
 import { Link, useLocation, useNavigate } from "react-router";
 
-/** 活动栏：44px 宽，在终端工作区内无缝切换侧边抽屉与底部面板，不卸载终端 */
+/** 活动栏：44px 宽，全局一级资产导航（主机库、命令片段、密钥、代理、转发、传输）与设置 */
 export function ActivityBar() {
 	const { pathname } = useLocation();
 	const navigate = useNavigate();
 	const tabs = useSessionsStore((s) => s.tabs);
-	const sidebarOpen = useUiStore((s) => s.sidebarOpen);
+	const activeTabId = useSessionsStore((s) => s.activeTabId);
 	const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-	const uiActivity = useUiStore((s) => s.activity);
 	const setActivity = useUiStore((s) => s.setActivity);
-	const toggleEmbeddedSftp = useUiStore((s) => s.toggleEmbeddedSftp);
-	const embeddedSftpOpen = useUiStore((s) => s.embeddedSftpOpen);
 
-	const isWorkspace = pathname.startsWith("/workspace") || pathname === "/";
-	const active = isWorkspace ? uiActivity : (activityFromPath(pathname) ?? "hosts");
+	const isWorkspace = pathname.startsWith("/workspace") || pathname.startsWith("/hosts") || pathname === "/";
+	const active = activityFromPath(pathname) ?? "hosts";
 
 	const handleItemClick = (item: ActivityDef) => {
-		if (!isWorkspace) {
-			setActivity(item.id);
-			navigate("/workspace");
-			return;
-		}
-
-		if (item.id === "sftp") {
-			toggleEmbeddedSftp();
-			return;
-		}
-
 		if (item.id === "hosts") {
-			if (uiActivity === "hosts" && sidebarOpen) {
-				useSessionsStore.getState().setActiveTab("vaults");
+			if (isWorkspace) {
+				// 已在工作区：若处于终端分屏标签，点击可便捷展开/收起左侧主机列表抽屉
+				if (tabs.length > 0 && activeTabId !== "vaults") {
+					setActivity("hosts");
+					toggleSidebar();
+				}
 			} else {
-				setActivity("hosts");
-				if (!sidebarOpen) toggleSidebar();
+				navigate("/workspace");
 			}
 			return;
 		}
 
-		if (uiActivity === item.id && sidebarOpen) {
-			toggleSidebar();
-		} else {
-			setActivity(item.id);
-			if (!sidebarOpen) toggleSidebar();
-		}
+		// 全局一级资产：直接切换到对应的全功能管理页面
+		navigate(item.to);
 	};
 
 	return (
 		<nav className="flex w-11 shrink-0 flex-col items-center gap-1.5 border-r border-border bg-surface-sunk py-2.5">
 			{activities.map((item) => {
-				const isOn = item.id === "sftp" ? (isWorkspace ? embeddedSftpOpen : active === "sftp") : item.id === active && (isWorkspace ? sidebarOpen : true);
+				const isOn = item.id === active;
 
 				return (
 					<button
 						key={item.id}
 						type="button"
-						title={item.id === "sftp" ? "文件 (SFTP) · 展开/收起底部面板" : item.label}
+						title={item.label}
 						aria-label={item.label}
 						onClick={() => handleItemClick(item)}
 						className={cn(
