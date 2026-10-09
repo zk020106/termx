@@ -1,4 +1,4 @@
-﻿import type { ForwardRule, Host, HostGroup, Snippet, SshKey } from "@/data/types";
+﻿import type { ForwardRule, Host, HostGroup, ProxyProfile, Snippet, SshKey } from "@/data/types";
 import { normalizePreferences, type Preferences } from "@/data/preferences";
 import { stripHostSecrets } from "./configSecrets";
 import { isTauri } from "./tauri";
@@ -21,6 +21,8 @@ export interface PersistedConfig {
 	keys: SshKey[];
 	snippets: Snippet[];
 	forwards: ForwardRule[];
+	/** 可复用代理配置（Netcatty「代理」）；口令不在这里 */
+	proxyProfiles: ProxyProfile[];
 	preferences: Preferences;
 }
 
@@ -32,6 +34,7 @@ export function emptyConfig(): PersistedConfig {
 		keys: [],
 		snippets: [],
 		forwards: [],
+		proxyProfiles: [],
 		// 每次都给一份全新的默认偏好，避免共享对象被就地改坏
 		preferences: normalizePreferences(null),
 	};
@@ -40,7 +43,7 @@ export function emptyConfig(): PersistedConfig {
 const LS_KEY = "termx.config";
 
 /** 已知的顶层字段；其余字段（更新版本写入的新字段）原样保留，写回时不丢 */
-const KNOWN_FIELDS = new Set(["version", "hosts", "groups", "keys", "snippets", "forwards", "preferences"]);
+const KNOWN_FIELDS = new Set(["version", "hosts", "groups", "keys", "snippets", "forwards", "proxyProfiles", "preferences"]);
 let unknownFields: Record<string, unknown> = {};
 
 /** 后端在「配置文件解析失败但已备份」时返回的错误前缀（见 src-tauri/src/config.rs） */
@@ -72,6 +75,25 @@ export function persistableForward(rule: ForwardRule): ForwardRule {
 	return { ...rule, state, connections: 0, trafficIn: 0, trafficOut: 0 };
 }
 
+function isProxyProfile(value: unknown): value is ProxyProfile {
+	if (!value || typeof value !== "object") return false;
+	const v = value as Partial<ProxyProfile>;
+	return (
+		typeof v.id === "string" &&
+		typeof v.label === "string" &&
+		!!v.config &&
+		(v.config.type === "socks5" || v.config.type === "http") &&
+		typeof v.config.host === "string" &&
+		typeof v.config.port === "number"
+	);
+}
+
+/** 代理配置里不允许留明文口令（只在钥匙串） */
+function stripProfileSecret(profile: ProxyProfile): ProxyProfile {
+	const { password: _password, ...config } = profile.config as ProxyProfile["config"] & { password?: unknown };
+	return { ...profile, config };
+}
+
 /** 把读到的对象补齐成完整结构，旧文件缺字段也不至于炸（导入配置时也用它） */
 export function normalizeConfig(raw: Partial<PersistedConfig> | null): PersistedConfig {
 	const base = emptyConfig();
@@ -83,6 +105,7 @@ export function normalizeConfig(raw: Partial<PersistedConfig> | null): Persisted
 		keys: Array.isArray(raw.keys) ? raw.keys : [],
 		snippets: Array.isArray(raw.snippets) ? raw.snippets : [],
 		forwards: Array.isArray(raw.forwards) ? raw.forwards.map(persistableForward) : [],
+		proxyProfiles: Array.isArray(raw.proxyProfiles) ? raw.proxyProfiles.filter(isProxyProfile).map(stripProfileSecret) : [],
 		// 偏好逐项校验：老配置文件只有 accent，也能补齐成完整结构
 		preferences: normalizePreferences(raw.preferences),
 	};
@@ -134,6 +157,7 @@ export async function saveConfig(config: PersistedConfig): Promise<void> {
 		...config,
 		hosts: stripHostSecrets(config.hosts).hosts,
 		forwards: config.forwards.map(persistableForward),
+		proxyProfiles: config.proxyProfiles.map(stripProfileSecret),
 	};
 	if (isTauri()) {
 		const { invoke } = await import("@tauri-apps/api/core");

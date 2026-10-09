@@ -78,6 +78,18 @@ export interface ProxyConfig {
 	username?: string;
 }
 
+/**
+ * 可复用的代理配置（Netcatty domain/models/connection.ts ProxyProfile）。
+ * 主机通过 proxyProfileId 引用；口令存系统钥匙串（账户名 `proxy-profile:<id>`），不进配置文件。
+ */
+export interface ProxyProfile {
+	id: string;
+	label: string;
+	config: ProxyConfig;
+	createdAt: number;
+	updatedAt?: number;
+}
+
 export interface Host {
 	id: string;
 	name: string;
@@ -87,6 +99,8 @@ export interface Host {
 	username: string;
 	tags: string[];
 	favorite: boolean;
+	/** 置顶（Netcatty「置顶 / 取消置顶」）：在主机列表最上方单独成组 */
+	pinned?: boolean;
 	/** 首次连接后识别到的发行版 */
 	os?: { name: string; icon: string };
 	/** 规格描述，例如 8C 32G · 华东1 */
@@ -95,6 +109,8 @@ export interface Host {
 	/** 跳板链，按顺序逐跳（P0） */
 	jumpHostIds: string[];
 	proxy?: ProxyConfig | null;
+	/** 引用已保存的代理配置（与 proxy 互斥，同 Netcatty proxyProfileId / proxyConfig） */
+	proxyProfileId?: string;
 	encoding?: string;
 	termType?: string;
 	envVars?: { key: string; value: string }[];

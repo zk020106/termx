@@ -14,6 +14,7 @@ import { secretRememberForSession, secretSave } from "@/lib/secret";
 import { useForwardsStore } from "./forwards";
 import { useHostsStore } from "./hosts";
 import { useKeysStore } from "./keys";
+import { useProxyProfilesStore } from "./proxyProfiles";
 import { useSettingsStore } from "./settings";
 import { useSnippetsStore } from "./snippets";
 import { useThemeStore } from "./theme";
@@ -37,6 +38,7 @@ export function snapshotConfig(): PersistedConfig {
 		snippets: useSnippetsStore.getState().snippets,
 		// 转发规则的运行期状态（运行中、连接数、流量）不进配置：否则流量每秒变化都会触发写盘
 		forwards: useForwardsStore.getState().rules.map(persistableForward),
+		proxyProfiles: useProxyProfilesStore.getState().profiles,
 		preferences: { accent: useThemeStore.getState().accent, ...preferences },
 	};
 }
@@ -80,6 +82,7 @@ export async function hydrateStores(): Promise<ConfigLoadIssue | null> {
 		useKeysStore.getState().setAll(config.keys);
 		useSnippetsStore.getState().setAll(config.snippets);
 		useForwardsStore.getState().setAll(config.forwards);
+		useProxyProfilesStore.getState().setAll(config.proxyProfiles);
 		// 强调色与终端/安全/数据偏好都来自配置文件，渲染前先灌进 store，
 		// 首帧就是用户选的那套（xterm 也才会以正确字号/配色挂载）
 		useThemeStore.getState().setAccent(config.preferences.accent);
@@ -138,6 +141,7 @@ function applyConfig(config: PersistedConfig) {
 	useKeysStore.getState().setAll(config.keys);
 	useSnippetsStore.getState().setAll(config.snippets);
 	useForwardsStore.getState().setAll(config.forwards);
+	useProxyProfilesStore.getState().setAll(config.proxyProfiles);
 	useThemeStore.getState().setAccent(config.preferences.accent);
 	useSettingsStore.getState().hydrate(config.preferences);
 }
@@ -167,6 +171,7 @@ export function startAutosave(): () => void {
 		useKeysStore.subscribe(schedule),
 		useSnippetsStore.subscribe(schedule),
 		useForwardsStore.subscribe(schedule),
+		useProxyProfilesStore.subscribe(schedule),
 		useThemeStore.subscribe(schedule),
 		useSettingsStore.subscribe(schedule),
 	];

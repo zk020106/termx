@@ -1,3 +1,4 @@
+import { matchHotkey, shouldSkipHotkeyForTarget } from "@/lib/hotkeys";
 import { ActivityBar } from "@/components/chrome/ActivityBar";
 import { CommandPalette } from "@/components/chrome/CommandPalette";
 import { StatusBar } from "@/components/chrome/StatusBar";
@@ -36,7 +37,11 @@ export function WindowChrome({ children }: { children: ReactNode }) {
 	);
 }
 
-/** 全局快捷键：Ctrl+K 命令面板、Ctrl+B 侧栏、Ctrl+Shift+S SFTP 面板、Ctrl+, 设置 */
+/**
+ * 应用级快捷键（Netcatty AppHandlers 的 commandPalette / quickSwitch / openSettings /
+ * toggleSidePanel / portForwarding / snippets）。键位来自 设置 → 快捷键。
+ * 标签与分屏类动作由工作区自己处理。
+ */
 function useGlobalShortcuts(active: boolean) {
 	const navigate = useNavigate();
 	const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
@@ -44,28 +49,35 @@ function useGlobalShortcuts(active: boolean) {
 	useEffect(() => {
 		if (!active) return;
 		const onKey = (e: KeyboardEvent) => {
-			const mod = e.ctrlKey || e.metaKey;
-			if (!mod) return;
-
-			if (!e.shiftKey && e.key.toLowerCase() === "k") {
-				e.preventDefault();
-				setPaletteOpen(true);
-				return;
+			const binding = matchHotkey(e);
+			if (!binding || shouldSkipHotkeyForTarget(e, binding)) return;
+			const ui = useUiStore.getState();
+			switch (binding.action) {
+				case "commandPalette":
+				case "quickSwitch":
+					setPaletteOpen(true);
+					break;
+				case "openSettings":
+					navigate("/settings");
+					break;
+				case "toggleSidePanel":
+					ui.toggleSidebar();
+					break;
+				case "portForwarding":
+					ui.setSidebarOpen(true);
+					ui.setActivity("forward");
+					navigate("/workspace");
+					break;
+				case "snippets":
+					ui.setSidebarOpen(true);
+					ui.setActivity("snippets");
+					navigate("/workspace");
+					break;
+				default:
+					return;
 			}
-			if (!e.shiftKey && e.key.toLowerCase() === "b") {
-				e.preventDefault();
-				useUiStore.getState().toggleSidebar();
-				return;
-			}
-			if (e.shiftKey && e.key.toLowerCase() === "s") {
-				e.preventDefault();
-				useUiStore.getState().toggleEmbeddedSftp();
-				return;
-			}
-			if (!e.shiftKey && e.key === ",") {
-				e.preventDefault();
-				navigate("/settings");
-			}
+			e.preventDefault();
+			e.stopPropagation();
 		};
 
 		window.addEventListener("keydown", onKey);

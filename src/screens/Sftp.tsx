@@ -10,8 +10,6 @@ import {
 	fsLocalHome,
 	fsLocalList,
 	fsLocalMkdir,
-	fsLocalRemove,
-	fsLocalRename,
 	fsLocalCreateEmptyFile,
 	formatUnixTime,
 	getFileIcon,
@@ -19,21 +17,19 @@ import {
 	localJoin,
 	posixDirname,
 	posixJoin,
-	sftpChmod,
 	sftpList,
 	sftpMkdir,
 	sftpRealPath,
-	sftpRemove,
-	sftpRename,
 	sftpCreateEmptyFile,
 	type SftpFileEntry,
 } from "@/lib/sftp";
+import { useSftpPaneActions, type SftpPaneRef } from "@/components/sftp/useSftpPaneActions";
+import { transferEntries } from "@/lib/sftpOps";
 import { useHostsStore } from "@/store/hosts";
+import { useSettingsStore } from "@/store/settings";
 import { useSessionsStore } from "@/store/sessions";
-import { enqueueTransfers, type TransferRequest } from "@/lib/transferManager";
+import { enqueueTransfers } from "@/lib/transferManager";
 import { toast } from "@/store/toast";
-import { unsafeLocalNameReason } from "@/lib/pathSafety";
-import { detectPlatform } from "@/lib/platform";
 import { transferSummary, useTransfersStore } from "@/store/transfers";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
@@ -46,12 +42,6 @@ import { Link, useNavigate, useSearchParams } from "react-router";
 type SortField = "name" | "size" | "mtime";
 type SortDirection = "asc" | "desc";
 
-interface ContextMenuState {
-	x: number;
-	y: number;
-	side: "local" | "remote";
-	entry: SftpFileEntry;
-}
 
 export default function Sftp() {
 	const navigate = useNavigate();
@@ -144,12 +134,9 @@ export default function Sftp() {
 	});
 
 	/* ------------------------------ 弹窗与菜单 ------------------------------ */
-	const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-	const [modalMode, setModalMode] = useState<"mkdir" | "touch" | "rename" | "delete" | "chmod" | null>(null);
+	const [modalMode, setModalMode] = useState<"mkdir" | "touch" | null>(null);
 	const [modalSide, setModalSide] = useState<"local" | "remote">("remote");
-	const [targetEntry, setTargetEntry] = useState<SftpFileEntry | null>(null);
 	const [inputName, setInputName] = useState<string>("");
-	const [chmodMode, setChmodMode] = useState<number>(0o644);
 
 	/* ------------------------------ 本地加载 ------------------------------ */
 	const loadLocalDir = async (target: string) => {
@@ -209,9 +196,11 @@ export default function Sftp() {
 	}, [selectedSessionKey]);
 
 	/* ------------------------------ 排序与过滤 ------------------------------ */
+	// Netcatty sftpShowHiddenFiles：默认隐藏点开头的文件
+	const showHidden = useSettingsStore((s) => s.sftpShowHiddenFiles);
 	const filteredLocalEntries = useMemo(() => {
-		let list = localEntries.filter((e) =>
-			e.name.toLowerCase().includes(localFilter.toLowerCase()),
+		let list = localEntries.filter(
+			(e) => (showHidden || !e.name.startsWith(".")) && e.name.toLowerCase().includes(localFilter.toLowerCase()),
 		);
 		list.sort((a, b) => {
 			if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
@@ -222,11 +211,11 @@ export default function Sftp() {
 			return localSort.dir === "asc" ? comp : -comp;
 		});
 		return list;
-	}, [localEntries, localFilter, localSort]);
+	}, [localEntries, localFilter, localSort, showHidden]);
 
 	const filteredRemoteEntries = useMemo(() => {
-		let list = remoteEntries.filter((e) =>
-			e.name.toLowerCase().includes(remoteFilter.toLowerCase()),
+		let list = remoteEntries.filter(
+			(e) => (showHidden || !e.name.startsWith(".")) && e.name.toLowerCase().includes(remoteFilter.toLowerCase()),
 		);
 		list.sort((a, b) => {
 			if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
@@ -237,9 +226,43 @@ export default function Sftp() {
 			return remoteSort.dir === "asc" ? comp : -comp;
 		});
 		return list;
-	}, [remoteEntries, remoteFilter, remoteSort]);
+	}, [remoteEntries, remoteFilter, remoteSort, showHidden]);
+
+	/* ------------------------------ 右键菜单 / 键盘（对齐 Netcatty） ------------------------------ */
+	const localPane: SftpPaneRef = useMemo(
+		() => ({ target: { side: "local" }, currentPath: localPath, reload: () => loadLocalDir(localPath) }),
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[localPath],
+	);
+	const remotePane: SftpPaneRef = useMemo(
+		() => ({
+			target: { side: "remote", sessionKey: selectedSessionKey || null, hostId: currentTab?.hostId ?? null },
+			currentPath: remotePath,
+			reload: () => loadRemoteDir(selectedSessionKey, remotePath),
+		}),
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[selectedSessionKey, remotePath, currentTab?.hostId],
+	);
+	const localActions = useSftpPaneActions({
+		pane: localPane,
+		entries: filteredLocalEntries,
+		selected: localSelected,
+		setSelected: setLocalSelected,
+		navigate: (path) => void loadLocalDir(path),
+		other: selectedSessionKey && remotePath ? remotePane : null,
+	});
+	const remoteActions = useSftpPaneActions({
+		pane: remotePane,
+		entries: filteredRemoteEntries,
+		selected: remoteSelected,
+		setSelected: setRemoteSelected,
+		navigate: (path) => void loadRemoteDir(selectedSessionKey, path),
+		other: localPath ? localPane : null,
+		hostLabel: currentTab?.title,
+	});
 
 	/* ------------------------------ 传输操作 ------------------------------ */
+	// 目录递归传输（Netcatty 的文件夹上传 / 下载），文件进 termx 传输队列
 	const handleUploadEntries = async (entries: SftpFileEntry[]) => {
 		if (!selectedSessionKey || !remotePath) {
 			toast({ title: "无法上传", description: "未连接到远程 SFTP 会话", tone: "warning" });
@@ -247,28 +270,17 @@ export default function Sftp() {
 		}
 		const key = selectedSessionKey;
 		const dir = remotePath;
-		const requests: TransferRequest[] = [];
-		for (const entry of entries) {
-			if (entry.is_dir) {
-				toast({ title: "目录上传", description: `暂请单选文件上传（${entry.name}）`, tone: "warning" });
-				continue;
-			}
-			requests.push({
-				name: entry.name,
-				direction: "upload",
-				hostId: currentTab?.hostId ?? "",
-				sessionKey: key,
-				localPath: entry.path,
-				remotePath: posixJoin(dir, entry.name),
-				size: entry.size,
+		try {
+			await transferEntries({
+				from: localPane.target,
+				to: remotePane.target,
+				entries,
+				destDir: dir,
+				onFinished: () => loadRemoteDir(key, dir),
 			});
+		} catch (e) {
+			toast({ title: "上传失败", description: String(e), tone: "danger" });
 		}
-		if (requests.length === 0) return;
-		await enqueueTransfers(requests, {
-			onItemDone: (item) => toast({ title: `已上传 ${item.name}`, tone: "success" }),
-			onItemFailed: (item, error) => toast({ title: `上传失败: ${item.name}`, description: error, tone: "danger" }),
-			onFinished: () => loadRemoteDir(key, dir),
-		});
 	};
 
 	const handleDownloadEntries = async (entries: SftpFileEntry[]) => {
@@ -276,36 +288,18 @@ export default function Sftp() {
 			toast({ title: "无法下载", description: "未选择本地下载目标目录", tone: "warning" });
 			return;
 		}
-		const key = selectedSessionKey;
 		const dir = localPath;
-		const requests: TransferRequest[] = [];
-		for (const entry of entries) {
-			if (entry.is_dir) {
-				toast({ title: "目录下载", description: `暂请单选文件下载（${entry.name}）`, tone: "warning" });
-				continue;
-			}
-			// 远程文件名由服务器决定、不可信：含路径分隔符 / `..` 等就拒绝，绝不拼出目录之外的路径
-			const unsafe = unsafeLocalNameReason(entry.name, detectPlatform() === "windows");
-			if (unsafe) {
-				toast({ title: "已跳过不安全的文件名", description: `「${entry.name}」：${unsafe}`, tone: "danger" });
-				continue;
-			}
-			requests.push({
-				name: entry.name,
-				direction: "download",
-				hostId: currentTab?.hostId ?? "",
-				sessionKey: key,
-				localPath: localJoin(dir, entry.name),
-				remotePath: entry.path,
-				size: entry.size,
+		try {
+			await transferEntries({
+				from: remotePane.target,
+				to: localPane.target,
+				entries,
+				destDir: dir,
+				onFinished: () => loadLocalDir(dir),
 			});
+		} catch (e) {
+			toast({ title: "下载失败", description: String(e), tone: "danger" });
 		}
-		if (requests.length === 0) return;
-		await enqueueTransfers(requests, {
-			onItemDone: (item) => toast({ title: `已下载 ${item.name}`, tone: "success" }),
-			onItemFailed: (item, error) => toast({ title: `下载失败: ${item.name}`, description: error, tone: "danger" }),
-			onFinished: () => loadLocalDir(dir),
-		});
 	};
 
 	const handlePickUpload = async () => {
@@ -376,55 +370,15 @@ export default function Sftp() {
 					toast({ title: `已创建远程文本文件: ${inputName}`, tone: "success" });
 					loadRemoteDir(selectedSessionKey, remotePath);
 				}
-			} else if (modalMode === "rename") {
-				if (!inputName.trim() || !targetEntry) return;
-				if (modalSide === "local") {
-					const parent = localDirname(targetEntry.path);
-					const newP = localJoin(parent, inputName.trim());
-					await fsLocalRename(targetEntry.path, newP);
-					toast({ title: `重命名成功: ${inputName}`, tone: "success" });
-					loadLocalDir(localPath);
-				} else {
-					if (!selectedSessionKey) return;
-					const parent = posixDirname(targetEntry.path);
-					const newP = posixJoin(parent, inputName.trim());
-					await sftpRename(selectedSessionKey, targetEntry.path, newP);
-					toast({ title: `重命名成功: ${inputName}`, tone: "success" });
-					loadRemoteDir(selectedSessionKey, remotePath);
-				}
-			} else if (modalMode === "delete") {
-				if (!targetEntry) return;
-				if (modalSide === "local") {
-					await fsLocalRemove(targetEntry.path, targetEntry.is_dir);
-					toast({ title: `已删除: ${targetEntry.name}`, tone: "success" });
-					loadLocalDir(localPath);
-				} else {
-					if (!selectedSessionKey) return;
-					await sftpRemove(selectedSessionKey, targetEntry.path, targetEntry.is_dir);
-					toast({ title: `已删除: ${targetEntry.name}`, tone: "success" });
-					loadRemoteDir(selectedSessionKey, remotePath);
-				}
-			} else if (modalMode === "chmod") {
-				if (!targetEntry || !selectedSessionKey) return;
-				await sftpChmod(selectedSessionKey, targetEntry.path, chmodMode);
-				toast({ title: `权限已修改为 ${chmodMode.toString(8)}`, tone: "success" });
-				loadRemoteDir(selectedSessionKey, remotePath);
 			}
 		} catch (e) {
 			toast({ title: "操作失败", description: String(e), tone: "danger" });
 		} finally {
 			setModalMode(null);
-			setTargetEntry(null);
 			setInputName("");
 		}
 	};
 
-	// 关闭右键菜单
-	useEffect(() => {
-		const onClick = () => setContextMenu(null);
-		window.addEventListener("click", onClick);
-		return () => window.removeEventListener("click", onClick);
-	}, []);
 
 	return (
 		<WindowChrome>
@@ -500,6 +454,12 @@ export default function Sftp() {
 					</div>
 
 					<div className="flex shrink-0 items-center gap-2">
+						<IconButton
+							icon={showHidden ? "icon-[lucide--eye]" : "icon-[lucide--eye-off]"}
+							label={showHidden ? "隐藏隐藏文件" : "显示隐藏文件"}
+							className={cn("size-6.5", showHidden && "text-primary")}
+							onClick={() => useSettingsStore.getState().setTerminal({ sftpShowHiddenFiles: !showHidden })}
+						/>
 						<Link
 							to="/editor"
 							className="flex h-6.5 items-center gap-1.5 rounded-control border border-border bg-surface px-2 text-[11px] font-medium text-muted transition-colors hover:bg-surface-raised hover:text-surface-foreground"
@@ -705,7 +665,15 @@ export default function Sftp() {
 						</div>
 
 						{/* 文件列表区 */}
-						<div className="relative min-h-0 flex-1 overflow-y-auto">
+						<div
+							ref={(el) => {
+								localActions.containerRef.current = el;
+							}}
+							tabIndex={0}
+							onKeyDown={localActions.handleKeyDown}
+							onContextMenu={(e) => localActions.openContextMenu(e, null)}
+							className="relative min-h-0 flex-1 overflow-y-auto outline-none"
+						>
 							{filteredLocalEntries.length === 0 ? (
 								<EmptyState
 									icon="icon-[lucide--folder-open]"
@@ -739,20 +707,9 @@ export default function Sftp() {
 														setLocalSelected(new Set([entry.name]));
 													}
 												}}
-												onDoubleClick={() => {
-													if (entry.is_dir) {
-														loadLocalDir(entry.path);
-													}
-												}}
-												onContextMenu={(e) => {
-													e.preventDefault();
-													setContextMenu({
-														x: e.clientX,
-														y: e.clientY,
-														side: "local",
-														entry,
-													});
-												}}
+												data-sftp-row={entry.name}
+												onDoubleClick={() => localActions.openEntry(entry)}
+												onContextMenu={(e) => localActions.openContextMenu(e, entry)}
 												className={cn(
 													"grid grid-cols-[1fr_80px_110px] items-center px-3 py-1.5 cursor-pointer select-none transition-colors",
 													isSelected
@@ -1013,7 +970,15 @@ export default function Sftp() {
 								</div>
 
 								{/* 文件列表区 */}
-								<div className="relative min-h-0 flex-1 overflow-y-auto">
+								<div
+									ref={(el) => {
+										remoteActions.containerRef.current = el;
+									}}
+									tabIndex={0}
+									onKeyDown={remoteActions.handleKeyDown}
+									onContextMenu={(e) => remoteActions.openContextMenu(e, null)}
+									className="relative min-h-0 flex-1 overflow-y-auto outline-none"
+								>
 									{filteredRemoteEntries.length === 0 ? (
 										<EmptyState
 											icon="icon-[lucide--folder-open]"
@@ -1047,28 +1012,9 @@ export default function Sftp() {
 																setRemoteSelected(new Set([entry.name]));
 															}
 														}}
-														onDoubleClick={() => {
-															if (entry.is_dir) {
-																loadRemoteDir(selectedSessionKey, entry.path);
-															} else {
-																navigate(
-																	`/editor?sessionKey=${selectedSessionKey}&path=${encodeURIComponent(
-																		entry.path,
-																	)}&name=${encodeURIComponent(entry.name)}&hostId=${
-																		currentTab?.hostId ?? ""
-																	}`,
-																);
-															}
-														}}
-														onContextMenu={(e) => {
-															e.preventDefault();
-															setContextMenu({
-																x: e.clientX,
-																y: e.clientY,
-																side: "remote",
-																entry,
-															});
-														}}
+														data-sftp-row={entry.name}
+														onDoubleClick={() => remoteActions.openEntry(entry)}
+														onContextMenu={(e) => remoteActions.openContextMenu(e, entry)}
 														className={cn(
 															"grid grid-cols-[1fr_80px_110px_70px] items-center px-3 py-1.5 cursor-pointer select-none transition-colors",
 															isSelected
@@ -1180,177 +1126,16 @@ export default function Sftp() {
 					</div>
 				</div>
 
-				{/* ===================== 右键上下文菜单 ===================== */}
-				{contextMenu && (
-					<div
-						style={{ left: contextMenu.x, top: contextMenu.y }}
-						onClick={(e) => e.stopPropagation()}
-						className="fixed z-50 flex w-48 flex-col rounded-card border border-border bg-surface-raised py-1 text-[11.5px] shadow-lg animate-in fade-in zoom-in-95 duration-100"
-					>
-						{contextMenu.side === "local" ? (
-							<>
-								<button
-									type="button"
-									onClick={() => {
-										handleUploadEntries([contextMenu.entry]);
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-primary/10 hover:text-primary"
-								>
-									<span className="icon-[lucide--upload] size-3.5" />
-									<span>上传到远程当前目录</span>
-								</button>
-								<div className="my-1 border-t border-border/60" />
-								<button
-									type="button"
-									onClick={() => {
-										setModalSide("local");
-										setTargetEntry(contextMenu.entry);
-										setInputName(contextMenu.entry.name);
-										setModalMode("rename");
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-								>
-									<span className="icon-[lucide--edit-3] size-3.5" />
-									<span>重命名</span>
-								</button>
-								<button
-									type="button"
-									onClick={() => {
-										navigator.clipboard.writeText(contextMenu.entry.path);
-										toast({ title: "已复制绝对路径", tone: "default" });
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-								>
-									<span className="icon-[lucide--copy] size-3.5" />
-									<span>复制路径</span>
-								</button>
-								<div className="my-1 border-t border-border/60" />
-								<button
-									type="button"
-									onClick={() => {
-										setModalSide("local");
-										setTargetEntry(contextMenu.entry);
-										setModalMode("delete");
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-critical hover:bg-critical/10"
-								>
-									<span className="icon-[lucide--trash-2] size-3.5" />
-									<span>删除</span>
-								</button>
-							</>
-						) : (
-							<>
-								{!contextMenu.entry.is_dir && (
-									<button
-										type="button"
-										onClick={() => {
-											navigate(
-												`/editor?sessionKey=${selectedSessionKey}&path=${encodeURIComponent(
-													contextMenu.entry.path,
-												)}&name=${encodeURIComponent(contextMenu.entry.name)}&hostId=${
-													currentTab?.hostId ?? ""
-												}`,
-											);
-											setContextMenu(null);
-										}}
-										className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-primary/10 hover:text-primary"
-									>
-										<span className="icon-[lucide--file-code] size-3.5 text-primary" />
-										<span>在编辑器中打开</span>
-									</button>
-								)}
-								<button
-									type="button"
-									onClick={() => {
-										handleDownloadEntries([contextMenu.entry]);
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-primary/10 hover:text-primary"
-								>
-									<span className="icon-[lucide--download] size-3.5" />
-									<span>下载到本地当前目录</span>
-								</button>
-								<div className="my-1 border-t border-border/60" />
-								<button
-									type="button"
-									onClick={() => {
-										setModalSide("remote");
-										setTargetEntry(contextMenu.entry);
-										setInputName(contextMenu.entry.name);
-										setModalMode("rename");
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-								>
-									<span className="icon-[lucide--edit-3] size-3.5" />
-									<span>重命名</span>
-								</button>
-								<button
-									type="button"
-									onClick={() => {
-										setModalSide("remote");
-										setTargetEntry(contextMenu.entry);
-										setChmodMode(contextMenu.entry.permissions || 0o644);
-										setModalMode("chmod");
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-								>
-									<span className="icon-[lucide--shield] size-3.5" />
-									<span>修改权限 (chmod)</span>
-								</button>
-								<button
-									type="button"
-									onClick={() => {
-										navigator.clipboard.writeText(contextMenu.entry.path);
-										toast({ title: "已复制远程路径", tone: "default" });
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-								>
-									<span className="icon-[lucide--copy] size-3.5" />
-									<span>复制路径</span>
-								</button>
-								<div className="my-1 border-t border-border/60" />
-								<button
-									type="button"
-									onClick={() => {
-										setModalSide("remote");
-										setTargetEntry(contextMenu.entry);
-										setModalMode("delete");
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-critical hover:bg-critical/10"
-								>
-									<span className="icon-[lucide--trash-2] size-3.5" />
-									<span>删除</span>
-								</button>
-							</>
-						)}
-					</div>
-				)}
-
 				{/* ===================== 模态弹窗 ===================== */}
 				<Modal
 					open={modalMode !== null}
 					onClose={() => {
 						setModalMode(null);
-						setTargetEntry(null);
 					}}
 					title={
 						modalMode === "mkdir"
 							? `新建文件夹 (${modalSide === "local" ? "本地" : "远程"})`
-							: modalMode === "touch"
-								? `新建文本文件 (${modalSide === "local" ? "本地" : "远程"})`
-								: modalMode === "rename"
-									? `重命名 (${modalSide === "local" ? "本地" : "远程"})`
-									: modalMode === "delete"
-										? `确认删除`
-										: `修改权限 (chmod)`
+							: `新建文本文件 (${modalSide === "local" ? "本地" : "远程"})`
 					}
 					footer={
 						<div className="flex items-center gap-2">
@@ -1358,17 +1143,16 @@ export default function Sftp() {
 								size="sm"
 								onClick={() => {
 									setModalMode(null);
-									setTargetEntry(null);
 								}}
 							>
 								取消
 							</Button>
 							<Button
 								size="sm"
-								variant={modalMode === "delete" ? "danger" : "primary"}
+								variant="primary"
 								onClick={handleModalSubmit}
 							>
-								{modalMode === "delete" ? "确认删除" : "确定"}
+								确定
 							</Button>
 						</div>
 					}
@@ -1390,150 +1174,9 @@ export default function Sftp() {
 						</div>
 					)}
 
-					{modalMode === "rename" && (
-						<div className="space-y-3">
-							<div className="text-muted">请输入新名称：</div>
-							<Input
-								autoFocus
-								value={inputName}
-								onChange={(e) => setInputName(e.target.value)}
-								onKeyDown={(e) => {
-									if (e.key === "Enter") handleModalSubmit();
-								}}
-							/>
-						</div>
-					)}
-
-					{modalMode === "delete" && targetEntry && (
-						<div className="space-y-2">
-							<div className="text-surface-foreground">
-								确认删除「<span className="font-semibold text-critical">{targetEntry.name}</span>」吗？
-							</div>
-							<div className="text-[11px] text-faint">
-								此操作不可撤销，如果是目录，内部所有文件与子目录将被一并删除。
-							</div>
-						</div>
-					)}
-
-					{modalMode === "chmod" && targetEntry && (
-						<div className="space-y-3">
-							<div className="flex items-center justify-between">
-								<span className="font-mono text-surface-foreground">{targetEntry.name}</span>
-								<span className="font-mono text-[12px] font-semibold text-primary">
-									0o{chmodMode.toString(8).padStart(3, "0")}
-								</span>
-							</div>
-
-							{/* 权限勾选网格 */}
-							<div className="grid grid-cols-3 gap-2 rounded border border-border bg-surface p-2.5 text-[11px]">
-								{/* Owner */}
-								<div className="space-y-1.5">
-									<div className="font-medium text-surface-foreground">所有者 (User)</div>
-									<label className="flex items-center gap-1.5 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={Boolean(chmodMode & 0o400)}
-											onChange={(e) =>
-												setChmodMode((m) => (e.target.checked ? m | 0o400 : m & ~0o400))
-											}
-										/>
-										<span>读 (r)</span>
-									</label>
-									<label className="flex items-center gap-1.5 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={Boolean(chmodMode & 0o200)}
-											onChange={(e) =>
-												setChmodMode((m) => (e.target.checked ? m | 0o200 : m & ~0o200))
-											}
-										/>
-										<span>写 (w)</span>
-									</label>
-									<label className="flex items-center gap-1.5 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={Boolean(chmodMode & 0o100)}
-											onChange={(e) =>
-												setChmodMode((m) => (e.target.checked ? m | 0o100 : m & ~0o100))
-											}
-										/>
-										<span>执行 (x)</span>
-									</label>
-								</div>
-
-								{/* Group */}
-								<div className="space-y-1.5">
-									<div className="font-medium text-surface-foreground">用户组 (Group)</div>
-									<label className="flex items-center gap-1.5 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={Boolean(chmodMode & 0o040)}
-											onChange={(e) =>
-												setChmodMode((m) => (e.target.checked ? m | 0o040 : m & ~0o040))
-											}
-										/>
-										<span>读 (r)</span>
-									</label>
-									<label className="flex items-center gap-1.5 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={Boolean(chmodMode & 0o020)}
-											onChange={(e) =>
-												setChmodMode((m) => (e.target.checked ? m | 0o020 : m & ~0o020))
-											}
-										/>
-										<span>写 (w)</span>
-									</label>
-									<label className="flex items-center gap-1.5 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={Boolean(chmodMode & 0o010)}
-											onChange={(e) =>
-												setChmodMode((m) => (e.target.checked ? m | 0o010 : m & ~0o010))
-											}
-										/>
-										<span>执行 (x)</span>
-									</label>
-								</div>
-
-								{/* Other */}
-								<div className="space-y-1.5">
-									<div className="font-medium text-surface-foreground">其他 (Other)</div>
-									<label className="flex items-center gap-1.5 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={Boolean(chmodMode & 0o004)}
-											onChange={(e) =>
-												setChmodMode((m) => (e.target.checked ? m | 0o004 : m & ~0o004))
-											}
-										/>
-										<span>读 (r)</span>
-									</label>
-									<label className="flex items-center gap-1.5 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={Boolean(chmodMode & 0o002)}
-											onChange={(e) =>
-												setChmodMode((m) => (e.target.checked ? m | 0o002 : m & ~0o002))
-											}
-										/>
-										<span>写 (w)</span>
-									</label>
-									<label className="flex items-center gap-1.5 cursor-pointer">
-										<input
-											type="checkbox"
-											checked={Boolean(chmodMode & 0o001)}
-											onChange={(e) =>
-												setChmodMode((m) => (e.target.checked ? m | 0o001 : m & ~0o001))
-											}
-										/>
-										<span>执行 (x)</span>
-									</label>
-								</div>
-							</div>
-						</div>
-					)}
 				</Modal>
+				{localActions.element}
+				{remoteActions.element}
 			</div>
 		</WindowChrome>
 	);

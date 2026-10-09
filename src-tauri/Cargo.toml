@@ -33,6 +33,8 @@ base64 = "0.22"
 # known_hosts 里哈希过的主机名（|1|salt|hash，HMAC-SHA1）需要自己匹配；与 russh 用的版本一致
 hmac = "0.13"
 sha1 = "0.11"
+# 本地「解压到当前目录」的 .gz（同 Netcatty 用 zlib 内置解，不依赖系统 gzip）；russh 已经引入同版本
+flate2 = "1"
 
 [dev-dependencies]
 # 仅测试用：给 #[tokio::test] 提供运行时

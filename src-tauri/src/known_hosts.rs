@@ -308,6 +308,150 @@ fn remove_entries(path: &Path, host: &str, port: u16) -> Result<usize, String> {
     Ok(removed)
 }
 
+/* ------------------------------ 已知主机列表（设置页 / Netcatty KnownHostsManager） ------------------------------ */
+
+/// 一行 known_hosts 记录，给界面列出来
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownHostEntry {
+    /// "termx" = TermX 自己的记录（可删）；"openssh" = ~/.ssh/known_hosts（只读沿用，不改）
+    pub source: &'static str,
+    pub line_no: usize,
+    /// 原始行（删除时按整行精确匹配）
+    pub line: String,
+    /// 主机字段里的每个模式（逗号分隔）
+    pub patterns: Vec<String>,
+    /// 第一个可读的主机名 / 地址与端口；哈希过的（|1|…）为 None
+    pub host: Option<String>,
+    pub port: u16,
+    pub key_type: String,
+    pub fingerprint: Option<String>,
+    pub marker: Option<String>,
+    pub hashed: bool,
+}
+
+/// `[host]:port` → (host, port)；`host` → (host, 22)
+fn split_pattern(pattern: &str) -> (String, u16) {
+    if let Some(rest) = pattern.strip_prefix('[') {
+        if let Some((h, p)) = rest.split_once("]:") {
+            if let Ok(port) = p.parse() {
+                return (h.to_string(), port);
+            }
+        }
+    }
+    (pattern.to_string(), 22)
+}
+
+pub fn parse_entries(text: &str, source: &'static str) -> Vec<KnownHostEntry> {
+    let mut out = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let Some(mut field) = parts.next() else { continue };
+        let mut marker = None;
+        if field.starts_with('@') {
+            marker = Some(field.to_string());
+            match parts.next() {
+                Some(next) => field = next,
+                None => continue,
+            }
+        }
+        let key_type = parts.next().unwrap_or("").to_string();
+        let fingerprint = parts
+            .next()
+            .and_then(|b64| russh::keys::parse_public_key_base64(b64).ok())
+            .map(|k| fingerprint_of(&k));
+        let hashed = field.starts_with('|');
+        let patterns: Vec<String> = field.split(',').filter(|p| !p.is_empty()).map(str::to_string).collect();
+        // 第一个不是通配 / 否定的模式当作可转换的地址
+        let readable = patterns
+            .iter()
+            .find(|p| !p.starts_with('|') && !p.starts_with('!') && !p.contains('*') && !p.contains('?'));
+        let (host, port) = match readable {
+            Some(p) => {
+                let (h, port) = split_pattern(p);
+                (Some(h), port)
+            }
+            None => (None, 22),
+        };
+        out.push(KnownHostEntry {
+            source,
+            line_no: index + 1,
+            line: trimmed.to_string(),
+            patterns,
+            host,
+            port,
+            key_type,
+            fingerprint,
+            marker,
+            hashed,
+        });
+    }
+    out
+}
+
+fn read_entries(path: &Path, source: &'static str) -> Result<Vec<KnownHostEntry>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(parse_entries(&String::from_utf8_lossy(&bytes), source)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("无法读取 {}：{e}", path.display())),
+    }
+}
+
+/// 列出 TermX 记录 + OpenSSH 记录（后者只读）
+#[tauri::command]
+pub fn known_hosts_list(app: AppHandle) -> Result<Vec<KnownHostEntry>, String> {
+    let mut all = read_entries(&store_path(&app)?, "termx")?;
+    if let Some(path) = openssh_path() {
+        // OpenSSH 文件读不了不影响 TermX 自己的列表
+        if let Ok(list) = read_entries(&path, "openssh") {
+            all.extend(list);
+        }
+    }
+    Ok(all)
+}
+
+/// 从 TermX 的记录里删掉与 `line` 完全相同的行；不碰 OpenSSH 的 ~/.ssh/known_hosts
+#[tauri::command]
+pub fn known_hosts_remove(app: AppHandle, line: String) -> Result<usize, String> {
+    remove_line(&store_path(&app)?, &line)
+}
+
+fn remove_line(path: &Path, line: &str) -> Result<usize, String> {
+    let target = line.trim();
+    if target.is_empty() {
+        return Err("要删除的记录为空".into());
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("读取 known_hosts 失败：{e}")),
+    };
+    let mut removed = 0usize;
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            let hit = l.trim() == target;
+            if hit {
+                removed += 1;
+            }
+            !hit
+        })
+        .collect();
+    if removed == 0 {
+        return Ok(0);
+    }
+    let mut out = kept.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    std::fs::write(path, out.as_bytes()).map_err(|e| format!("写回 known_hosts 失败：{e}"))?;
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,5 +649,34 @@ mod tests {
         // 带注释的记录与无注释的服务器公钥也能对上（只比密钥数据）
         let text = format!("[host.example]:2222 ssh-ed25519 {a} comment\n");
         assert_eq!(judge_text(&text, "[host.example]:2222", &key_a()), Some(Verdict::Trusted));
+    }
+
+    #[test]
+    fn list_parses_markers_ports_and_hashes() {
+        let text = format!(
+            "# c\nexample.com,1.2.3.4 {KEY_A}\n[box]:2222 {KEY_B}\n@revoked bad {KEY_A}\n|1|abc=|def= {KEY_B}\n*.wild {KEY_A}\nbroken ssh-ed25519 !!!\n"
+        );
+        let list = parse_entries(&text, "termx");
+        assert_eq!(list.len(), 6);
+        assert_eq!(list[0].host.as_deref(), Some("example.com"));
+        assert_eq!(list[0].patterns, vec!["example.com", "1.2.3.4"]);
+        assert_eq!(list[0].port, 22);
+        assert!(list[0].fingerprint.as_deref().unwrap().starts_with("SHA256:"));
+        assert_eq!((list[1].host.as_deref(), list[1].port), (Some("box"), 2222));
+        assert_eq!(list[2].marker.as_deref(), Some("@revoked"));
+        assert!(list[3].hashed && list[3].host.is_none());
+        assert!(list[4].host.is_none());
+        assert!(list[5].fingerprint.is_none());
+        assert_eq!(list[1].line_no, 3);
+    }
+
+    #[test]
+    fn remove_line_is_exact() {
+        let path = temp_file("remove_line");
+        std::fs::write(&path, format!("a {KEY_A}\nab {KEY_A}\n# keep\n")).unwrap();
+        assert_eq!(remove_line(&path, &format!("  a {KEY_A} ")).unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("ab {KEY_A}\n# keep\n"));
+        assert_eq!(remove_line(&path, "nothing").unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
     }
 }

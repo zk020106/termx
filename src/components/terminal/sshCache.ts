@@ -311,6 +311,11 @@ export function attachSsh(
 	};
 }
 
+/** 清空会话的回放缓冲（Netcatty clearSessionPtyBuffer：清空缓冲区后，重挂载不再回放清掉的内容） */
+export function clearSshReplay(key: string): void {
+	sessions.get(key)?.replay.clear();
+}
+
 export function writeSsh(key: string, data: string): boolean {
 	const entry = sessions.get(key);
 	if (!entry?.connected) return false;

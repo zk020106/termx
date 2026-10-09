@@ -1,4 +1,6 @@
 import { isAccent, type Accent } from "./types";
+import { DEFAULT_KEYWORD_HIGHLIGHT_RULES, normalizeKeywordHighlightRules, type KeywordHighlightRule } from "@/components/terminal/netcatty/keywordHighlightRules";
+import type { CustomKeyBindings, HotkeyScheme } from "@/lib/keyBindings";
 
 /* =============================================================================
  * 用户偏好（随配置文件持久化）
@@ -12,7 +14,12 @@ import { isAccent, type Accent } from "./types";
  * ========================================================================== */
 
 export type CursorStyle = "block" | "bar" | "underline";
-export type RightClickAction = "paste" | "menu" | "select";
+/** menu = Netcatty context-menu；select-word = Netcatty 的「选择单词」（实为全选，照搬其行为）；select = termx 原有「复制选区」 */
+export type RightClickAction = "paste" | "menu" | "select" | "select-word";
+/** Netcatty MiddleClickBehavior */
+export type MiddleClickAction = "context-menu" | "paste" | "disabled";
+/** Netcatty TerminalTabDoubleClickBehavior + termx 原有的 rename（默认） */
+export type TabDoubleClickAction = "rename" | "duplicate" | "copy" | "disabled";
 export type ScrollbackChoice = "1000" | "5000" | "10000" | "50000" | "unlimited";
 export type AutoLockChoice = "never" | "1" | "5" | "15" | "30" | "60";
 
@@ -46,7 +53,13 @@ export const FONT_SIZES: readonly number[] = [11, 12, 13, 14, 15, 16, 18];
 export const LINE_HEIGHTS: readonly number[] = [1, 1.2, 1.4, 1.6];
 export const SCROLLBACK_CHOICES: readonly ScrollbackChoice[] = ["1000", "5000", "10000", "50000", "unlimited"];
 export const CURSOR_STYLES: readonly CursorStyle[] = ["block", "bar", "underline"];
-export const RIGHT_CLICK_ACTIONS: readonly RightClickAction[] = ["paste", "menu", "select"];
+export const RIGHT_CLICK_ACTIONS: readonly RightClickAction[] = ["paste", "menu", "select", "select-word"];
+export const MIDDLE_CLICK_ACTIONS: readonly MiddleClickAction[] = ["context-menu", "paste", "disabled"];
+export const TAB_DOUBLE_CLICK_ACTIONS: readonly TabDoubleClickAction[] = ["rename", "duplicate", "copy", "disabled"];
+export const HOTKEY_SCHEMES: readonly HotkeyScheme[] = ["disabled", "mac", "pc"];
+/** Netcatty DEFAULT_TERMINAL_WORD_SEPARATORS */
+export const DEFAULT_WORD_SEPARATORS = ' ()[]{}\'"';
+export const FONT_WEIGHTS: readonly number[] = [100, 200, 300, 400, 500, 600, 700, 800, 900];
 export const AUTO_LOCK_CHOICES: readonly AutoLockChoice[] = ["never", "1", "5", "15", "30", "60"];
 
 export interface TerminalPreferences {
@@ -68,6 +81,43 @@ export interface TerminalPreferences {
 	commandSuggestions: boolean;
 	/** 是否在光标后呈现行内幽灵文本 (Ghost Text) */
 	ghostText: boolean;
+	/* ---- 以下移植自 Netcatty TerminalSettings（字段名、默认值一致） ---- */
+	middleClick: MiddleClickAction;
+	showContextMenuOverFullscreenApps: boolean;
+	copyOnSelect: boolean;
+	cursorBlink: boolean;
+	drawBoldInBrightColors: boolean;
+	fontWeight: number;
+	fontWeightBold: number;
+	minimumContrastRatio: number;
+	altAsMeta: boolean;
+	wordSeparators: string;
+	smoothScrolling: boolean;
+	scrollOnInput: boolean;
+	disableBracketedPaste: boolean;
+	clearWipesScrollback: boolean;
+	keywordHighlightEnabled: boolean;
+	keywordHighlightRules: KeywordHighlightRule[];
+	tabDoubleClick: TabDoubleClickAction;
+	hotkeyScheme: HotkeyScheme;
+	customKeyBindings: CustomKeyBindings;
+	disableTerminalFontZoom: boolean;
+	/** SFTP 双击文件：打开 / 传到另一侧（Netcatty sftpDoubleClickBehavior） */
+	sftpDoubleClickBehavior: SftpDoubleClickBehavior;
+	/** 用外部程序打开的远程文件，保存后自动传回（Netcatty sftpAutoSync） */
+	sftpAutoSync: boolean;
+	/** 显示以 . 开头的隐藏文件（Netcatty sftpShowHiddenFiles） */
+	sftpShowHiddenFiles: boolean;
+	/** 按扩展名记住的打开方式（Netcatty FileOpenerDialog「始终使用此方式打开」） */
+	sftpFileOpeners: Record<string, SftpFileOpener>;
+}
+
+export type SftpDoubleClickBehavior = "open" | "transfer";
+export const SFTP_DOUBLE_CLICK_BEHAVIORS: readonly SftpDoubleClickBehavior[] = ["open", "transfer"];
+
+export interface SftpFileOpener {
+	type: "builtin-editor" | "system-app";
+	app?: { path: string; name: string };
 }
 
 /** 解锁密码的校验材料：只存盐与 PBKDF2 摘要，不存密码本身 */
@@ -113,6 +163,30 @@ export const DEFAULT_TERMINAL: TerminalPreferences = {
 	sftpFollowActiveTab: true,
 	commandSuggestions: true,
 	ghostText: true,
+	middleClick: "paste",
+	showContextMenuOverFullscreenApps: false,
+	copyOnSelect: false,
+	cursorBlink: true,
+	drawBoldInBrightColors: true,
+	fontWeight: 400,
+	fontWeightBold: 700,
+	minimumContrastRatio: 1,
+	altAsMeta: false,
+	wordSeparators: DEFAULT_WORD_SEPARATORS,
+	smoothScrolling: false,
+	scrollOnInput: true,
+	disableBracketedPaste: false,
+	clearWipesScrollback: true,
+	keywordHighlightEnabled: true,
+	keywordHighlightRules: DEFAULT_KEYWORD_HIGHLIGHT_RULES.map((rule) => ({ ...rule, patterns: [...rule.patterns] })),
+	tabDoubleClick: "rename",
+	hotkeyScheme: defaultHotkeyScheme(),
+	customKeyBindings: {},
+	disableTerminalFontZoom: false,
+	sftpDoubleClickBehavior: "open",
+	sftpAutoSync: false,
+	sftpShowHiddenFiles: false,
+	sftpFileOpeners: {},
 };
 
 export const DEFAULT_SECURITY: SecurityPreferences = {
@@ -147,6 +221,46 @@ export function fontStack(family: string): string {
 /** 闲置自动锁定的毫秒数；never 返回 null */
 export function autoLockMs(choice: AutoLockChoice): number | null {
 	return choice === "never" ? null : Number(choice) * 60_000;
+}
+
+/** Netcatty 按平台给默认方案：macOS 用 ⌘，其它用 Ctrl */
+function defaultHotkeyScheme(): HotkeyScheme {
+	if (typeof navigator === "undefined") return "pc";
+	return /mac/i.test(`${navigator.userAgent} ${navigator.platform ?? ""}`) ? "mac" : "pc";
+}
+
+function pickRange(value: unknown, min: number, max: number, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : fallback;
+}
+
+function normalizeCustomKeyBindings(value: unknown): CustomKeyBindings {
+	if (!value || typeof value !== "object") return {};
+	const out: CustomKeyBindings = {};
+	for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+		if (!raw || typeof raw !== "object") continue;
+		const { mac, pc } = raw as { mac?: unknown; pc?: unknown };
+		const entry: { mac?: string; pc?: string } = {};
+		if (typeof mac === "string") entry.mac = mac;
+		if (typeof pc === "string") entry.pc = pc;
+		if (entry.mac !== undefined || entry.pc !== undefined) out[id] = entry;
+	}
+	return out;
+}
+
+function normalizeHighlightRules(value: unknown): KeywordHighlightRule[] {
+	if (!Array.isArray(value)) return normalizeKeywordHighlightRules(undefined);
+	const rules = value.filter(
+		(rule): rule is KeywordHighlightRule =>
+			Boolean(rule) &&
+			typeof rule === "object" &&
+			typeof (rule as KeywordHighlightRule).id === "string" &&
+			typeof (rule as KeywordHighlightRule).label === "string" &&
+			typeof (rule as KeywordHighlightRule).color === "string" &&
+			typeof (rule as KeywordHighlightRule).enabled === "boolean" &&
+			Array.isArray((rule as KeywordHighlightRule).patterns) &&
+			(rule as KeywordHighlightRule).patterns.every((p) => typeof p === "string"),
+	);
+	return normalizeKeywordHighlightRules(rules);
 }
 
 function pick<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
@@ -199,6 +313,30 @@ export function normalizePreferences(raw: unknown): Preferences {
 			sftpFollowActiveTab: pickBoolean(terminal.sftpFollowActiveTab, DEFAULT_TERMINAL.sftpFollowActiveTab),
 			commandSuggestions: pickBoolean(terminal.commandSuggestions, DEFAULT_TERMINAL.commandSuggestions),
 			ghostText: pickBoolean(terminal.ghostText, DEFAULT_TERMINAL.ghostText),
+			middleClick: pick(terminal.middleClick, MIDDLE_CLICK_ACTIONS, DEFAULT_TERMINAL.middleClick),
+			showContextMenuOverFullscreenApps: pickBoolean(terminal.showContextMenuOverFullscreenApps, DEFAULT_TERMINAL.showContextMenuOverFullscreenApps),
+			copyOnSelect: pickBoolean(terminal.copyOnSelect, DEFAULT_TERMINAL.copyOnSelect),
+			cursorBlink: pickBoolean(terminal.cursorBlink, DEFAULT_TERMINAL.cursorBlink),
+			drawBoldInBrightColors: pickBoolean(terminal.drawBoldInBrightColors, DEFAULT_TERMINAL.drawBoldInBrightColors),
+			fontWeight: pickNumber(terminal.fontWeight, FONT_WEIGHTS, DEFAULT_TERMINAL.fontWeight),
+			fontWeightBold: pickNumber(terminal.fontWeightBold, FONT_WEIGHTS, DEFAULT_TERMINAL.fontWeightBold),
+			minimumContrastRatio: pickRange(terminal.minimumContrastRatio, 1, 21, DEFAULT_TERMINAL.minimumContrastRatio),
+			altAsMeta: pickBoolean(terminal.altAsMeta, DEFAULT_TERMINAL.altAsMeta),
+			wordSeparators: typeof terminal.wordSeparators === "string" ? terminal.wordSeparators : DEFAULT_TERMINAL.wordSeparators,
+			smoothScrolling: pickBoolean(terminal.smoothScrolling, DEFAULT_TERMINAL.smoothScrolling),
+			scrollOnInput: pickBoolean(terminal.scrollOnInput, DEFAULT_TERMINAL.scrollOnInput),
+			disableBracketedPaste: pickBoolean(terminal.disableBracketedPaste, DEFAULT_TERMINAL.disableBracketedPaste),
+			clearWipesScrollback: pickBoolean(terminal.clearWipesScrollback, DEFAULT_TERMINAL.clearWipesScrollback),
+			keywordHighlightEnabled: pickBoolean(terminal.keywordHighlightEnabled, DEFAULT_TERMINAL.keywordHighlightEnabled),
+			keywordHighlightRules: normalizeHighlightRules(terminal.keywordHighlightRules),
+			tabDoubleClick: pick(terminal.tabDoubleClick, TAB_DOUBLE_CLICK_ACTIONS, DEFAULT_TERMINAL.tabDoubleClick),
+			hotkeyScheme: pick(terminal.hotkeyScheme, HOTKEY_SCHEMES, DEFAULT_TERMINAL.hotkeyScheme),
+			customKeyBindings: normalizeCustomKeyBindings(terminal.customKeyBindings),
+			disableTerminalFontZoom: pickBoolean(terminal.disableTerminalFontZoom, DEFAULT_TERMINAL.disableTerminalFontZoom),
+			sftpDoubleClickBehavior: pick(terminal.sftpDoubleClickBehavior, SFTP_DOUBLE_CLICK_BEHAVIORS, DEFAULT_TERMINAL.sftpDoubleClickBehavior),
+			sftpAutoSync: pickBoolean(terminal.sftpAutoSync, DEFAULT_TERMINAL.sftpAutoSync),
+			sftpShowHiddenFiles: pickBoolean(terminal.sftpShowHiddenFiles, DEFAULT_TERMINAL.sftpShowHiddenFiles),
+			sftpFileOpeners: normalizeFileOpeners(terminal.sftpFileOpeners),
 		},
 		security: {
 			keychain: pickBoolean(security.keychain, DEFAULT_SECURITY.keychain),
@@ -211,4 +349,21 @@ export function normalizePreferences(raw: unknown): Preferences {
 			sshConfigPath: pickText(data.sshConfigPath, DEFAULT_DATA.sshConfigPath),
 		},
 	};
+}
+
+function normalizeFileOpeners(value: unknown): Record<string, SftpFileOpener> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const out: Record<string, SftpFileOpener> = {};
+	for (const [ext, raw] of Object.entries(value as Record<string, unknown>)) {
+		if (!raw || typeof raw !== "object") continue;
+		const r = raw as { type?: unknown; app?: { path?: unknown; name?: unknown } };
+		if (r.type === "builtin-editor") out[ext.toLowerCase()] = { type: "builtin-editor" };
+		else if (r.type === "system-app" && r.app && typeof r.app.path === "string" && r.app.path) {
+			out[ext.toLowerCase()] = {
+				type: "system-app",
+				app: { path: r.app.path, name: typeof r.app.name === "string" ? r.app.name : r.app.path },
+			};
+		}
+	}
+	return out;
 }

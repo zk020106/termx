@@ -9,7 +9,21 @@ import { useHostsStore } from "@/store/hosts";
 import { useSessionsStore, writeToPane } from "@/store/sessions";
 import { draftSnippet, extractVariables, useSnippetsStore } from "@/store/snippets";
 import { toast } from "@/store/toast";
-import { useEffect, useMemo, useState } from "react";
+import { ContextMenu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
+import { PromptModal } from "@/components/ui/PromptModal";
+import { fsLocalReadFile, fsLocalWriteFile } from "@/lib/sftp";
+import {
+	buildSnippetExportPayload,
+	countImportConflicts,
+	mergeSnippetImportPayload,
+	parseSnippetImportPayload,
+	snippetExportFileName,
+	type SnippetExportPayload,
+	type SnippetImportConflictAction,
+} from "@/lib/snippetTransfer";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useSearchParams } from "react-router";
 
 /* =============================================================================
  * 命令片段（需求书 06-Snippets）
@@ -40,6 +54,7 @@ export default function Snippets() {
 	const library = useSnippetsStore((s) => s.snippets);
 	const upsert = useSnippetsStore((s) => s.upsert);
 	const removeSnippet = useSnippetsStore((s) => s.remove);
+	const setAllSnippets = useSnippetsStore((s) => s.setAll);
 	const hostById = useHostsStore((s) => s.hostById);
 	const tabs = useSessionsStore((s) => s.tabs);
 	const panes = useSessionsStore((s) => s.panes);
@@ -54,6 +69,12 @@ export default function Snippets() {
 	const [draft, setDraft] = useState<Snippet | null>(null);
 	const [draftTouched, setDraftTouched] = useState(false);
 	const [deleteOpen, setDeleteOpen] = useState(false);
+	/** 右键菜单（Netcatty SnippetsManager：脚本包菜单 / 片段菜单） */
+	const [menu, setMenu] = useState<{ x: number; y: number; kind: "group"; group: string } | { x: number; y: number; kind: "snippet"; item: Snippet } | null>(null);
+	const [renameGroup, setRenameGroup] = useState<string | null>(null);
+	const [deleteGroup, setDeleteGroup] = useState<string | null>(null);
+	const [deleteSnippet, setDeleteSnippet] = useState<Snippet | null>(null);
+	const [pendingImport, setPendingImport] = useState<{ payload: SnippetExportPayload; conflicts: number } | null>(null);
 
 	/* ------------------------------ 派生数据 ------------------------------ */
 
@@ -151,6 +172,20 @@ export default function Snippets() {
 	}, [target, pickedPanes, currentHost, tabs, panes, hasSessions, hostById]);
 
 	/* -------------------------------- 交互 -------------------------------- */
+
+	// 从工作区片段面板跳过来：?id= 选中，?edit= 打开编辑抽屉
+	const [searchParams, setSearchParams] = useSearchParams();
+	useEffect(() => {
+		const id = searchParams.get("id") ?? searchParams.get("edit");
+		if (!id) return;
+		const item = library.find((x) => x.id === id);
+		if (item) {
+			selectSnippet(item.id);
+			if (searchParams.get("edit")) openEdit(item);
+		}
+		setSearchParams({}, { replace: true });
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [searchParams, library]);
 
 	/** 分屏格变化时，保持已选集合有效（默认选中焦点格） */
 	useEffect(() => {
@@ -263,6 +298,102 @@ export default function Snippets() {
 		if (!selected) return;
 		void navigator.clipboard?.writeText(resolvedCommand).catch(() => undefined);
 		toast({ title: "命令已复制", description: resolvedCommand });
+	};
+
+	/* ------------------------------ 右键菜单动作（对齐 Netcatty） ------------------------------ */
+
+	const openMenu = (event: ReactMouseEvent, next: { kind: "group"; group: string } | { kind: "snippet"; item: Snippet }) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setMenu({ x: event.clientX, y: event.clientY, ...next });
+	};
+
+	/** 运行：Netcatty 在片段绑定的主机上执行；termx 片段不绑主机，发到焦点终端（有变量时先选中让用户填） */
+	const runSnippet = (item: Snippet) => {
+		if (item.variables.length > 0) {
+			selectSnippet(item.id);
+			toast({ title: `「${item.name}」有 ${item.variables.length} 个变量，请先填写再发送`, tone: "default" });
+			return;
+		}
+		if (!currentPane) {
+			toast({ title: "没有可运行的终端", description: "先在主机库打开一个会话。", tone: "warning" });
+			return;
+		}
+		const payload = `${item.command.replace(/\r?\n/g, "\r")}\r`;
+		if (writeToPane(currentPane, payload)) {
+			toast({ title: `已注入终端执行：${item.name}`, description: item.command, tone: "success" });
+		} else {
+			void navigator.clipboard?.writeText(item.command).catch(() => undefined);
+			toast({ title: "终端未就绪，命令已复制到剪贴板", tone: "warning" });
+		}
+	};
+
+	const copySnippet = (item: Snippet) => {
+		void navigator.clipboard?.writeText(item.command).catch(() => undefined);
+		toast({ title: "命令已复制", description: item.command });
+	};
+
+	/** 导出（Netcatty exportSnippetList：netcatty.snippets v2 JSON） */
+	const exportSnippets = async (items: Snippet[], part: string) => {
+		if (items.length === 0) {
+			toast({ title: "没有可导出的代码片段。", tone: "warning" });
+			return;
+		}
+		try {
+			const dest = await saveDialog({ defaultPath: snippetExportFileName(part), filters: [{ name: "JSON", extensions: ["json"] }] });
+			if (!dest) return;
+			await fsLocalWriteFile(dest, JSON.stringify(buildSnippetExportPayload(items), null, 2));
+			toast({ title: "导出已准备好", description: `已导出 ${items.length} 个代码片段。`, tone: "success" });
+		} catch (error) {
+			toast({ title: "导出失败", description: String(error), tone: "danger" });
+		}
+	};
+
+	const importSnippets = async () => {
+		try {
+			const picked = await openDialog({ multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
+			if (!picked || Array.isArray(picked)) return;
+			const payload = parseSnippetImportPayload(await fsLocalReadFile(picked));
+			if (payload.snippets.length === 0) {
+				toast({ title: "导入文件里没有片段", tone: "warning" });
+				return;
+			}
+			const conflicts = countImportConflicts(library, payload);
+			if (conflicts > 0) setPendingImport({ payload, conflicts });
+			else applyImport(payload, "skip");
+		} catch (error) {
+			toast({ title: "导入失败", description: String(error), tone: "danger" });
+		}
+	};
+
+	const applyImport = (payload: SnippetExportPayload, conflictAction: SnippetImportConflictAction) => {
+		const { snippets, stats } = mergeSnippetImportPayload({
+			existing: useSnippetsStore.getState().snippets,
+			payload,
+			conflictAction,
+			createId: () => `sn-${crypto.randomUUID().slice(0, 12)}`,
+			extractVariables,
+		});
+		setAllSnippets(snippets);
+		setPendingImport(null);
+		toast({
+			title: "导入完成",
+			description: `新增 ${stats.imported} 个，覆盖 ${stats.overwritten} 个，跳过 ${stats.skipped} 个`,
+			tone: "success",
+		});
+	};
+
+	const doRenameGroup = (from: string, to: string) => {
+		setAllSnippets(library.map((item) => (item.group === from ? { ...item, group: to } : item)));
+		if (group === from) setGroup(to);
+		setRenameGroup(null);
+	};
+
+	/** 删除分组：与 Netcatty 删除脚本包一致，片段保留，移出该分组（回到「默认」） */
+	const doDeleteGroup = (name: string) => {
+		setAllSnippets(library.map((item) => (item.group === name ? { ...item, group: "默认" } : item)));
+		if (group === name) setGroup(ALL_GROUPS);
+		setDeleteGroup(null);
 	};
 
 	/* Ctrl + Enter 发送（每次渲染重挂载，始终拿到最新的变量状态；抽屉打开时不触发） */
@@ -555,9 +686,24 @@ export default function Snippets() {
 							<span className="icon-[lucide--terminal-square] size-3.5 text-primary" />
 							<h1 className="text-[12px] font-semibold text-surface-foreground">命令片段库</h1>
 						</div>
-						<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
-							新建
-						</Button>
+						<div className="flex items-center gap-1">
+							<Button size="sm" variant="ghost" icon="icon-[lucide--upload]" onClick={() => void importSnippets()} title="导入片段（Netcatty JSON）">
+								导入
+							</Button>
+							<Button
+								size="sm"
+								variant="ghost"
+								icon="icon-[lucide--download]"
+								onClick={() => void exportSnippets(library, "all")}
+								disabled={library.length === 0}
+								title="导出全部片段（Netcatty JSON）"
+							>
+								导出
+							</Button>
+							<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
+								新建
+							</Button>
+						</div>
 					</div>
 
 					<div className="px-2 pt-2">
@@ -581,6 +727,9 @@ export default function Snippets() {
 									key={name}
 									type="button"
 									onClick={() => setGroup(name)}
+									onContextMenu={(event) => {
+										if (name !== ALL_GROUPS) openMenu(event, { kind: "group", group: name });
+									}}
 									className={cn(
 										"flex h-5 items-center gap-1 rounded border px-1.5 text-[10px] transition-colors",
 										name === group
@@ -603,7 +752,9 @@ export default function Snippets() {
 						) : (
 							grouped.map(([groupName, items]) => (
 								<div key={groupName}>
-									<SectionLabel>{groupName}</SectionLabel>
+									<div onContextMenu={(event) => openMenu(event, { kind: "group", group: groupName })}>
+										<SectionLabel>{groupName}</SectionLabel>
+									</div>
 									<div className="space-y-1">
 										{items.map((item) => (
 											<SnippetRow
@@ -611,6 +762,7 @@ export default function Snippets() {
 												item={item}
 												active={item.id === selectedId}
 												onSelect={() => selectSnippet(item.id)}
+												onContextMenu={(event) => openMenu(event, { kind: "snippet", item })}
 											/>
 										))}
 									</div>
@@ -738,16 +890,171 @@ export default function Snippets() {
 					，删除后无法恢复。
 				</p>
 			</Modal>
+
+			{menu && (
+				<ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} label={menu.kind === "group" ? "分组菜单" : "片段菜单"}>
+					{menu.kind === "group" ? (
+						<>
+							<MenuItem icon="icon-[lucide--folder-open]" label="打开" onClick={() => (setGroup(menu.group), setMenu(null))} />
+							<MenuItem
+								icon="icon-[lucide--download]"
+								label="导出脚本包"
+								disabled={!library.some((item) => item.group === menu.group)}
+								onClick={() => {
+									setMenu(null);
+									void exportSnippets(
+										library.filter((item) => item.group === menu.group),
+										menu.group,
+									);
+								}}
+							/>
+							<MenuItem icon="icon-[lucide--pencil]" label="重命名" onClick={() => (setRenameGroup(menu.group), setMenu(null))} />
+							<MenuItem icon="icon-[lucide--trash-2]" label="删除" danger onClick={() => (setDeleteGroup(menu.group), setMenu(null))} />
+						</>
+					) : (
+						<>
+							<MenuItem
+								icon="icon-[lucide--play]"
+								label="运行"
+								disabled={!hasSessions}
+								onClick={() => {
+									setMenu(null);
+									runSnippet(menu.item);
+								}}
+							/>
+							<MenuSeparator />
+							<MenuItem icon="icon-[lucide--edit-3]" label="编辑" onClick={() => (openEdit(menu.item), setMenu(null))} />
+							<MenuItem icon="icon-[lucide--copy]" label="复制" onClick={() => (copySnippet(menu.item), setMenu(null))} />
+							<MenuItem
+								icon="icon-[lucide--download]"
+								label="导出代码片段"
+								onClick={() => {
+									setMenu(null);
+									void exportSnippets([menu.item], menu.item.name);
+								}}
+							/>
+							<MenuItem icon="icon-[lucide--trash-2]" label="删除" danger onClick={() => (setDeleteSnippet(menu.item), setMenu(null))} />
+						</>
+					)}
+				</ContextMenu>
+			)}
+
+			<PromptModal
+				open={renameGroup !== null}
+				title="重命名分组"
+				label={renameGroup ? `当前名称：${renameGroup}` : undefined}
+				placeholder="输入新名称"
+				initialValue={renameGroup ?? ""}
+				validate={(value) => {
+					const v = value.trim();
+					if (!v) return "分组名称不能为空";
+					if (v !== renameGroup && groups.includes(v)) return "已存在同名的分组";
+					return null;
+				}}
+				onClose={() => setRenameGroup(null)}
+				onSubmit={(value) => renameGroup && doRenameGroup(renameGroup, value)}
+			/>
+
+			<Modal
+				open={deleteGroup !== null}
+				onClose={() => setDeleteGroup(null)}
+				title={`删除“${deleteGroup ?? ""}”？`}
+				icon="icon-[lucide--trash-2]"
+				width={420}
+				footer={
+					<>
+						<Button size="sm" onClick={() => setDeleteGroup(null)}>
+							取消
+						</Button>
+						<Button size="sm" variant="danger" icon="icon-[lucide--trash-2]" onClick={() => deleteGroup && doDeleteGroup(deleteGroup)}>
+							删除
+						</Button>
+					</>
+				}
+			>
+				<p>这会删除分组，组内片段会保留，并移到「默认」分组。</p>
+			</Modal>
+
+			<Modal
+				open={deleteSnippet !== null}
+				onClose={() => setDeleteSnippet(null)}
+				title="删除命令片段"
+				icon="icon-[lucide--trash-2]"
+				width={420}
+				footer={
+					<>
+						<Button size="sm" onClick={() => setDeleteSnippet(null)}>
+							取消
+						</Button>
+						<Button
+							size="sm"
+							variant="danger"
+							icon="icon-[lucide--trash-2]"
+							onClick={() => {
+								if (!deleteSnippet) return;
+								removeSnippet(deleteSnippet.id);
+								setSelectedId((id) => (id === deleteSnippet.id ? "" : id));
+								toast({ title: `已删除片段 ${deleteSnippet.name}`, tone: "default" });
+								setDeleteSnippet(null);
+							}}
+						>
+							删除
+						</Button>
+					</>
+				}
+			>
+				<p>
+					将删除片段 <span className="font-mono text-surface-foreground">{deleteSnippet?.name ?? "—"}</span>
+					，删除后无法恢复。
+				</p>
+			</Modal>
+
+			<Modal
+				open={pendingImport !== null}
+				onClose={() => setPendingImport(null)}
+				title="导入片段"
+				icon="icon-[lucide--upload]"
+				width={420}
+				footer={
+					<>
+						<Button size="sm" onClick={() => setPendingImport(null)}>
+							取消
+						</Button>
+						<Button size="sm" onClick={() => pendingImport && applyImport(pendingImport.payload, "skip")}>
+							跳过重复
+						</Button>
+						<Button size="sm" variant="primary" onClick={() => pendingImport && applyImport(pendingImport.payload, "overwrite")}>
+							覆盖重复
+						</Button>
+					</>
+				}
+			>
+				<p>
+					文件里有 {pendingImport?.payload.snippets.length ?? 0} 个片段，其中 {pendingImport?.conflicts ?? 0}{" "}
+					个与现有片段的命令相同。选择跳过还是覆盖这些重复项。
+				</p>
+			</Modal>
 		</WindowChrome>
 	);
 }
 
 /** 左侧片段行：名称 + 命令预览 + 变量个数 */
-function SnippetRow({ item, active, onSelect }: { item: Snippet; active: boolean; onSelect: () => void }) {
+function SnippetRow({
+	item,
+	active,
+	onSelect,
+	onContextMenu,
+}: {
+	item: Snippet;
+	active: boolean;
+	onSelect: () => void;
+	onContextMenu: (event: ReactMouseEvent) => void;
+}) {
 	return (
 		<button
 			type="button"
 			onClick={onSelect}
+			onContextMenu={onContextMenu}
 			className={cn(
 				"w-full rounded border p-2 text-left transition-colors",
 				active ? "border-border bg-surface-raised shadow-sm" : "border-transparent hover:border-border hover:bg-surface",

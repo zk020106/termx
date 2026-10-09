@@ -147,6 +147,18 @@ async fn run_all(app: tauri::AppHandle, dir: String) {
     let fp = ssh::ssh_trust_host(app.clone(), app.state(), "127.0.0.1".into(), 2222, shown.clone()).unwrap();
     assert_eq!(fp, shown);
     println!("[1] 已信任 127.0.0.1:2222 {fp}");
+    // 已知主机列表（Netcatty KnownHostsManager）：刚信任的记录能列出、指纹一致；移除后回到「未知主机」，再重新信任
+    let listed = crate::known_hosts::known_hosts_list(app.clone()).unwrap();
+    let entry = listed
+        .iter()
+        .find(|e| e.source == "termx" && e.host.as_deref() == Some("127.0.0.1") && e.port == 2222)
+        .unwrap_or_else(|| panic!("known_hosts_list 没列出刚信任的主机：{listed:?}"));
+    assert_eq!(entry.fingerprint.as_deref(), Some(fp.as_str()));
+    assert_eq!(crate::known_hosts::known_hosts_remove(app.clone(), entry.line.clone()).unwrap(), 1);
+    let e = connect(&app, "s1b", 2222, cred(key_plain.clone()), None).await.unwrap_err();
+    assert!(e.contains("host_unknown"), "移除后应回到未知主机：{e}");
+    ssh::ssh_trust_host(app.clone(), app.state(), "127.0.0.1".into(), 2222, fp_of(&e)).unwrap();
+    println!("[1] 已知主机列出 / 移除 / 重新信任 OK");
 
     /* 2. 会话选项：环境变量 + 登录脚本 + 编码(GBK) */
     let data = collect(&app, "ssh://data/s2");

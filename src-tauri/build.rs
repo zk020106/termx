@@ -57,6 +57,13 @@ const COMMANDS: &[&str] = &[
     "fs_local_rename",
     "fs_local_read_file",
     "fs_local_write_file",
+    "fs_open_path",
+    "fs_open_with",
+    "fs_temp_file_path",
+    "fs_local_extract",
+    "fs_local_copy",
+    "known_hosts_list",
+    "known_hosts_remove",
 ];
 
 fn main() {

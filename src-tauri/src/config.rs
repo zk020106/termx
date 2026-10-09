@@ -89,6 +89,16 @@ fn strip_secrets(data: &mut Value) -> usize {
             }
         }
     }
+    // 代理配置（Netcatty proxyProfiles）的口令同样只进钥匙串
+    if let Some(profiles) = data.get_mut("proxyProfiles").and_then(Value::as_array_mut) {
+        for profile in profiles {
+            if let Some(obj) = profile.get_mut("config").and_then(Value::as_object_mut) {
+                if obj.remove("password").is_some() {
+                    removed += 1;
+                }
+            }
+        }
+    }
     removed
 }
 
@@ -226,6 +236,22 @@ mod tests {
         assert!(!text.contains("hunter2") && !text.contains("\"pp\""), "{text}");
         assert_eq!(data["hosts"][0]["auth"]["rememberPassword"], true);
         assert_eq!(data["hosts"][0]["proxy"]["username"], "pu");
+    }
+
+    #[test]
+    fn proxy_profile_passwords_are_stripped_before_write() {
+        let mut data = json!({
+            "version": 1,
+            "hosts": [],
+            "proxyProfiles": [
+                { "id": "p1", "label": "corp", "config": { "type": "http", "host": "p", "port": 8080, "username": "u", "password": "secretpp" } },
+                { "id": "p2", "label": "plain", "config": { "type": "socks5", "host": "q", "port": 1080 } }
+            ]
+        });
+        assert_eq!(strip_secrets(&mut data), 1);
+        let text = data.to_string();
+        assert!(!text.contains("secretpp"), "{text}");
+        assert_eq!(data["proxyProfiles"][0]["config"]["username"], "u");
     }
 
     #[cfg(unix)]

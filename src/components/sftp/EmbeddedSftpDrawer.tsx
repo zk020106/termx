@@ -12,19 +12,17 @@ import {
 	sftpList,
 	sftpMkdir,
 	sftpRealPath,
-	sftpRemove,
-	sftpRename,
 	sftpCreateEmptyFile,
 	type SftpFileEntry,
 } from "@/lib/sftp";
 import type { ConnectionStatus } from "@/data/types";
 import { enqueueTransfers } from "@/lib/transferManager";
 import { toast } from "@/store/toast";
-import { toSafeLocalName } from "@/lib/pathSafety";
-import { detectPlatform } from "@/lib/platform";
-import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { useSftpPaneActions, type SftpPaneRef } from "@/components/sftp/useSftpPaneActions";
+import { useSettingsStore } from "@/store/settings";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link } from "react-router";
 
 interface EmbeddedSftpDrawerProps {
 	sessionKey: string | null;
@@ -57,7 +55,6 @@ export function EmbeddedSftpDrawer({
 	availableSessions,
 	onSelectSession,
 }: EmbeddedSftpDrawerProps) {
-	const navigate = useNavigate();
 	const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
 
 	// 抽屉高度与拖拽缩放
@@ -72,15 +69,12 @@ export function EmbeddedSftpDrawer({
 	const [entries, setEntries] = useState<SftpFileEntry[]>([]);
 	const [loading, setLoading] = useState<boolean>(false);
 	const [filter, setFilter] = useState<string>("");
-	const [selected, setSelected] = useState<string | null>(null);
+	const [selected, setSelected] = useState<Set<string>>(new Set());
 
 	// 模态弹窗状态
-	const [modalMode, setModalMode] = useState<"mkdir" | "touch" | "rename" | "delete" | null>(null);
-	const [targetEntry, setTargetEntry] = useState<SftpFileEntry | null>(null);
+	const [modalMode, setModalMode] = useState<"mkdir" | "touch" | null>(null);
 	const [inputName, setInputName] = useState<string>("");
 
-	// 右键菜单
-	const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry?: SftpFileEntry } | null>(null);
 
 	// 拖拽改变高度
 	const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -119,7 +113,7 @@ export function EmbeddedSftpDrawer({
 			setRemotePath(resolved);
 			setRemoteInputPath(resolved);
 			setIsEditingPath(false);
-			setSelected(null);
+			setSelected(new Set());
 		} catch (e) {
 			toast({ title: "读取远程目录失败", description: String(e), tone: "danger" });
 		} finally {
@@ -137,15 +131,16 @@ export function EmbeddedSftpDrawer({
 		}
 	}, [sessionKey, status, loadDir]);
 
-	// 过滤与排序
+	// 过滤与排序（Netcatty sftpShowHiddenFiles）
+	const showHidden = useSettingsStore((s) => s.sftpShowHiddenFiles);
 	const filteredEntries = useMemo(() => {
-		const list = entries.filter((e) => e.name.toLowerCase().includes(filter.toLowerCase()));
+		const list = entries.filter((e) => (showHidden || !e.name.startsWith(".")) && e.name.toLowerCase().includes(filter.toLowerCase()));
 		list.sort((a, b) => {
 			if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
 			return a.name.localeCompare(b.name);
 		});
 		return list;
-	}, [entries, filter]);
+	}, [entries, filter, showHidden]);
 
 	// 上传文件
 	const handleUpload = async () => {
@@ -181,39 +176,6 @@ export function EmbeddedSftpDrawer({
 		);
 	};
 
-	// 下载文件
-	const handleDownload = async (entry: SftpFileEntry) => {
-		if (!sessionKey || entry.is_dir) return;
-		let dest: string | null;
-		try {
-			// 远程文件名不可信：预填前先消毒，避免 `../` 之类把默认位置带出用户选的目录
-			dest = await saveFileDialog({ defaultPath: toSafeLocalName(entry.name, detectPlatform() === "windows") });
-		} catch (e) {
-			toast({ title: "保存文件失败", description: String(e), tone: "danger" });
-			return;
-		}
-		if (!dest) return;
-		await enqueueTransfers(
-			[
-				{
-					name: entry.name,
-					direction: "download",
-					hostId: hostId ?? "",
-					sessionKey,
-					localPath: dest,
-					remotePath: entry.path,
-					size: entry.size,
-					// 系统「另存为」对话框已经问过是否覆盖
-					overwriteConfirmed: true,
-				},
-			],
-			{
-				onItemDone: (item) => toast({ title: `下载完成: ${item.name}`, tone: "success" }),
-				onItemFailed: (item, error) => toast({ title: `下载失败: ${item.name}`, description: error, tone: "danger" }),
-			},
-		);
-	};
-
 	// 弹窗提交（新建目录、新建文件、重命名、删除）
 	const handleModalSubmit = async () => {
 		if (!modalMode || !sessionKey) return;
@@ -230,33 +192,28 @@ export function EmbeddedSftpDrawer({
 				await sftpCreateEmptyFile(sessionKey, newP);
 				toast({ title: `已创建空文件: ${inputName}`, tone: "success" });
 				loadDir(remotePath);
-			} else if (modalMode === "rename" && targetEntry) {
-				if (!inputName.trim()) return;
-				const parent = posixDirname(targetEntry.path);
-				const newP = posixJoin(parent, inputName.trim());
-				await sftpRename(sessionKey, targetEntry.path, newP);
-				toast({ title: `已重命名为: ${inputName}`, tone: "success" });
-				loadDir(remotePath);
-			} else if (modalMode === "delete" && targetEntry) {
-				await sftpRemove(sessionKey, targetEntry.path, targetEntry.is_dir);
-				toast({ title: `已删除: ${targetEntry.name}`, tone: "success" });
-				loadDir(remotePath);
 			}
 		} catch (e) {
 			toast({ title: "操作失败", description: String(e), tone: "danger" });
 		} finally {
 			setModalMode(null);
-			setTargetEntry(null);
 			setInputName("");
 		}
 	};
 
-	// 关闭右键菜单
-	useEffect(() => {
-		const onClick = () => setContextMenu(null);
-		window.addEventListener("click", onClick);
-		return () => window.removeEventListener("click", onClick);
-	}, []);
+	// 右键菜单 / 快捷键 / 打开方式 / 解压…（对齐 Netcatty SFTP 侧栏，没有「另一侧」）
+	const pane: SftpPaneRef = useMemo(
+		() => ({ target: { side: "remote", sessionKey, hostId }, currentPath: remotePath, reload: () => loadDir(remotePath) }),
+		[sessionKey, hostId, remotePath, loadDir],
+	);
+	const actions = useSftpPaneActions({
+		pane,
+		entries: filteredEntries,
+		selected,
+		setSelected,
+		navigate: (path) => void loadDir(path),
+		hostLabel: hostTitle,
+	});
 
 	// 分割路径为面包屑
 	const pathSegments = useMemo(() => {
@@ -353,8 +310,7 @@ export function EmbeddedSftpDrawer({
 			onContextMenu={(e) => {
 				// 点击空白区呼出上下文菜单
 				if ((e.target as HTMLElement).closest(".file-row")) return;
-				e.preventDefault();
-				setContextMenu({ x: e.clientX, y: e.clientY });
+				actions.openContextMenu(e, null);
 			}}
 		>
 			{/* 拖拽高度调节手柄 */}
@@ -533,7 +489,7 @@ export function EmbeddedSftpDrawer({
 					</Link>
 					<IconButton
 						icon="icon-[lucide--x]"
-						label="收起面板 (Ctrl Shift S)"
+						label="收起面板"
 						className="size-6 hover:text-danger"
 						onClick={onClose}
 					/>
@@ -549,7 +505,14 @@ export function EmbeddedSftpDrawer({
 			</div>
 
 			{/* 文件列表 */}
-			<div className="relative min-h-0 flex-1 overflow-y-auto">
+			<div
+				ref={(el) => {
+					actions.containerRef.current = el;
+				}}
+				tabIndex={0}
+				onKeyDown={actions.handleKeyDown}
+				className="relative min-h-0 flex-1 overflow-y-auto outline-none"
+			>
 				{filteredEntries.length === 0 ? (
 					<div className="flex h-full flex-col items-center justify-center p-6 text-center text-faint">
 						<span className="icon-[lucide--folder-open] size-7 opacity-40 mb-1" />
@@ -580,29 +543,22 @@ export function EmbeddedSftpDrawer({
 				) : (
 					<div className="divide-y divide-border/20 text-[11px]">
 						{filteredEntries.map((entry) => {
-							const isSelected = selected === entry.name;
+							const isSelected = selected.has(entry.name);
 							const iconClass = getFileIcon(entry.name, entry.is_dir, entry.is_symlink);
 							return (
 								<div
 									key={entry.name}
-									onClick={() => setSelected(entry.name)}
-									onDoubleClick={() => {
-										if (entry.is_dir) {
-											loadDir(entry.path);
-										} else {
-											navigate(
-												`/editor?sessionKey=${sessionKey}&path=${encodeURIComponent(
-													entry.path,
-												)}&name=${encodeURIComponent(entry.name)}&hostId=${hostId ?? ""}`,
-											);
-										}
+									data-sftp-row={entry.name}
+									onClick={(e) => {
+										if (e.ctrlKey || e.metaKey) {
+											const next = new Set(selected);
+											if (next.has(entry.name)) next.delete(entry.name);
+											else next.add(entry.name);
+											setSelected(next);
+										} else setSelected(new Set([entry.name]));
 									}}
-									onContextMenu={(e) => {
-										e.preventDefault();
-										e.stopPropagation();
-										setSelected(entry.name);
-										setContextMenu({ x: e.clientX, y: e.clientY, entry });
-									}}
+									onDoubleClick={() => actions.openEntry(entry)}
+									onContextMenu={(e) => actions.openContextMenu(e, entry)}
 									className={cn(
 										"file-row grid grid-cols-[1fr_80px_120px_75px] items-center px-3 py-1 cursor-pointer transition-colors select-none",
 										isSelected
@@ -641,177 +597,19 @@ export function EmbeddedSftpDrawer({
 				<span className="truncate max-w-[60%]">
 					{filteredEntries.length} 项 · {remotePath}
 				</span>
-				<span>双击目录进入 · 双击文件编辑 · 右键查看更多操作</span>
+				<span>双击目录进入 · 双击文件打开 · 右键查看更多操作</span>
 			</div>
-
-			{/* 右键上下文菜单 */}
-			{contextMenu && (
-				<div
-					style={{
-						left: Math.min(contextMenu.x, window.innerWidth - 200),
-						top: Math.min(contextMenu.y - 120, window.innerHeight - 240),
-					}}
-					onClick={(e) => e.stopPropagation()}
-					className="fixed z-50 flex w-48 flex-col rounded-card border border-border bg-surface-raised py-1 text-[11px] shadow-xl animate-in fade-in zoom-in-95 duration-75"
-				>
-					{contextMenu.entry ? (
-						<>
-							{!contextMenu.entry.is_dir ? (
-								<>
-									<button
-										type="button"
-										onClick={() => {
-											navigate(
-												`/editor?sessionKey=${sessionKey}&path=${encodeURIComponent(
-													contextMenu.entry!.path,
-												)}&name=${encodeURIComponent(contextMenu.entry!.name)}&hostId=${hostId ?? ""}`,
-											);
-											setContextMenu(null);
-										}}
-										className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-primary/10 hover:text-primary transition-colors"
-									>
-										<span className="icon-[lucide--file-code] size-3.5 text-primary" />
-										<span>在编辑器中编辑</span>
-									</button>
-									<button
-										type="button"
-										onClick={() => {
-											handleDownload(contextMenu.entry!);
-											setContextMenu(null);
-										}}
-										className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-primary/10 hover:text-primary transition-colors"
-									>
-										<span className="icon-[lucide--download] size-3.5" />
-										<span>下载到本地…</span>
-									</button>
-								</>
-							) : (
-								<button
-									type="button"
-									onClick={() => {
-										loadDir(contextMenu.entry!.path);
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-primary/10 hover:text-primary transition-colors"
-								>
-									<span className="icon-[lucide--folder-open] size-3.5 text-primary" />
-									<span>进入该目录</span>
-								</button>
-							)}
-
-							<div className="my-1 border-t border-border/60" />
-
-							<button
-								type="button"
-								onClick={() => {
-									setTargetEntry(contextMenu.entry!);
-									setInputName(contextMenu.entry!.name);
-									setModalMode("rename");
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface transition-colors"
-							>
-								<span className="icon-[lucide--edit-3] size-3.5" />
-								<span>重命名</span>
-							</button>
-							<button
-								type="button"
-								onClick={() => {
-									navigator.clipboard.writeText(contextMenu.entry!.path);
-									toast({ title: "已复制远程路径", tone: "default" });
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface transition-colors"
-							>
-								<span className="icon-[lucide--copy] size-3.5" />
-								<span>复制路径</span>
-							</button>
-
-							<div className="my-1 border-t border-border/60" />
-
-							<button
-								type="button"
-								onClick={() => {
-									setTargetEntry(contextMenu.entry!);
-									setModalMode("delete");
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-danger hover:bg-danger/10 transition-colors"
-							>
-								<span className="icon-[lucide--trash-2] size-3.5" />
-								<span>删除</span>
-							</button>
-						</>
-					) : (
-						/* 空白区域右键菜单 */
-						<>
-							<button
-								type="button"
-								onClick={() => {
-									setModalMode("touch");
-									setInputName("");
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface transition-colors"
-							>
-								<span className="icon-[lucide--file-plus] size-3.5 text-primary" />
-								<span>新建文本文件</span>
-							</button>
-							<button
-								type="button"
-								onClick={() => {
-									setModalMode("mkdir");
-									setInputName("");
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface transition-colors"
-							>
-								<span className="icon-[lucide--folder-plus] size-3.5" />
-								<span>新建目录</span>
-							</button>
-							<button
-								type="button"
-								onClick={() => {
-									handleUpload();
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface transition-colors"
-							>
-								<span className="icon-[lucide--upload] size-3.5" />
-								<span>上传文件到此目录</span>
-							</button>
-							<div className="my-1 border-t border-border/60" />
-							<button
-								type="button"
-								onClick={() => {
-									loadDir(remotePath);
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface transition-colors"
-							>
-								<span className="icon-[lucide--refresh-cw] size-3.5" />
-								<span>刷新</span>
-							</button>
-						</>
-					)}
-				</div>
-			)}
 
 			{/* 模态弹窗 */}
 			<Modal
 				open={modalMode !== null}
 				onClose={() => {
 					setModalMode(null);
-					setTargetEntry(null);
 				}}
 				title={
 					modalMode === "mkdir"
 						? "新建远程目录"
-						: modalMode === "touch"
-						? "新建文本文件"
-						: modalMode === "rename"
-						? "重命名"
-						: "确认删除"
+						: "新建文本文件"
 				}
 				footer={
 					<div className="flex items-center gap-2">
@@ -819,7 +617,6 @@ export function EmbeddedSftpDrawer({
 							type="button"
 							onClick={() => {
 								setModalMode(null);
-								setTargetEntry(null);
 							}}
 							className="rounded px-2.5 py-1 text-[11px] text-muted hover:bg-surface"
 						>
@@ -830,10 +627,10 @@ export function EmbeddedSftpDrawer({
 							onClick={handleModalSubmit}
 							className={cn(
 								"rounded px-3 py-1 text-[11px] font-medium text-white shadow-xs",
-								modalMode === "delete" ? "bg-danger hover:bg-danger/90" : "bg-primary hover:bg-primary/90",
+								"bg-primary hover:bg-primary/90",
 							)}
 						>
-							{modalMode === "delete" ? "确认删除" : "确定"}
+							确定
 						</button>
 					</div>
 				}
@@ -868,28 +665,6 @@ export function EmbeddedSftpDrawer({
 					</div>
 				)}
 
-				{modalMode === "rename" && (
-					<div className="space-y-3">
-						<div className="text-muted">请输入新名称：</div>
-						<Input
-							autoFocus
-							value={inputName}
-							onChange={(e) => setInputName(e.target.value)}
-							onKeyDown={(e) => {
-								if (e.key === "Enter") handleModalSubmit();
-							}}
-						/>
-					</div>
-				)}
-
-				{modalMode === "delete" && targetEntry && (
-					<div className="space-y-2">
-						<div className="text-surface-foreground">
-							确认删除「<span className="font-semibold text-danger">{targetEntry.name}</span>」吗？
-						</div>
-						<div className="text-[11px] text-faint">此操作不可撤销。</div>
-					</div>
-				)}
 			</Modal>
 		</div>
 	);

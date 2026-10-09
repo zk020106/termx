@@ -1,10 +1,13 @@
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { attachPty, resizePty, writePty, type PtyAttachment } from "./ptyCache";
+import { attachPty, clearPtyReplay, resizePty, writePty, type PtyAttachment } from "./ptyCache";
+import { clearTerminalViewportAndSyncPty } from "./netcatty/clearTerminalViewport";
 import {
 	attachSsh,
+	clearSshReplay,
 	hasSshSession,
 	resizeSsh,
 	writeSsh,
@@ -22,6 +25,22 @@ import { cn } from "@/lib/cn";
 import { isLikelySecretEntry } from "@/lib/sensitive";
 import { effectiveLook } from "@/lib/hostTerminal";
 import { broadcastPeers, writeToPane } from "@/store/sessions";
+import { KeywordHighlighter } from "./netcatty/keywordHighlight";
+import {
+	createCopyOnSelectUserGestureTracker,
+	pulseCopyOnSelectUserCommand,
+	shouldWriteCopyOnSelect,
+	subscribeCopyOnSelectUserCommand,
+	subscribeCopyOnSelectUserGesture,
+} from "./netcatty/copyOnSelect";
+import { currentHotkeyContext, emitTerminalRequest, matchHotkey } from "@/lib/hotkeys";
+import {
+	APP_LEVEL_ACTIONS,
+	TERMINAL_ACTIONS,
+	nextTerminalFontSizeForAction,
+	nextTerminalFontSizeForWheel,
+} from "@/lib/keyBindings";
+import { markMiddleClickContextMenuEvent } from "./terminalMenu";
 
 /* =============================================================================
  * 终端分屏格 —— xterm 6 的 React 封装。
@@ -48,17 +67,18 @@ export interface TerminalHandle {
 	selectAll: () => void;
 	clear: () => void;
 	saveScreen: () => void;
+	/** Netcatty「粘贴选中文本」：把当前选区作为输入粘贴回本格 */
+	pasteSelection: () => boolean;
+	/** Netcatty「选择单词」右键行为（其实现为全选） */
+	selectWord: () => void;
+	/** xterm 当前的鼠标跟踪模式（tmux / vim 打开鼠标时 ≠ none） */
+	getMouseTrackingMode: () => string;
+	isAlternateScreen: () => boolean;
 	search: (query: string) => TerminalMatchInfo;
 	stepMatch: (delta: number) => TerminalMatchInfo;
 	endSearch: () => void;
 	focus: () => void;
 	isDemo: () => boolean;
-}
-
-interface Match {
-	row: number;
-	col: number;
-	len: number;
 }
 
 export function Terminal({
@@ -86,8 +106,12 @@ export function Terminal({
 	/** 当前这格没有真实 PTY（浏览器预览 / PTY 启动失败）：只显示说明，不伪造输出 */
 	const noPtyRef = useRef(false);
 	const sshRef = useRef<SshAttachment | null>(null);
-	const matchesRef = useRef<Match[]>([]);
-	const cursorRef = useRef(0);
+	const searchRef = useRef<SearchAddon | null>(null);
+	const searchQueryRef = useRef("");
+	const searchResultRef = useRef<TerminalMatchInfo>({ index: -1, count: 0 });
+	const highlighterRef = useRef<KeywordHighlighter | null>(null);
+	/** Ctrl(⌘)+= / - / 0 与 Ctrl+滚轮的会话内字号（null = 跟随设置）；同 Netcatty 按会话缩放 */
+	const zoomFontRef = useRef<number | null>(null);
 	const resolvedTheme = useThemeStore((s) => s.resolved);
 	const accent = useThemeStore((s) => s.accent);
 
@@ -111,6 +135,18 @@ export function Terminal({
 		hostLook,
 	);
 	const bell = useSettingsStore((s) => s.bell);
+	const cursorBlink = useSettingsStore((s) => s.cursorBlink);
+	const drawBoldInBrightColors = useSettingsStore((s) => s.drawBoldInBrightColors);
+	const fontWeight = useSettingsStore((s) => s.fontWeight);
+	const fontWeightBold = useSettingsStore((s) => s.fontWeightBold);
+	const minimumContrastRatio = useSettingsStore((s) => s.minimumContrastRatio);
+	const altAsMeta = useSettingsStore((s) => s.altAsMeta);
+	const wordSeparators = useSettingsStore((s) => s.wordSeparators);
+	const smoothScrolling = useSettingsStore((s) => s.smoothScrolling);
+	const scrollOnInput = useSettingsStore((s) => s.scrollOnInput);
+	const disableBracketedPaste = useSettingsStore((s) => s.disableBracketedPaste);
+	const keywordHighlightEnabled = useSettingsStore((s) => s.keywordHighlightEnabled);
+	const keywordHighlightRules = useSettingsStore((s) => s.keywordHighlightRules);
 	const commandSuggestions = useSettingsStore((s) => s.commandSuggestions);
 	const ghostText = useSettingsStore((s) => s.ghostText);
 
@@ -134,6 +170,21 @@ export function Terminal({
 
 	completionStateRef.current.commandSuggestions = commandSuggestions;
 	completionStateRef.current.ghostText = ghostText;
+
+	/**
+	 * 清空缓冲区 —— Netcatty useTerminalContextActions.onClear：把光标以上的内容推进回滚、清掉提示符以下，
+	 * 「clear 同时清空回滚历史」打开时连回滚一起清；随后清掉会话的回放缓冲（= Netcatty clearSessionPtyBuffer）。
+	 */
+	const clearBuffer = (term: XTerm) => {
+		clearTerminalViewportAndSyncPty(term, {
+			wipeScrollback: useSettingsStore.getState().clearWipesScrollback,
+			syncPty: () => {
+				const key = sessionKey ?? null;
+				if (key && hasSshSession(key)) clearSshReplay(key);
+				else clearPtyReplay(paneId);
+			},
+		});
+	};
 
 	const handleApplySuggestion = useCallback(
 		(suggestion: CommandSuggestion) => {
@@ -168,23 +219,113 @@ export function Terminal({
 		if (!container) return;
 
 		const palette = readPalette();
+		const prefs = useSettingsStore.getState();
 		const term = new XTerm({
-			cursorBlink: true,
+			cursorBlink: prefs.cursorBlink,
 			cursorStyle,
+			drawBoldTextInBrightColors: prefs.drawBoldInBrightColors,
+			fontWeight: prefs.fontWeight as XTermFontWeight,
+			fontWeightBold: prefs.fontWeightBold as XTermFontWeight,
+			minimumContrastRatio: prefs.minimumContrastRatio,
+			macOptionIsMeta: prefs.altAsMeta,
+			wordSeparator: prefs.wordSeparators,
+			scrollOnUserInput: prefs.scrollOnInput,
+			ignoreBracketedPasteMode: prefs.disableBracketedPaste,
 			fontFamily: fontStack(fontFamily),
 			fontSize,
 			lineHeight,
 			letterSpacing: 0,
 			scrollback: scrollbackLines(scrollback),
-			smoothScrollDuration: 0,
+			smoothScrollDuration: prefs.smoothScrolling ? SMOOTH_SCROLL_MS : 0,
 			theme: xtermThemeFor(scheme, palette, resolvedTheme),
 		});
 		const fit = new FitAddon();
 		fitRef.current = fit;
 		term.loadAddon(fit);
 		term.loadAddon(new WebLinksAddon());
+		// 终端内搜索：同 Netcatty 用 @xterm/addon-search（带匹配高亮装饰与结果计数）
+		const searchAddon = new SearchAddon();
+		term.loadAddon(searchAddon);
+		searchRef.current = searchAddon;
+		const searchResultsSub = searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
+			searchResultRef.current = { index: resultIndex, count: resultCount };
+		});
 		term.open(container);
 		termRef.current = term;
+		zoomFontRef.current = null;
+
+		// 关键字高亮：Netcatty KeywordHighlighter 原样移植
+		const highlighter = new KeywordHighlighter(term);
+		highlighter.setRules(prefs.keywordHighlightEnabled ? prefs.keywordHighlightRules : [], prefs.keywordHighlightEnabled);
+		highlighterRef.current = highlighter;
+
+		// 「`clear` 同时清空回滚历史」关闭时，吞掉远端发来的 ED 3（\e[3J），只清屏不清回滚
+		const ed3Sub = term.parser.registerCsiHandler({ final: "J" }, (params) =>
+			params[0] === 3 && !useSettingsStore.getState().clearWipesScrollback,
+		);
+
+		// 选择即复制（Netcatty copyOnSelect.ts：只认用户手势产生的选区，搜索 / 程序选中不写剪贴板）
+		const copyTracker = createCopyOnSelectUserGestureTracker();
+		const unsubscribeGesture = subscribeCopyOnSelectUserGesture(term, copyTracker);
+		const unsubscribeCommand = subscribeCopyOnSelectUserCommand(term, copyTracker.pulse);
+		const selectionSub = term.onSelectionChange(() => {
+			const text = term.getSelection();
+			if (
+				shouldWriteCopyOnSelect({
+					hasText: text.length > 0,
+					copyOnSelect: useSettingsStore.getState().copyOnSelect,
+					isRestoringSelection: false,
+					isUserSelection: copyTracker.isActive(),
+				})
+			) {
+				void writeClipboard(normalizeCopied(text));
+			}
+		});
+
+		// 中键：粘贴 / 弹出菜单 / 禁用（Netcatty middleClickBehavior）
+		const onMouseDownCapture = (event: MouseEvent) => {
+			if (event.button !== 1) return;
+			const behavior = useSettingsStore.getState().middleClick;
+			if (behavior === "disabled") return;
+			event.preventDefault();
+			event.stopPropagation();
+			if (behavior === "paste") {
+				void readClipboard().then((text) => {
+					if (text && !noPtyRef.current) term.paste(text);
+				});
+				return;
+			}
+			const menuEvent = markMiddleClickContextMenuEvent(
+				new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: event.clientX, clientY: event.clientY }),
+			);
+			container.dispatchEvent(menuEvent);
+		};
+		container.addEventListener("mousedown", onMouseDownCapture, true);
+
+		// Ctrl(⌘)+滚轮缩放字号
+		const applyZoom = (next: number | null) => {
+			if (next === null) return false;
+			if (next !== term.options.fontSize) {
+				term.options.fontSize = next;
+				zoomFontRef.current = next;
+				fitNow();
+			}
+			return true;
+		};
+		const onWheel = (event: WheelEvent) => {
+			const { isMac } = currentHotkeyContext();
+			const next = nextTerminalFontSizeForWheel(
+				event,
+				term.options.fontSize ?? fontSize,
+				isMac,
+				useSettingsStore.getState().disableTerminalFontZoom,
+			);
+			if (next === null) return;
+			event.preventDefault();
+			event.stopPropagation();
+			applyZoom(next);
+		};
+		container.addEventListener("wheel", onWheel, { passive: false, capture: true });
 
 		let disposed = false;
 		let raf = 0;
@@ -270,6 +411,60 @@ export function Terminal({
 
 		// 键盘拦截：处理 Tab / 方向键 / Enter / Esc (Warp / VS Code 风格体验)
 		term.attachCustomKeyEventHandler((event) => {
+			// 快捷键（Netcatty createXTermRuntime 的 checkAppShortcut 分支）
+			if (event.type === "keydown") {
+				const binding = matchHotkey(event);
+				if (binding) {
+					const { action } = binding;
+					// 应用级动作交给窗口层处理，不能再发给 shell
+					if (APP_LEVEL_ACTIONS.has(action)) return false;
+					if (TERMINAL_ACTIONS.has(action)) {
+						const hasSelection = term.hasSelection();
+						if (action === "copy" && !hasSelection) {
+							// 没有选区：裸 Ctrl+C / ⌘C 照常发给终端（SIGINT），其余复制组合键什么都不做
+							const plainCopy = (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "c";
+							return plainCopy;
+						}
+						const zoom = nextTerminalFontSizeForAction(
+							action,
+							term.options.fontSize ?? fontSize,
+							useSettingsStore.getState().fontSize,
+							useSettingsStore.getState().disableTerminalFontZoom,
+						);
+						if (action.endsWith("TerminalFontSize") && zoom === null) return true;
+						event.preventDefault();
+						event.stopPropagation();
+						switch (action) {
+							case "copy":
+								void writeClipboard(normalizeCopied(term.getSelection()));
+								break;
+							case "paste":
+								void readClipboard().then((text) => {
+									if (text && !noPtyRef.current) term.paste(text);
+								});
+								break;
+							case "pasteSelection": {
+								const selected = term.getSelection();
+								if (selected && !noPtyRef.current) term.paste(selected);
+								break;
+							}
+							case "selectAll":
+								pulseCopyOnSelectUserCommand(term);
+								term.selectAll();
+								break;
+							case "clearBuffer":
+								clearBuffer(term);
+								break;
+							case "searchTerminal":
+								emitTerminalRequest({ kind: "search", paneId });
+								break;
+							default:
+								if (zoom !== null) applyZoom(zoom);
+						}
+						return false;
+					}
+				}
+			}
 			if (term.buffer.active.type === "alternate") return true;
 
 			const state = completionStateRef.current;
@@ -452,14 +647,25 @@ export function Terminal({
 			dataSub.dispose();
 			resizeSub.dispose();
 			cursorSub.dispose();
+			searchResultsSub.dispose();
+			selectionSub.dispose();
+			ed3Sub.dispose();
+			unsubscribeGesture();
+			unsubscribeCommand();
+			copyTracker.dispose();
+			container.removeEventListener("mousedown", onMouseDownCapture, true);
+			container.removeEventListener("wheel", onWheel, { capture: true });
+			highlighter.dispose();
+			highlighterRef.current = null;
+			searchRef.current = null;
 			// 只解绑订阅；会话本身由 ptyCache / sshCache 持有，避免误杀
 			attachRef.current?.detach();
 			attachRef.current = null;
 			sshRef.current?.detach();
 			sshRef.current = null;
 			noPtyRef.current = false;
-			matchesRef.current = [];
-			cursorRef.current = 0;
+			searchQueryRef.current = "";
+			searchResultRef.current = { index: -1, count: 0 };
 			termRef.current = null;
 			fitRef.current = null;
 			term.dispose();
@@ -472,6 +678,8 @@ export function Terminal({
 		const term = termRef.current;
 		if (!term) return;
 		term.options.fontFamily = fontStack(fontFamily);
+		// 设置里的字号变了：放弃会话内缩放，回到设置值
+		zoomFontRef.current = null;
 		term.options.fontSize = fontSize;
 		term.options.lineHeight = lineHeight;
 		term.options.scrollback = scrollbackLines(scrollback);
@@ -484,6 +692,41 @@ export function Terminal({
 			}
 		});
 	}, [fontFamily, fontSize, lineHeight, scrollback, cursorStyle, paneId, hostId, sessionKey]);
+
+	/* Netcatty 移植过来的 xterm 运行时选项：改了立即生效 */
+	useEffect(() => {
+		const term = termRef.current;
+		if (!term) return;
+		term.options.cursorBlink = cursorBlink;
+		term.options.drawBoldTextInBrightColors = drawBoldInBrightColors;
+		term.options.fontWeight = fontWeight as XTermFontWeight;
+		term.options.fontWeightBold = fontWeightBold as XTermFontWeight;
+		term.options.minimumContrastRatio = minimumContrastRatio;
+		term.options.macOptionIsMeta = altAsMeta;
+		term.options.wordSeparator = wordSeparators;
+		term.options.smoothScrollDuration = smoothScrolling ? SMOOTH_SCROLL_MS : 0;
+		term.options.scrollOnUserInput = scrollOnInput;
+		term.options.ignoreBracketedPasteMode = disableBracketedPaste;
+	}, [
+		cursorBlink,
+		drawBoldInBrightColors,
+		fontWeight,
+		fontWeightBold,
+		minimumContrastRatio,
+		altAsMeta,
+		wordSeparators,
+		smoothScrolling,
+		scrollOnInput,
+		disableBracketedPaste,
+		paneId,
+		hostId,
+		sessionKey,
+	]);
+
+	/* 关键字高亮规则 / 开关 */
+	useEffect(() => {
+		highlighterRef.current?.setRules(keywordHighlightEnabled ? keywordHighlightRules : [], keywordHighlightEnabled);
+	}, [keywordHighlightEnabled, keywordHighlightRules, paneId, hostId, sessionKey]);
 
 	/* 响铃：xterm 只上报 BEL 事件、自己不出声，这里合成一声短促提示音 */
 	useEffect(() => {
@@ -517,36 +760,38 @@ export function Terminal({
 			clear: () => {
 				const term = termRef.current;
 				if (!term) return;
-				term.clear();
+				clearBuffer(term);
 			},
 			selectAll: () => {
-				termRef.current?.selectAll();
+				const term = termRef.current;
+				if (!term) return;
+				pulseCopyOnSelectUserCommand(term);
+				term.selectAll();
 			},
+			selectWord: () => {
+				// Netcatty useTerminalContextActions.onSelectWord：pulse + selectAll
+				const term = termRef.current;
+				if (!term) return;
+				pulseCopyOnSelectUserCommand(term);
+				term.selectAll();
+			},
+			pasteSelection: () => {
+				const term = termRef.current;
+				const selected = term?.getSelection() ?? "";
+				if (!term || !selected || noPtyRef.current) return false;
+				term.focus();
+				term.paste(selected);
+				return true;
+			},
+			getMouseTrackingMode: () => termRef.current?.modes.mouseTrackingMode ?? "none",
+			isAlternateScreen: () => termRef.current?.buffer.active.type === "alternate",
 			copySelection: async () => {
 				const selected = termRef.current?.getSelection() ?? "";
 				if (!selected) return false;
 				// 「复制时去除末尾换行」：避免粘贴到远端时直接执行命令
-				const text = useSettingsStore.getState().trimNewline ? selected.replace(/[\r\n]+$/, "") : selected;
+				const text = normalizeCopied(selected);
 				if (!text) return false;
-				try {
-					await navigator.clipboard.writeText(text);
-					return true;
-				} catch {
-					// 非安全上下文里没有剪贴板 API，退回 execCommand
-					try {
-						const area = document.createElement("textarea");
-						area.value = text;
-						area.style.position = "fixed";
-						area.style.opacity = "0";
-						document.body.appendChild(area);
-						area.select();
-						const ok = document.execCommand("copy");
-						area.remove();
-						return ok;
-					} catch {
-						return false;
-					}
-				}
+				return writeClipboard(text);
 			},
 			paste: async () => {
 				let text = "";
@@ -584,22 +829,29 @@ export function Terminal({
 				URL.revokeObjectURL(url);
 			},
 			search: (query) => {
-				matchesRef.current = collectMatches(termRef.current, query);
-				cursorRef.current = 0;
-				if (matchesRef.current.length > 0) showMatch(termRef.current, matchesRef.current, 0);
-				return { index: matchesRef.current.length > 0 ? 0 : -1, count: matchesRef.current.length };
+				const addon = searchRef.current;
+				searchQueryRef.current = query;
+				if (!addon || !query) {
+					addon?.clearDecorations();
+					termRef.current?.clearSelection();
+					searchResultRef.current = { index: -1, count: 0 };
+					return searchResultRef.current;
+				}
+				addon.findNext(query, { ...SEARCH_OPTIONS, incremental: true });
+				return searchResultRef.current;
 			},
 			stepMatch: (delta) => {
-				const list = matchesRef.current;
-				if (list.length === 0) return { index: -1, count: 0 };
-				const next = (((cursorRef.current + delta) % list.length) + list.length) % list.length;
-				cursorRef.current = next;
-				showMatch(termRef.current, list, next);
-				return { index: next, count: list.length };
+				const addon = searchRef.current;
+				const query = searchQueryRef.current;
+				if (!addon || !query) return { index: -1, count: 0 };
+				if (delta < 0) addon.findPrevious(query, SEARCH_OPTIONS);
+				else addon.findNext(query, SEARCH_OPTIONS);
+				return searchResultRef.current;
 			},
 			endSearch: () => {
-				matchesRef.current = [];
-				cursorRef.current = 0;
+				searchQueryRef.current = "";
+				searchResultRef.current = { index: -1, count: 0 };
+				searchRef.current?.clearDecorations();
 				termRef.current?.clearSelection();
 			},
 		}),
@@ -718,32 +970,58 @@ export function panePrompt(hostId: string | null | undefined, fallbackTitle?: st
 }
 
 /** 在滚动缓冲里找出全部命中（大小写不敏感，逐行不跨行） */
-function collectMatches(term: XTerm | null, query: string): Match[] {
-	if (!term || !query) return [];
-	const found: Match[] = [];
-	const buffer = term.buffer.active;
-	const needle = query.toLowerCase();
-	for (let row = 0; row < buffer.length; row += 1) {
-		const text = buffer.getLine(row)?.translateToString(true).toLowerCase() ?? "";
-		let from = 0;
-		for (;;) {
-			const at = text.indexOf(needle, from);
-			if (at < 0) break;
-			found.push({ row, col: at, len: needle.length });
-			from = at + Math.max(1, needle.length);
-		}
-	}
-	return found;
+/** Netcatty SEARCH_OPTIONS（useTerminalSearch.ts）：不区分大小写、非正则、非整词，带匹配装饰 */
+const SEARCH_OPTIONS = {
+	regex: false,
+	caseSensitive: false,
+	wholeWord: false,
+	decorations: {
+		matchBackground: "#FFFF0044",
+		matchBorder: "#FFFF00",
+		matchOverviewRuler: "#FFFF00",
+		activeMatchBackground: "#FF880088",
+		activeMatchBorder: "#FF8800",
+		activeMatchColorOverviewRuler: "#FF8800",
+	},
+} as const;
+
+/** Netcatty xtermPerformance 的 smoothScrollDuration */
+const SMOOTH_SCROLL_MS = 120;
+
+type XTermFontWeight = NonNullable<ConstructorParameters<typeof XTerm>[0]>["fontWeight"];
+
+/** 复制文本：「复制时去除末尾换行」开着时去掉结尾换行 */
+function normalizeCopied(text: string): string {
+	return useSettingsStore.getState().trimNewline ? text.replace(/[\r\n]+$/, "") : text;
 }
 
-/** 选中第 index 个命中并把它滚进视口（xterm 没有内置搜索，用选区当高亮） */
-function showMatch(term: XTerm | null, list: Match[], index: number): void {
-	if (!term || list.length === 0) return;
-	const match = list[index];
-	if (!match) return;
-	const viewportY = term.buffer.active.viewportY;
-	if (match.row < viewportY || match.row >= viewportY + term.rows) {
-		term.scrollLines(match.row - viewportY - Math.floor(term.rows / 2));
+async function writeClipboard(text: string): Promise<boolean> {
+	if (!text) return false;
+	try {
+		await navigator.clipboard.writeText(text);
+		return true;
+	} catch {
+		// 非安全上下文里没有剪贴板 API，退回 execCommand
+		try {
+			const area = document.createElement("textarea");
+			area.value = text;
+			area.style.position = "fixed";
+			area.style.opacity = "0";
+			document.body.appendChild(area);
+			area.select();
+			const ok = document.execCommand("copy");
+			area.remove();
+			return ok;
+		} catch {
+			return false;
+		}
 	}
-	term.select(match.col, match.row, match.len);
+}
+
+async function readClipboard(): Promise<string> {
+	try {
+		return await navigator.clipboard.readText();
+	} catch {
+		return "";
+	}
 }

@@ -1,6 +1,9 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
+import { KeywordHighlightSettings, TerminalBehaviorSettings } from "@/components/settings/TerminalBehaviorSettings";
+import { ShortcutsSettings } from "@/components/settings/ShortcutsSettings";
+import { KnownHostsList } from "@/components/settings/KnownHostsList";
 import { TERMINAL_SCHEMES, schemeColors, schemeTones } from "@/components/terminal/terminalSchemes";
-import { Button, Kbd } from "@/components/ui/Button";
+import { Button } from "@/components/ui/Button";
 import { Badge, Panel, Segmented } from "@/components/ui/Display";
 import { Field, Input, ReadonlyValue, Select } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Overlay";
@@ -50,7 +53,7 @@ const KEYCHAIN_LABEL = {
  *
  * 这一页不放假控件：能接真的就接到真实链路（主题/强调色/密度 → useThemeStore，
  * 终端偏好与安全/数据偏好 → useSettingsStore → 配置文件 + xterm 运行时选项），
- * 暂时没有落地路径的（known_hosts 列表、定时加密备份）
+ * 暂时没有落地路径的（定时加密备份）
  * 直接禁用并写明原因，绝不返回「看起来成功」的假提示。
  * ========================================================================== */
 
@@ -102,7 +105,7 @@ const SCROLLBACK_LABEL: Record<ScrollbackChoice, string> = {
 };
 
 const CURSOR_LABEL: Record<CursorStyle, string> = { block: "块状", bar: "竖线", underline: "下划线" };
-const RIGHT_CLICK_LABEL: Record<RightClickAction, string> = { paste: "粘贴", menu: "弹出菜单", select: "选中即复制" };
+const RIGHT_CLICK_LABEL: Record<RightClickAction, string> = { paste: "粘贴", menu: "显示菜单", select: "复制选区", "select-word": "选择单词" };
 const AUTO_LOCK_LABEL: Record<AutoLockChoice, string> = {
 	never: "永不锁定",
 	"1": "1 分钟",
@@ -120,37 +123,6 @@ const SCHEME_CARDS: { id: TerminalSchemeId; name: string; tones: string[] | null
 
 /** 「跟随界面主题」时预览用的 token 类 */
 const THEME_TONES = ["bg-primary", "bg-accent", "bg-success", "bg-warning", "bg-muted"];
-
-/* ------------------------------ 快捷键 ------------------------------ */
-
-interface Binding {
-	id: string;
-	group: string;
-	name: string;
-	desc: string;
-	keys: string[];
-}
-
-/** 快捷键总表（只读参考）：实际响应在各界面里，改绑尚未接线 */
-const SHORTCUTS: Binding[] = [
-	{ id: "palette", group: "通用", name: "命令面板", desc: "搜索主机、命令与设置", keys: ["Ctrl+K"] },
-	{ id: "quick-connect", group: "通用", name: "快速连接", desc: "输入 user@host 直接连", keys: ["Ctrl+Shift+O"] },
-	{ id: "settings", group: "通用", name: "设置", desc: "打开本页", keys: ["Ctrl+,"] },
-	{ id: "new-tab", group: "标签与分屏", name: "新建标签", desc: "在当前窗口开新会话", keys: ["Ctrl+Shift+T"] },
-	{ id: "close-tab", group: "标签与分屏", name: "关闭标签", desc: "关闭当前标签", keys: ["Ctrl+Shift+W"] },
-	{ id: "switch-tab", group: "标签与分屏", name: "切换标签", desc: "循环 / 按序号跳转", keys: ["Ctrl+Tab", "Alt+1-9"] },
-	{ id: "split-right", group: "标签与分屏", name: "向右分屏", desc: "垂直切分当前标签", keys: ["Ctrl+Shift+D"] },
-	{ id: "focus-pane", group: "标签与分屏", name: "切换焦点格", desc: "在分屏之间移动焦点", keys: ["Alt+方向键"] },
-	{ id: "copy-paste", group: "终端", name: "复制 / 粘贴", desc: "终端内复制与粘贴", keys: ["Ctrl+Shift+C", "Ctrl+Shift+V"] },
-	{ id: "search", group: "终端", name: "终端内搜索", desc: "在回滚缓冲区里查找", keys: ["Ctrl+Shift+F"] },
-	{ id: "broadcast", group: "终端", name: "广播输入", desc: "同屏所有格同步输入", keys: ["Ctrl+Shift+I"] },
-	{ id: "font-size", group: "终端", name: "调整字号", desc: "放大 / 缩小 / 复位", keys: ["Ctrl+=", "Ctrl+-", "Ctrl+0"] },
-	{ id: "toggle-sftp", group: "终端", name: "显示 / 隐藏 SFTP", desc: "底部文件面板", keys: ["Ctrl+Shift+S"] },
-	{ id: "toggle-sidebar", group: "应用", name: "显示 / 隐藏侧栏", desc: "收起主机侧栏", keys: ["Ctrl+B"] },
-	{ id: "lock", group: "应用", name: "锁定应用", desc: "立即锁屏", keys: ["Ctrl+Shift+L"] },
-];
-
-const GROUPS = [...new Set(SHORTCUTS.map((s) => s.group))];
 
 /* ============================================================================= */
 
@@ -177,6 +149,10 @@ export default function Settings() {
 	const trimNewline = useSettingsStore((s) => s.trimNewline);
 	const scheme = useSettingsStore((s) => s.scheme);
 	const sftpFollowActiveTab = useSettingsStore((s) => s.sftpFollowActiveTab);
+	const sftpDoubleClickBehavior = useSettingsStore((s) => s.sftpDoubleClickBehavior);
+	const sftpAutoSync = useSettingsStore((s) => s.sftpAutoSync);
+	const sftpShowHiddenFiles = useSettingsStore((s) => s.sftpShowHiddenFiles);
+	const sftpFileOpeners = useSettingsStore((s) => s.sftpFileOpeners);
 	const commandSuggestions = useSettingsStore((s) => s.commandSuggestions);
 	const ghostText = useSettingsStore((s) => s.ghostText);
 	const keychain = useSettingsStore((s) => s.keychain);
@@ -586,6 +562,58 @@ export default function Settings() {
 											label="SFTP 联动跟随活跃终端"
 										/>
 									</SettingRow>
+									<SettingRow title="SFTP 双击行为" description="选择在 SFTP 视图中双击文件时的操作">
+										<Segmented
+											value={sftpDoubleClickBehavior}
+											onChange={(value) => setTerminal({ sftpDoubleClickBehavior: value })}
+											options={[
+												{ value: "open", label: "打开文件" },
+												{ value: "transfer", label: "传输到另一侧" },
+											]}
+										/>
+									</SettingRow>
+									<SettingRow title="自动同步到远程" description="使用外部应用程序打开文件时，自动将文件更改同步回远程服务器">
+										<Switch
+											checked={sftpAutoSync}
+											onChange={(value) => setTerminal({ sftpAutoSync: value })}
+											label="自动同步到远程"
+										/>
+									</SettingRow>
+									<SettingRow title="显示隐藏文件" description="浏览本地和远程文件系统时显示隐藏文件（点开头的文件）">
+										<Switch
+											checked={sftpShowHiddenFiles}
+											onChange={(value) => setTerminal({ sftpShowHiddenFiles: value })}
+											label="显示隐藏文件"
+										/>
+									</SettingRow>
+									<SettingRow title="文件打开方式" description="在「打开方式」里勾选「始终使用此方式打开」后记住的扩展名关联">
+										{Object.keys(sftpFileOpeners).length === 0 ? (
+											<span className="text-[11px] text-faint">暂无</span>
+										) : (
+											<div className="flex max-w-[320px] flex-col gap-1">
+												{Object.entries(sftpFileOpeners).map(([ext, opener]) => (
+													<div key={ext} className="flex items-center gap-2 text-[11px]">
+														<span className="w-20 truncate font-mono text-surface-foreground">{ext === "file" ? "无扩展名" : `.${ext}`}</span>
+														<span className="flex-1 truncate text-muted">
+															{opener.type === "builtin-editor" ? "内置编辑器" : (opener.app?.name ?? "外部程序")}
+														</span>
+														<button
+															type="button"
+															className="text-faint hover:text-danger"
+															title="移除"
+															onClick={() => {
+																const next = { ...sftpFileOpeners };
+																delete next[ext];
+																setTerminal({ sftpFileOpeners: next });
+															}}
+														>
+															<span className="icon-[lucide--x] size-3" />
+														</button>
+													</div>
+												))}
+											</div>
+										)}
+									</SettingRow>
 									<SettingRow title="命令预测与补全 (Warp / VS Code 风格)" description="根据历史执行频次与 Snippets 实时弹出推荐补全气泡">
 										<Switch
 											checked={commandSuggestions}
@@ -601,6 +629,13 @@ export default function Settings() {
 										/>
 									</SettingRow>
 								</div>
+
+								<div>
+									<h3 className="mb-2 text-[12.5px] font-semibold text-surface-foreground">行为（对齐 Netcatty）</h3>
+									<TerminalBehaviorSettings />
+								</div>
+
+								<KeywordHighlightSettings />
 
 								<div>
 									<h3 className="text-[12.5px] font-semibold text-surface-foreground">终端配色方案</h3>
@@ -636,46 +671,7 @@ export default function Settings() {
 						)}
 
 						{/* ------------------------ 快捷键 ------------------------ */}
-						{section === "shortcuts" && (
-							<div className="max-w-3xl space-y-4">
-								<div>
-									<h2 className="text-[14px] font-semibold text-surface-foreground">快捷键绑定</h2>
-									<p className="mt-0.5 text-[11.5px] text-muted">由各界面固定响应，改绑尚未接线。</p>
-								</div>
-
-								<div className="overflow-hidden rounded-lg border border-border bg-surface-raised shadow-sm">
-									{GROUPS.map((group, gi) => (
-										<div key={group}>
-											<div
-												className={cn(
-													"flex items-center gap-1.5 px-3 py-1.5 font-mono text-[10px] font-medium tracking-wider text-faint uppercase",
-													gi > 0 && "border-t border-border",
-												)}
-											>
-												<span className="size-1 rounded-full bg-faint" />
-												{group}
-											</div>
-											{SHORTCUTS.filter((s) => s.group === group).map((row) => (
-												<div
-													key={row.id}
-													className="flex items-center justify-between gap-3 border-t border-border px-3 py-1.5"
-												>
-													<div className="flex min-w-0 items-baseline gap-2">
-														<span className="shrink-0 text-[11.5px] text-surface-foreground">{row.name}</span>
-														<span className="truncate text-[10.5px] text-faint">{row.desc}</span>
-													</div>
-													<div className="flex shrink-0 items-center gap-1.5">
-														{row.keys.map((k) => (
-															<Kbd key={k}>{k}</Kbd>
-														))}
-													</div>
-												</div>
-											))}
-										</div>
-									))}
-								</div>
-							</div>
-						)}
+						{section === "shortcuts" && <ShortcutsSettings />}
 
 						{/* ------------------------- 安全 ------------------------- */}
 						{section === "security" && (
@@ -806,9 +802,17 @@ export default function Settings() {
 									>
 										<Switch checked onChange={() => toast({ title: "该安全策略不可关闭", tone: "warning" })} label="指纹变化时阻断连接" />
 									</SettingRow>
-									<SettingRow title="已信任的主机指纹" description="首次连接确认后写入原生 known_hosts；列表与删除需要新增原生命令，尚未接线">
-										<span className="font-mono text-[11px] text-muted">不可列出</span>
-									</SettingRow>
+								</Panel>
+
+								<Panel
+									title={
+										<>
+											<span className="icon-[lucide--shield-check] size-3.5 text-primary" />
+											已知主机
+										</>
+									}
+								>
+									<KnownHostsList />
 								</Panel>
 							</div>
 						)}
@@ -829,7 +833,7 @@ export default function Settings() {
 										</>
 									}
 								>
-									<SettingRow title="导出全部配置" description="主机、分组、密钥引用、片段、转发与偏好（未加密，含主机地址与用户名）">
+									<SettingRow title="导出全部配置" description="主机、分组、密钥引用、片段、转发、代理配置与偏好（未加密，含主机地址与用户名）">
 										<Button
 											size="sm"
 											icon="icon-[lucide--download]"

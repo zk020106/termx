@@ -8,6 +8,8 @@ import { sshSessionWasConnected } from "./sshCache";
 import { InTabConnect } from "./InTabConnect";
 import { useSettingsStore } from "@/store/settings";
 import { schemeColors } from "./terminalSchemes";
+import { useHotkeyContext } from "@/lib/hotkeys";
+import { shortcutLabel } from "@/lib/keyBindings";
 
 /* =============================================================================
  * 分屏格的「窗框」：标题行 + 终端本体 + 各种状态覆盖物。
@@ -58,6 +60,11 @@ export function TerminalPane({
 	const scheme = useSettingsStore((s) => s.scheme);
 	const customColors = schemeColors(scheme);
 	const prompt = panePrompt(pane.hostId, pane.title);
+	const hotkeys = useHotkeyContext();
+	const hint = (id: string) => {
+		const label = shortcutLabel(hotkeys.bindings, id, hotkeys.scheme);
+		return label ? ` (${label})` : "";
+	};
 	const showStatus = status !== "connected";
 	// 尚未成功建立连接的远程主机：停留在标签内连接/凭据认证页（包含错误提示、指纹确认与重连表单）
 	const isConnecting = Boolean(
@@ -109,7 +116,7 @@ export function TerminalPane({
 								onSplitRight();
 							}}
 							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors"
-							title="向右分屏 (Ctrl+Shift+D)"
+							title={`水平分屏${hint("split-horizontal")}`}
 						>
 							<span className="icon-[lucide--columns-2] size-3" />
 						</button>
@@ -122,7 +129,7 @@ export function TerminalPane({
 								onSplitDown();
 							}}
 							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors"
-							title="向下分屏 (Ctrl+Shift+E)"
+							title={`垂直分屏${hint("split-vertical")}`}
 						>
 							<span className="icon-[lucide--rows-2] size-3" />
 						</button>
@@ -140,7 +147,7 @@ export function TerminalPane({
 									? "text-primary bg-primary/10"
 									: "text-muted hover:bg-surface-raised hover:text-surface-foreground",
 							)}
-							title={isMaximized ? "还原分屏 (Ctrl+Shift+M / Esc)" : "最大化分屏 (Ctrl+Shift+M)"}
+							title={isMaximized ? `还原分屏${hint("toggle-pane-zoom")}` : `最大化分屏${hint("toggle-pane-zoom")}`}
 						>
 							<span className={cn(isMaximized ? "icon-[lucide--minimize-2]" : "icon-[lucide--maximize-2]", "size-3")} />
 						</button>
@@ -153,7 +160,7 @@ export function TerminalPane({
 								onOpenSftp();
 							}}
 							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors"
-							title="切换底部 SFTP (Ctrl+Shift+S)"
+							title={`切换底部 SFTP${hint("open-sftp")}`}
 						>
 							<span className="icon-[lucide--folder-tree] size-3" />
 						</button>
@@ -166,7 +173,7 @@ export function TerminalPane({
 								onClear();
 							}}
 							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors"
-							title="清屏 (Ctrl+L)"
+							title={`清空缓冲区${hint("clear-buffer")}`}
 						>
 							<span className="icon-[lucide--eraser] size-3" />
 						</button>

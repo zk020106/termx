@@ -18,6 +18,18 @@
 		"src/lib/transferNames.ts",
 		"src/lib/sensitive.ts",
 		"src/lib/pathSafety.ts",
-		"src/lib/configSecrets.ts"
+		"src/lib/configSecrets.ts",
+		"src/lib/keyBindings.ts",
+		"src/components/terminal/terminalMenu.ts",
+		"src/components/terminal/netcatty/keywordHighlight.ts",
+		"src/components/terminal/netcatty/keywordHighlightRules.ts",
+		"src/components/terminal/netcatty/copyOnSelect.ts",
+		"src/store/hosts.ts",
+		"src/lib/sftpArchive.ts",
+		"src/lib/keyExport.ts",
+		"src/lib/snippetTransfer.ts",
+		"src/lib/knownHosts.ts",
+		"src/lib/proxyProfiles.ts",
+		"src/components/terminal/netcatty/clearTerminalViewport.ts"
 	]
 }

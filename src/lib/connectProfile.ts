@@ -1,5 +1,6 @@
 import { buildConnectProfile, type ConnectProfile } from "./connectPlan";
-import { proxySecretAccount } from "./configSecrets";
+import { proxyProfileSecretAccount, proxySecretAccount } from "./configSecrets";
+import { materializeHostProxyProfile } from "./proxyProfiles";
 import { secretLoad } from "./secret";
 
 /* 从 store 与钥匙串里取数据，生成某台主机的连接 profile（纯逻辑见 connectPlan.ts）。 */
@@ -7,8 +8,14 @@ import { secretLoad } from "./secret";
 export async function resolveConnectProfile(hostId: string): Promise<{ ok: true; profile: ConnectProfile } | { ok: false; error: string }> {
 	const { useHostsStore } = await import("@/store/hosts");
 	const hosts = useHostsStore.getState().hosts;
-	const target = hosts.find((h) => h.id === hostId);
-	if (!target) return { ok: false, error: "找不到这台主机的配置" };
+	const stored = hosts.find((h) => h.id === hostId);
+	if (!stored) return { ok: false, error: "找不到这台主机的配置" };
+	// 引用了已保存的代理配置：连接时展开（Netcatty materializeHostProxyProfile）
+	const { useProxyProfilesStore } = await import("@/store/proxyProfiles");
+	const target = materializeHostProxyProfile(stored, useProxyProfilesStore.getState().profiles);
+	if (stored.proxyProfileId && !stored.proxy && !target.proxy) {
+		return { ok: false, error: "主机引用的代理配置不存在（保存的代理不存在），请在主机设置里重新选择代理" };
+	}
 
 	const byId = new Map(hosts.map((h) => [h.id, h]));
 	// 跳板机的密码：先读钥匙串（读不到不算错，连接时会再问）
@@ -26,7 +33,8 @@ export async function resolveConnectProfile(hostId: string): Promise<{ ok: true;
 	let proxyPassword: string | undefined;
 	if (target.proxy?.username) {
 		try {
-			proxyPassword = (await secretLoad(proxySecretAccount(target.id))) ?? undefined;
+			const account = stored.proxy ? proxySecretAccount(target.id) : proxyProfileSecretAccount(stored.proxyProfileId ?? "");
+			proxyPassword = (await secretLoad(account)) ?? undefined;
 		} catch {
 			/* 钥匙串不可用：按空口令发（代理会如实拒绝） */
 		}

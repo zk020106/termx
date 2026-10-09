@@ -2,6 +2,7 @@ mod chain;
 mod codec;
 mod config;
 mod fs_guard;
+mod fs_open;
 mod forward;
 mod known_hosts;
 mod probe;
@@ -91,6 +92,13 @@ pub fn run() {
             sftp::fs_local_rename,
             sftp::fs_local_read_file,
             sftp::fs_local_write_file,
+            fs_open::fs_open_path,
+            fs_open::fs_open_with,
+            fs_open::fs_temp_file_path,
+            fs_open::fs_local_extract,
+            fs_open::fs_local_copy,
+            known_hosts::known_hosts_list,
+            known_hosts::known_hosts_remove,
         ])
         .run(tauri::generate_context!())
         .expect("TermX 启动失败");

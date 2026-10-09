@@ -22,6 +22,7 @@ const Editor = lazy(() => import("@/screens/Editor"));
 const Forward = lazy(() => import("@/screens/Forward"));
 const HostEdit = lazy(() => import("@/screens/HostEdit"));
 const Keys = lazy(() => import("@/screens/Keys"));
+const Proxies = lazy(() => import("@/screens/Proxies"));
 const Monitor = lazy(() => import("@/screens/Monitor"));
 const Palette = lazy(() => import("@/screens/Palette"));
 const Settings = lazy(() => import("@/screens/Settings"));
@@ -55,6 +56,7 @@ export default function App() {
 							<Route path="/forward" element={<Forward />} />
 							<Route path="/snippets" element={<Snippets />} />
 							<Route path="/keys" element={<Keys />} />
+							<Route path="/proxies" element={<Proxies />} />
 							<Route path="/monitor" element={<Monitor />} />
 							<Route path="/settings" element={<Settings />} />
 							<Route path="/palette" element={<Palette />} />

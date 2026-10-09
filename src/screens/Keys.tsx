@@ -9,6 +9,10 @@ import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
 import { toast } from "@/store/toast";
+import { ContextMenu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
+import { buildKeyExportCommand, validateKeyExportTarget } from "@/lib/keyExport";
+import { sshExec } from "@/lib/ssh";
+import { useSessionsStore } from "@/store/sessions";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
@@ -16,6 +20,8 @@ import { useNavigate } from "react-router";
  * 密钥库 —— 设计帧 termx.vetd/frames/keys.tsx 的交互版，数据全部来自真实 store。
  * 覆盖状态（需求书 06-密钥库）：密钥列表（可空）/ 登记公钥 / 编辑密钥 / 删除密钥 /
  * 部署公钥（多选主机 + authorized_keys 预览 + 确认）。
+ * 部署 = Netcatty「导出密钥」：在主机已连接的终端会话上执行导出脚本（lib/keyExport.ts），
+ * 真正写入远端 ~/.ssh/authorized_keys；没有已连接会话的主机如实报「未连接」，不记录。
  *
  * 诚实边界：TermX 只登记**公钥**。私钥与口令始终留在你自己的机器上；
  * 在应用内生成密钥对需要接入本机 ssh-keygen / 系统钥匙串，尚未接入，
@@ -146,8 +152,18 @@ export default function Keys() {
 
 	/* 部署 */
 	const [targets, setTargets] = useState<string[]>([]);
-	const [deployUser, setDeployUser] = useState("deploy");
+	/** Netcatty 导出面板：位置 ~ $1、文件名 ~ $2 */
+	const [exportLocation, setExportLocation] = useState(".ssh");
+	const [exportFilename, setExportFilename] = useState("authorized_keys");
+	const [exporting, setExporting] = useState(false);
 	const [confirmOpen, setConfirmOpen] = useState(false);
+	const [menu, setMenu] = useState<{ x: number; y: number; key: SshKey } | null>(null);
+	const deployCardRef = useRef<HTMLDivElement>(null);
+	const tabs = useSessionsStore((s) => s.tabs);
+	/** 每台主机一个已连接的会话（导出脚本在它上面执行） */
+	const liveSessionFor = (hostId: string) =>
+		tabs.find((t) => t.hostId === hostId && t.status === "connected" && t.sessionKey)?.sessionKey ?? null;
+	const exportTargetError = validateKeyExportTarget(exportLocation, exportFilename);
 	const [deleteOpen, setDeleteOpen] = useState(false);
 
 	const selected = keys.find((key) => key.id === selectedId) ?? keys[0] ?? null;
@@ -261,17 +277,55 @@ export default function Keys() {
 		toast({ title: `已删除密钥 ${victim.name}`, tone: "default" });
 	}
 
-	function handleDeploy() {
-		if (!selected) return;
-		const ids = selectedHosts.map((host) => host.id);
-		ids.forEach((hostId) => markDeployed(selected.id, hostId));
+	async function handleDeploy() {
+		if (!selected || exporting) return;
+		setExporting(true);
+		const ok: string[] = [];
+		const failed: string[] = [];
+		try {
+			const command = buildKeyExportCommand(exportLocation, exportFilename, selected.publicKey);
+			for (const host of selectedHosts) {
+				const key = liveSessionFor(host.id);
+				if (!key) {
+					failed.push(`${host.name}：未连接（请先打开该主机的终端）`);
+					continue;
+				}
+				try {
+					const out = await sshExec(key, command, 30000);
+					const err = out.stderr?.trim();
+					if (out.code === 0 || (out.code == null && !err)) {
+						markDeployed(selected.id, host.id);
+						ok.push(host.name);
+					} else {
+						failed.push(`${host.name}：${err || out.stdout?.trim() || `命令退出码 ${out.code}`}`);
+					}
+				} catch (error) {
+					failed.push(`${host.name}：${String(error)}`);
+				}
+			}
+		} catch (error) {
+			failed.push(String(error));
+		} finally {
+			setExporting(false);
+		}
 		setConfirmOpen(false);
 		setPanel("list");
-		toast({
-			title: `已记录 ${selected.name} 的部署目标（${ids.length} 台主机）`,
-			description: `用户 ${deployUser} · 实际写入 ~/.ssh/authorized_keys 需要先建立 SSH 连接。`,
-			tone: "success",
-		});
+		if (ok.length > 0) {
+			toast({
+				title: "导出成功",
+				description: `已导出公钥到 ${ok.join("、")} 的 ~/${exportLocation}/${exportFilename}`,
+				tone: "success",
+			});
+		}
+		if (failed.length > 0) {
+			toast({ title: "导出失败", description: failed.join("\n"), tone: "danger" });
+		}
+	}
+
+	/** 右键「导出密钥」：选中并定位到导出卡片 */
+	function openExport(key: SshKey) {
+		setSelectedId(key.id);
+		requestAnimationFrame(() => deployCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
 	}
 
 	return (
@@ -312,6 +366,11 @@ export default function Keys() {
 										key={key.id}
 										type="button"
 										onClick={() => setSelectedId(key.id)}
+										onContextMenu={(event) => {
+											event.preventDefault();
+											setSelectedId(key.id);
+											setMenu({ x: event.clientX, y: event.clientY, key });
+										}}
 										className={cn(
 											"w-full cursor-pointer rounded border p-2.5 text-left transition-colors",
 											active ? "border-border bg-surface-raised shadow-sm" : "border-transparent bg-surface hover:border-border",
@@ -428,8 +487,8 @@ export default function Keys() {
 								</div>
 							</div>
 
-							{/* 部署公钥到远程主机卡片 */}
-							<div className="rounded-lg border border-border bg-surface-raised p-5 shadow-sm">
+							{/* 部署公钥到远程主机卡片（Netcatty「导出密钥」） */}
+							<div ref={deployCardRef} className="rounded-lg border border-border bg-surface-raised p-5 shadow-sm">
 								<div className="flex items-center gap-2 border-b border-border pb-3">
 									<span className="flex size-5 items-center justify-center rounded bg-primary/15 text-primary">
 										<span className="icon-[lucide--shield-plus] size-3" />
@@ -437,7 +496,7 @@ export default function Keys() {
 									<div>
 										<h3 className="text-[13px] font-semibold text-surface-foreground">部署公钥到远程主机</h3>
 										<p className="text-[11px] text-muted">
-											实际写入远端 ~/.ssh/authorized_keys 需要建立 SSH 连接；当前版本只在本机记录部署目标
+											在主机已连接的终端会话上执行导出脚本，追加到登录用户的 ~/{exportLocation || ".ssh"}/{exportFilename || "authorized_keys"}
 										</p>
 									</div>
 									<span className="ml-auto font-mono text-[10.5px] text-faint">已选 {selectedHosts.length} 台</span>
@@ -494,16 +553,21 @@ export default function Keys() {
 											</div>
 
 											<div className="space-y-3">
-												<Field label="登录用户名" hint="写入哪个用户的 authorized_keys">
-													<Input value={deployUser} onChange={(e) => setDeployUser(e.target.value)} className="h-7.5 font-mono" />
+												<Field label="位置 ~ $1" required error={exportLocation.trim() ? undefined : "位置不能为空"}>
+													<Input value={exportLocation} onChange={(e) => setExportLocation(e.target.value)} className="h-7.5 font-mono" />
+												</Field>
+												<Field label="文件名 ~ $2" required error={exportTargetError && exportLocation.trim() ? exportTargetError : undefined}>
+													<Input value={exportFilename} onChange={(e) => setExportFilename(e.target.value)} className="h-7.5 font-mono" />
 												</Field>
 												<div className="space-y-1">
 													<span className="font-mono text-[10px] tracking-wider text-faint uppercase">目标路径</span>
-													<ReadonlyValue>/home/{deployUser || "deploy"}/.ssh/authorized_keys</ReadonlyValue>
+													<ReadonlyValue>
+														~/{exportLocation || "—"}/{exportFilename || "—"}
+													</ReadonlyValue>
 												</div>
 												<div className="flex items-start gap-1.5 rounded border border-border bg-surface p-2 text-[10.5px] leading-4 text-faint">
 													<span className="icon-[lucide--info] mt-px size-3 shrink-0" />
-													<span>写入前会先备份原文件为 authorized_keys.bak，已存在的相同公钥自动跳过。</span>
+													<span>写入前会先备份原文件为 {exportFilename || "authorized_keys"}.bak，已存在的相同公钥自动跳过。</span>
 												</div>
 											</div>
 										</div>
@@ -515,7 +579,7 @@ export default function Keys() {
 											</span>
 											<div className="rounded border border-border bg-term p-2.5 font-mono text-[11px] leading-relaxed break-all text-term-ink">
 												<div className="text-faint">
-													# {selectedHosts.length} 台主机 · 用户 {deployUser || "deploy"} · 追加模式（&gt;&gt;）
+													# {selectedHosts.length} 台主机 · 登录用户的 ~/{exportLocation}/{exportFilename} · 追加模式（&gt;&gt;）
 												</div>
 												<div>{selected.publicKey}</div>
 											</div>
@@ -529,10 +593,10 @@ export default function Keys() {
 											<Button
 												variant="primary"
 												icon="icon-[lucide--send]"
-												disabled={selectedHosts.length === 0}
+												disabled={selectedHosts.length === 0 || exportTargetError !== null}
 												onClick={() => setConfirmOpen(true)}
 											>
-												记录部署目标
+												导出到所选主机
 											</Button>
 										</div>
 									</>
@@ -650,7 +714,7 @@ export default function Keys() {
 						setConfirmOpen(false);
 						if (panel === "deploy") setPanel("list");
 					}}
-					title="确认部署目标"
+					title="密钥导出"
 					icon="icon-[lucide--shield-plus]"
 					width={480}
 					footer={
@@ -663,25 +727,29 @@ export default function Keys() {
 							>
 								取消
 							</Button>
-							<Button variant="primary" icon="icon-[lucide--send]" onClick={handleDeploy}>
-								确认记录
+							<Button variant="primary" icon="icon-[lucide--send]" disabled={exporting} onClick={() => void handleDeploy()}>
+								{exporting ? "导出中..." : "导出"}
 							</Button>
 						</>
 					}
 				>
 					<p className="mb-2">
-						将把 <span className="font-mono text-surface-foreground">{selected?.name ?? "—"}</span> 记录为部署到下列{" "}
-						{selectedHosts.length} 台主机的{" "}
-						<span className="font-mono">/home/{deployUser || "deploy"}/.ssh/authorized_keys</span>。
+						将把 <span className="font-mono text-surface-foreground">{selected?.name ?? "—"}</span> 追加到下列{" "}
+						{selectedHosts.length} 台主机登录用户的{" "}
+						<span className="font-mono">
+							~/{exportLocation}/{exportFilename}
+						</span>
+						。
 					</p>
 					<div className="mb-2 space-y-1">
 						{selectedHosts.map((host) => (
 							<div key={host.id} className="flex items-center gap-2">
 								<span className="font-mono text-[11px] text-surface-foreground">{host.name}</span>
 								<span className="font-mono text-[10.5px] text-faint">
-									{deployUser || "deploy"}@{host.hostname}:{host.port}
+									{host.username}@{host.hostname}:{host.port}
 								</span>
 								{deployed.includes(host.id) && <Badge className="border-success/40 text-success">已在记录中</Badge>}
+								{!liveSessionFor(host.id) && <Badge className="border-warning/40 text-warning">未连接，将跳过</Badge>}
 							</div>
 						))}
 					</div>
@@ -690,9 +758,33 @@ export default function Keys() {
 					</div>
 					<p className="mt-2 flex items-center gap-1.5 text-[10.5px] text-faint">
 						<span className="icon-[lucide--info] size-3" />
-						真正写入远端文件需要 SSH 连接：TermX 目前只在本机记录部署目标。
+						通过该主机已连接的终端会话执行；已存在相同公钥会跳过，追加前原文件备份为 .bak。
 					</p>
 				</Modal>
+
+				{menu && (
+					<ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} label="密钥菜单">
+						<MenuItem
+							icon="icon-[lucide--copy]"
+							label="复制公钥"
+							disabled={!menu.key.publicKey}
+							onClick={() => (copyText(menu.key.publicKey, "公钥"), setMenu(null))}
+						/>
+						<MenuItem icon="icon-[lucide--upload]" label="导出密钥" onClick={() => (openExport(menu.key), setMenu(null))} />
+						<MenuItem icon="icon-[lucide--edit-3]" label="编辑" onClick={() => (openEdit(menu.key), setMenu(null))} />
+						<MenuSeparator />
+						<MenuItem
+							icon="icon-[lucide--trash-2]"
+							label="删除"
+							danger
+							onClick={() => {
+								setSelectedId(menu.key.id);
+								setDeleteOpen(true);
+								setMenu(null);
+							}}
+						/>
+					</ContextMenu>
+				)}
 
 				{/* 删除确认 */}
 				<Modal

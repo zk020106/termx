@@ -40,6 +40,16 @@ interface SessionsState {
 	splitPane: (tabId?: string, direction?: "horizontal" | "vertical") => string | null;
 	splitPaneWithHost: (targetTabId: string, hostId: string | null, direction?: "horizontal" | "vertical") => string | null;
 	closePane: (paneId: string) => void;
+	/* ---- Netcatty 对齐 ---- */
+	/** 只重连这一格（Netcatty 终端菜单「重新连接」针对的是这条会话） */
+	reconnectPane: (paneId: string) => void;
+	/** 「从工作区移出」：把分屏里的这一格（连同它的活会话）挪到紧挨着的新标签 */
+	detachPane: (paneId: string) => string | null;
+	/** 「复制标签页」：按原布局复制整个标签，每格各开一条新会话，插在原标签右侧 */
+	copyTab: (tabId: string) => string | null;
+	/** 「复制会话」：同主机开一条全新连接的单格标签，插在原标签右侧 */
+	duplicateSession: (tabId: string) => string | null;
+	setPaneTitle: (paneId: string, title: string) => void;
 }
 
 let seq = 0;
@@ -311,6 +321,112 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 
 		return id;
 	},
+
+	reconnectPane: (paneId) => {
+		const s = get();
+		const pane = s.panes.find((p) => p.id === paneId);
+		if (!pane) return;
+		if (pane.sessionKey) void closeSshSession(pane.sessionKey);
+		else closePty(pane.id);
+		const newKey = pane.hostId ? newSshSessionKey(pane.hostId) : null;
+		// 本地格换一个 id，让终端组件重建并重新起 PTY
+		const id = pane.hostId ? pane.id : `pane-${++seq}`;
+		const status: ConnectionStatus = pane.hostId ? "connecting" : "connected";
+		const tab = s.tabs.find((t) => t.id === pane.tabId);
+		const firstOfTab = s.panes.find((p) => p.tabId === pane.tabId)?.id === pane.id;
+		set({
+			panes: s.panes.map((p) => (p.id === paneId ? { ...p, id, sessionKey: newKey, status, lines: [] } : p)),
+			tabs:
+				tab && firstOfTab
+					? s.tabs.map((t) => (t.id === tab.id ? { ...t, sessionKey: newKey, status } : t))
+					: s.tabs,
+			focusedPaneId: s.focusedPaneId === paneId ? id : s.focusedPaneId,
+		});
+	},
+
+	detachPane: (paneId) => {
+		const s = get();
+		const pane = s.panes.find((p) => p.id === paneId);
+		if (!pane?.tabId) return null;
+		const sourceTab = s.tabs.find((t) => t.id === pane.tabId);
+		const siblings = s.panes.filter((p) => p.tabId === pane.tabId && p.id !== paneId);
+		if (!sourceTab || siblings.length === 0) return null;
+		const id = `tab-${++seq}`;
+		const tab: SessionTab = {
+			id,
+			hostId: pane.hostId,
+			sessionKey: pane.sessionKey,
+			title: pane.title,
+			status: pane.status,
+			layout: "single",
+			broadcasting: false,
+		};
+		const sourceLayout: SplitLayout = siblings.length <= 1 ? "single" : siblings.length === 2 ? sourceTab.layout === "vertical" ? "vertical" : "horizontal" : "grid";
+		const index = s.tabs.findIndex((t) => t.id === sourceTab.id);
+		const tabs = s.tabs.map((t) => {
+			if (t.id !== sourceTab.id) return t;
+			// 原标签的主会话被挪走时，改由剩下的第一格代表
+			const head = siblings[0];
+			return t.sessionKey === pane.sessionKey
+				? { ...t, layout: sourceLayout, sessionKey: head.sessionKey, hostId: head.hostId, status: head.status }
+				: { ...t, layout: sourceLayout };
+		});
+		tabs.splice(index + 1, 0, tab);
+		set({
+			tabs,
+			panes: s.panes.map((p) => (p.id === paneId ? { ...p, tabId: id } : p)),
+			activeTabId: id,
+			focusedPaneId: paneId,
+		});
+		return id;
+	},
+
+	copyTab: (tabId) => {
+		const s = get();
+		const source = s.tabs.find((t) => t.id === tabId);
+		if (!source) return null;
+		const sourcePanes = s.panes.filter((p) => p.tabId === tabId);
+		const id = `tab-${++seq}`;
+		const panes: TerminalPane[] = sourcePanes.map((p) => ({
+			...p,
+			id: `pane-${++seq}`,
+			tabId: id,
+			sessionKey: p.hostId ? newSshSessionKey(p.hostId) : null,
+			status: (p.hostId ? "connecting" : "connected") as ConnectionStatus,
+			lines: [],
+		}));
+		const head = panes[0];
+		const tab: SessionTab = {
+			...source,
+			id,
+			sessionKey: head?.sessionKey ?? null,
+			status: head?.status ?? "connected",
+			broadcasting: false,
+		};
+		const tabs = [...s.tabs];
+		tabs.splice(s.tabs.findIndex((t) => t.id === tabId) + 1, 0, tab);
+		set({ tabs, panes: [...s.panes, ...panes], activeTabId: id, focusedPaneId: head?.id ?? s.focusedPaneId });
+		return id;
+	},
+
+	duplicateSession: (tabId) => {
+		const s = get();
+		const source = s.tabs.find((t) => t.id === tabId);
+		if (!source) return null;
+		const id = s.openSession(source.hostId, null, source.title);
+		// openSession 追加在末尾；挪到原标签右侧（Netcatty insertCopiedTabOrderIdOnce）
+		set((state) => {
+			const created = state.tabs.find((t) => t.id === id);
+			if (!created) return {};
+			const rest = state.tabs.filter((t) => t.id !== id);
+			rest.splice(rest.findIndex((t) => t.id === tabId) + 1, 0, created);
+			return { tabs: rest };
+		});
+		return id;
+	},
+
+	setPaneTitle: (paneId, title) =>
+		set((s) => ({ panes: s.panes.map((p) => (p.id === paneId ? { ...p, title } : p)) })),
 
 	closePane: (paneId) => {
 		const s = get();

@@ -1,15 +1,65 @@
 import { EmptyState, SectionLabel } from "@/components/ui/Display";
+import { ContextMenu, MenuItem } from "@/components/ui/Menu";
+import type { Snippet } from "@/data/types";
+import { useSessionsStore, writeToPane } from "@/store/sessions";
 import { useSnippetsStore } from "@/store/snippets";
 import { toast } from "@/store/toast";
 import { useState } from "react";
+import { useNavigate } from "react-router";
 
 /* 右侧工具面板里的命令片段速用条：不离开工作区就能发一条常用命令。
  * 数据来自用户自己的片段库（useSnippetsStore，自动落盘）。
- * 完整管理（增删改、变量填写、目标选择）在 /snippets 界面。 */
+ * 单击 = 发送到焦点终端（有变量的片段跳到 /snippets 填写）；
+ * 右键对齐 Netcatty ScriptsSidePanel：在所有标签页运行 / 编辑 / 删除。 */
+
+function toPayload(command: string): string {
+	return `${command.replace(/\r?\n/g, "\r")}\r`;
+}
 
 export function SnippetsMiniPanel({ hostName }: { hostName?: string }) {
 	const snippets = useSnippetsStore((s) => s.snippets);
+	const removeSnippet = useSnippetsStore((s) => s.remove);
+	const navigate = useNavigate();
 	const [query, setQuery] = useState("");
+	const [menu, setMenu] = useState<{ x: number; y: number; item: Snippet } | null>(null);
+
+	const needsVariables = (s: Snippet) => {
+		if (s.variables.length === 0) return false;
+		navigate(`/snippets?id=${encodeURIComponent(s.id)}`);
+		toast({ title: `「${s.name}」有 ${s.variables.length} 个变量，请先填写再发送`, tone: "default" });
+		return true;
+	};
+
+	const sendToFocused = (s: Snippet) => {
+		if (needsVariables(s)) return;
+		const { panes, focusedPaneId } = useSessionsStore.getState();
+		const pane = panes.find((p) => p.id === focusedPaneId) ?? panes[0];
+		if (!pane) {
+			toast({ title: "没有可运行的终端", description: "先在主机库打开一个会话。", tone: "warning" });
+			return;
+		}
+		if (writeToPane(pane, toPayload(s.command))) {
+			toast({ title: `已发送：${s.name}`, description: hostName ?? "当前终端", tone: "success" });
+		} else {
+			toast({ title: "终端未就绪", description: "焦点终端的会话还没连上或已断开。", tone: "warning" });
+		}
+	};
+
+	/** Netcatty「在所有标签页运行」：写入每个已打开的终端格 */
+	const sendToAll = (s: Snippet) => {
+		if (needsVariables(s)) return;
+		const { panes } = useSessionsStore.getState();
+		let sent = 0;
+		for (const pane of panes) if (writeToPane(pane, toPayload(s.command))) sent++;
+		const skipped = panes.length - sent;
+		if (sent === 0) toast({ title: "没有可运行的终端", tone: "warning" });
+		else
+			toast({
+				title: `已发送到 ${sent} 个终端：${s.name}`,
+				description: skipped > 0 ? `有 ${skipped} 个终端未连接，已跳过` : undefined,
+				tone: skipped > 0 ? "warning" : "success",
+			});
+	};
 
 	if (snippets.length === 0) {
 		return (
@@ -50,12 +100,11 @@ export function SnippetsMiniPanel({ hostName }: { hostName?: string }) {
 										<button
 											key={s.id}
 											type="button"
-											onClick={() =>
-												toast({
-													title: `已发送：${s.name}`,
-													description: `${hostName ?? "当前终端"} · ${s.variables.length > 0 ? `需要填写 ${s.variables.length} 个变量` : "无变量"}`,
-												})
-											}
+											onClick={() => sendToFocused(s)}
+											onContextMenu={(e) => {
+												e.preventDefault();
+												setMenu({ x: e.clientX, y: e.clientY, item: s });
+											}}
 											className="group flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left transition-colors hover:bg-surface-raised"
 										>
 											<span className="flex items-center gap-1.5">
@@ -75,6 +124,30 @@ export function SnippetsMiniPanel({ hostName }: { hostName?: string }) {
 					))
 				)}
 			</div>
+
+			{menu && (
+				<ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} label="片段菜单">
+					<MenuItem icon="icon-[lucide--layers]" label="在所有标签页运行" onClick={() => (sendToAll(menu.item), setMenu(null))} />
+					<MenuItem
+						icon="icon-[lucide--edit-2]"
+						label="编辑"
+						onClick={() => {
+							setMenu(null);
+							navigate(`/snippets?edit=${encodeURIComponent(menu.item.id)}`);
+						}}
+					/>
+					<MenuItem
+						icon="icon-[lucide--trash-2]"
+						label="删除"
+						danger
+						onClick={() => {
+							removeSnippet(menu.item.id);
+							toast({ title: `已删除片段 ${menu.item.name}`, tone: "default" });
+							setMenu(null);
+						}}
+					/>
+				</ContextMenu>
+			)}
 		</div>
 	);
 }

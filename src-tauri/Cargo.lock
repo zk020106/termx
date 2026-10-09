@@ -5108,6 +5108,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
  "encoding_rs",
+ "flate2",
  "hmac",
  "keyring",
  "portable-pty",

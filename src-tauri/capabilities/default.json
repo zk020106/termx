@@ -65,6 +65,13 @@
 		"allow-fs-local-remove",
 		"allow-fs-local-rename",
 		"allow-fs-local-read-file",
-		"allow-fs-local-write-file"
+		"allow-fs-local-write-file",
+		"allow-fs-open-path",
+		"allow-fs-open-with",
+		"allow-fs-temp-file-path",
+		"allow-fs-local-extract",
+		"allow-fs-local-copy",
+		"allow-known-hosts-list",
+		"allow-known-hosts-remove"
 	]
 }

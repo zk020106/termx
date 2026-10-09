@@ -9,8 +9,12 @@ import { type TerminalHandle, type TerminalMatchInfo } from "@/components/termin
 import { TerminalPane } from "@/components/terminal/TerminalPane";
 import { Button, IconButton, Kbd } from "@/components/ui/Button";
 import { StatusDot } from "@/components/ui/Display";
-import { Input } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Overlay";
+import { PromptModal } from "@/components/ui/PromptModal";
+import { ContextMenu, MenuHeader, MenuItem, MenuSeparator } from "@/components/ui/Menu";
+import { isMiddleClickContextMenuEvent, resolveTerminalRightClick } from "@/components/terminal/terminalMenu";
+import { matchHotkey, onTerminalRequest, shouldSkipHotkeyForTarget, useHotkeyContext } from "@/lib/hotkeys";
+import { shortcutLabel } from "@/lib/keyBindings";
 import {
 	type Host,
 	type SessionTab,
@@ -22,12 +26,16 @@ import { getHostVisual } from "@/lib/hostVisual";
 import { probeHost } from "@/lib/probe";
 import { useHostStatus } from "@/lib/status";
 import { useForwardsStore } from "@/store/forwards";
-import { filterHosts, useHostsStore } from "@/store/hosts";
+import { filterHosts, groupPathLabel, orderGroupsAsTree, useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
 import { liveTabForHost, panesOfTab, useSessionsStore, writeToActiveTerminal } from "@/store/sessions";
 import { useSettingsStore } from "@/store/settings";
 import { useSnippetsStore } from "@/store/snippets";
 import { toast } from "@/store/toast";
+import { copyHostAddress, copyHostCredentials } from "@/lib/hostActions";
+import { secretDelete } from "@/lib/secret";
+import { proxySecretAccount } from "@/lib/configSecrets";
+import { useHostGroupDialogs } from "@/components/host/HostGroupDialogs";
 import { useTransfersStore } from "@/store/transfers";
 import { useUiStore } from "@/store/ui";
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
@@ -63,7 +71,28 @@ interface MenuState {
 	y: number;
 	paneId: string;
 	canCopy: boolean;
+	/** 断线可重连（Netcatty isReconnectable） */
+	canReconnect: boolean;
 }
+
+/** 由工作区处理的 Netcatty 键位动作（其余应用级动作在 WindowChrome） */
+const WORKSPACE_ACTIONS = new Set([
+	"switchToTab",
+	"nextTab",
+	"prevTab",
+	"closeTab",
+	"closeSession",
+	"newTab",
+	"openLocal",
+	"openHosts",
+	"openSftp",
+	"newWorkspace",
+	"splitHorizontal",
+	"splitVertical",
+	"moveFocus",
+	"broadcast",
+	"togglePaneZoom",
+]);
 
 interface TabMenuState {
 	x: number;
@@ -100,6 +129,10 @@ export default function Workspace() {
 	const embeddedSftpOpen = useUiStore((s) => s.embeddedSftpOpen);
 	const toggleEmbeddedSftp = useUiStore((s) => s.toggleEmbeddedSftp);
 	const rightClick = useSettingsStore((s) => s.rightClick);
+	const showContextMenuOverFullscreenApps = useSettingsStore((s) => s.showContextMenuOverFullscreenApps);
+	const tabDoubleClick = useSettingsStore((s) => s.tabDoubleClick);
+	const hotkeys = useHotkeyContext();
+	const kbd = (id: string) => shortcutLabel(hotkeys.bindings, id, hotkeys.scheme) || undefined;
 	const sftpFollowActiveTab = useSettingsStore((s) => s.sftpFollowActiveTab);
 	const setTerminal = useSettingsStore((s) => s.setTerminal);
 
@@ -114,9 +147,13 @@ export default function Workspace() {
 	const [pinnedSftpTabId, setPinnedSftpTabId] = useState<string | null>(null);
 	const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
 	const [renameValue, setRenameValue] = useState("");
+	const [renamingPane, setRenamingPane] = useState<{ id: string; value: string } | null>(null);
 	const [maximizedPaneId, setMaximizedPaneId] = useState<string | null>(null);
 	const [editingHostId, setEditingHostId] = useState<string | null | "new">(null);
 	const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+	/** 「复制」主机：以它为模板打开新建表单 */
+	const [duplicateFromId, setDuplicateFromId] = useState<string | null>(null);
+	const [renamingHost, setRenamingHost] = useState<Host | null>(null);
 
 	const sectionRef = useRef<HTMLElement | null>(null);
 	const hostSearchRef = useRef<HTMLInputElement | null>(null);
@@ -202,15 +239,21 @@ export default function Workspace() {
 		toast({ title: "已全选终端内容", tone: "default" });
 	};
 
+	const paneOffline = (paneId: string) => {
+		const pane = panes.find((p) => p.id === paneId);
+		return Boolean(pane && (pane.status === "disconnected" || pane.status === "failed"));
+	};
+
 	const openMenuAt = (event: ReactMouseEvent<HTMLDivElement>, paneId: string) => {
 		event.preventDefault();
 		if (!terminals.current.has(paneId)) return;
 		focusPane(paneId);
 		setMenu({
-			x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)),
-			y: Math.max(8, Math.min(event.clientY, window.innerHeight - 380)),
+			x: event.clientX,
+			y: event.clientY,
 			paneId,
 			canCopy: (handleFor(paneId)?.getSelection() ?? "").length > 0,
+			canReconnect: paneOffline(paneId),
 		});
 	};
 
@@ -231,6 +274,98 @@ export default function Workspace() {
 	}, [searchOpen, query, focusId, activeTabId]);
 
 	/* ---------------------------- 全局快捷键 ---------------------------- */
+
+	/** 终端里按了「打开终端搜索」（Netcatty Ctrl+F / ⌘F）→ 打开工作区搜索栏 */
+	useEffect(
+		() =>
+			onTerminalRequest((request) => {
+				if (request.kind !== "search") return;
+				focusPane(request.paneId);
+				setSearchOpen(true);
+			}),
+		[focusPane],
+	);
+
+	/** Netcatty AppHandlers 里属于标签 / 分屏的动作 */
+	const runWorkspaceAction = (action: string, event: KeyboardEvent): boolean => {
+		const order = ["vaults", ...tabs.map((t) => t.id)];
+		const current = isVaults ? "vaults" : (activeTab?.id ?? "vaults");
+		switch (action) {
+			case "switchToTab": {
+				const digit = Number.parseInt((event.code.match(/^Digit([1-9])$/) ?? [])[1] ?? event.key, 10);
+				const target = order[digit - 1];
+				if (!target) return false;
+				setActiveTab(target);
+				return true;
+			}
+			case "nextTab":
+			case "prevTab": {
+				if (order.length < 2) return false;
+				const index = order.indexOf(current);
+				const next = order[(index + (action === "nextTab" ? 1 : -1) + order.length) % order.length];
+				setActiveTab(next);
+				return true;
+			}
+			case "closeTab":
+				if (!activeTab) return false;
+				onCloseTab(activeTab);
+				return true;
+			case "closeSession":
+				if (!activeTab) return false;
+				if (gridPanes.length > 1) useSessionsStore.getState().closePane(focusId);
+				else onCloseTab(activeTab);
+				return true;
+			case "newTab":
+			case "openLocal":
+			case "newWorkspace":
+				onNewTab();
+				return true;
+			case "openHosts":
+				setActiveTab("vaults");
+				return true;
+			case "openSftp":
+				if (activeTab) toggleEmbeddedSftp();
+				else navigate("/sftp");
+				return true;
+			case "splitHorizontal":
+				splitRight();
+				return true;
+			case "splitVertical":
+				splitDown();
+				return true;
+			case "broadcast":
+				toggleBroadcastNow();
+				return Boolean(activeTab);
+			case "togglePaneZoom":
+				if (!activeTab) return false;
+				toggleMaximize(focusId);
+				return true;
+			case "moveFocus":
+				return moveFocus(event.key);
+			default:
+				return false;
+		}
+	};
+
+	/** Netcatty moveFocus：按方向在分屏格之间移动焦点（termx 的格子按 2 列网格排布） */
+	const moveFocus = (key: string): boolean => {
+		if (gridPanes.length < 2) return false;
+		const layout = activeTab?.layout ?? "single";
+		const cols = layout === "vertical" ? 1 : layout === "horizontal" ? gridPanes.length : 2;
+		const index = Math.max(0, gridPanes.findIndex((p) => p.id === focusId));
+		const row = Math.floor(index / cols);
+		const col = index % cols;
+		let next = index;
+		if (key === "ArrowLeft" && col > 0) next = index - 1;
+		if (key === "ArrowRight" && col < cols - 1 && index + 1 < gridPanes.length) next = index + 1;
+		if (key === "ArrowUp" && row > 0) next = index - cols;
+		if (key === "ArrowDown" && index + cols < gridPanes.length) next = index + cols;
+		if (next === index) return true;
+		const target = gridPanes[next];
+		focusPane(target.id);
+		handleFor(target.id)?.focus();
+		return true;
+	};
 
 	useEffect(() => {
 		// 工作区常驻：隐藏时（在别的界面）不响应自己的快捷键
@@ -268,8 +403,21 @@ export default function Workspace() {
 				}
 				return;
 			}
+
+			// Netcatty 键位表（可在 设置 → 快捷键 里改）
+			const binding = matchHotkey(event);
+			if (binding && WORKSPACE_ACTIONS.has(binding.action)) {
+				if (shouldSkipHotkeyForTarget(event, binding)) return;
+				if (runWorkspaceAction(binding.action, event)) {
+					event.preventDefault();
+					event.stopPropagation();
+				}
+				return;
+			}
+
 			if (!(event.ctrlKey || event.metaKey)) return;
 
+			// termx 原有、与 Netcatty 默认键位不冲突的快捷键继续保留
 			if (event.shiftKey && key === "f") {
 				event.preventDefault();
 				if (searchOpen) closeSearch();
@@ -281,53 +429,14 @@ export default function Workspace() {
 				toggleBroadcastNow();
 				return;
 			}
-			if (event.shiftKey && key === "d") {
-				event.preventDefault();
-				splitRight();
-				return;
-			}
-			if (event.shiftKey && key === "e") {
-				event.preventDefault();
-				splitDown();
-				return;
-			}
 			if (event.shiftKey && key === "m") {
 				event.preventDefault();
 				toggleMaximize(focusId);
-				return;
-			}
-			if (event.shiftKey && key === "a") {
-				event.preventDefault();
-				selectAll(focusId);
-				return;
-			}
-			if (event.shiftKey && key === "s") {
-				event.preventDefault();
-				toggleEmbeddedSftp();
-				return;
-			}
-			if (event.shiftKey && key === "w") {
-				event.preventDefault();
-				if (gridPanes.length > 1) {
-					useSessionsStore.getState().closePane(focusId);
-				} else if (activeTab) {
-					onCloseTab(activeTab);
-				}
-				return;
-			}
-			if (!event.shiftKey && key === "p") {
-				event.preventDefault();
-				hostSearchRef.current?.focus();
-				return;
-			}
-			if (!event.shiftKey && key === "l") {
-				event.preventDefault();
-				handleFor(focusId)?.clear();
 			}
 		};
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, [menu, tabMenu, renamingTabId, searchOpen, focusId, activeTab, effectiveMaximizedPaneId, gridPanes.length, screenActive]);
+	});
 
 	/* ------------------------------ 交互动作 ---------------------------- */
 
@@ -346,26 +455,28 @@ export default function Workspace() {
 		setActiveTab(newTabId);
 	};
 
+	/** Netcatty「复制会话」：全新连接 */
 	const duplicateTab = (tabId: string) => {
 		const tab = tabs.find((t) => t.id === tabId);
 		if (!tab) return;
-		const newId = useSessionsStore.getState().openSession(tab.hostId);
-		setActiveTab(newId);
+		useSessionsStore.getState().duplicateSession(tabId);
 		setTabMenu(null);
-		toast({ title: `已复制标签：${tab.title}`, tone: "default" });
+		toast({ title: `已复制会话：${tab.title}`, tone: "default" });
+	};
+
+	/** Netcatty「复制标签页」：按原布局复制整个标签 */
+	const copyTab = (tabId: string) => {
+		const tab = tabs.find((t) => t.id === tabId);
+		if (!tab) return;
+		useSessionsStore.getState().copyTab(tabId);
+		setTabMenu(null);
+		toast({ title: `已复制标签页：${tab.title}`, tone: "default" });
 	};
 
 	const reconnectTab = (tabId: string) => {
 		useSessionsStore.getState().reconnectTab(tabId);
 		setTabMenu(null);
 		toast({ title: "正在重新连接", tone: "default" });
-	};
-
-	const closeOtherTabs = (tabId: string) => {
-		const others = tabs.filter((t) => t.id !== tabId);
-		others.forEach((t) => onCloseTab(t));
-		setActiveTab(tabId);
-		setTabMenu(null);
 	};
 
 	const handleRenameSubmit = () => {
@@ -543,20 +654,83 @@ export default function Workspace() {
 		);
 	};
 
+	/** 右键 / 中键菜单：判定逻辑照搬 Netcatty TerminalContextMenu.handleRightClick */
 	const onPaneContextMenu = (event: ReactMouseEvent<HTMLDivElement>, paneId: string) => {
-		if (rightClick === "menu") {
+		const handle = handleFor(paneId);
+		const outcome = resolveTerminalRightClick({
+			shiftKey: event.shiftKey,
+			middleClick: isMiddleClickContextMenuEvent(event.nativeEvent),
+			isAlternateScreen: handle?.isAlternateScreen() ?? false,
+			terminalMouseTrackingMode: handle?.getMouseTrackingMode(),
+			showReconnectAction: paneOffline(paneId),
+			forceMenuInAlternateScreen: showContextMenuOverFullscreenApps,
+			rightClickBehavior: rightClick,
+		});
+		if (outcome === "menu") {
 			openMenuAt(event, paneId);
 			return;
 		}
 		event.preventDefault();
+		// 全屏应用（tmux / vim）抓着鼠标：右键交给它自己
+		if (outcome === "suppress") return;
 		focusPane(paneId);
-		if (rightClick === "paste") void pasteIntoTerminal(paneId);
+		if (outcome === "paste") void pasteIntoTerminal(paneId);
+		else if (outcome === "select-word") handle?.selectWord();
 		else void copySelection(paneId);
 	};
 
-	const splitFromMenu = () => {
+	const pasteSelectionInto = (paneId: string) => {
 		closeMenu();
-		splitRight();
+		if (!handleFor(paneId)?.pasteSelection()) {
+			toast({ title: "没有选中的文本", tone: "warning" });
+		}
+	};
+
+	const renamePaneOrTab = (paneId: string) => {
+		closeMenu();
+		const pane = panes.find((p) => p.id === paneId);
+		if (!pane) return;
+		const tab = tabs.find((t) => t.id === pane.tabId);
+		// 单格标签：会话就是标签本身，走标签的就地重命名
+		if (tab && panesOfTab(tab.id).length <= 1) {
+			setRenamingTabId(tab.id);
+			setRenameValue(tab.title);
+			return;
+		}
+		setRenamingPane({ id: pane.id, value: pane.title });
+	};
+
+	const detachPane = (paneId: string) => {
+		closeMenu();
+		if (effectiveMaximizedPaneId) setMaximizedPaneId(null);
+		if (useSessionsStore.getState().detachPane(paneId)) {
+			toast({ title: "已移出到新标签", tone: "default" });
+		}
+	};
+
+	const closeTabsWhere = (keep: (tab: SessionTab, index: number) => boolean, anchorId: string) => {
+		tabs.filter((t, i) => !keep(t, i)).forEach((t) => onCloseTab(t));
+		if (tabs.some((t) => t.id === anchorId) && keep(tabs.find((t) => t.id === anchorId)!, tabs.findIndex((t) => t.id === anchorId))) {
+			setActiveTab(anchorId);
+		}
+		setTabMenu(null);
+	};
+
+	const onTabDoubleClick = (tab: SessionTab) => {
+		switch (tabDoubleClick) {
+			case "rename":
+				setRenamingTabId(tab.id);
+				setRenameValue(tab.title);
+				return;
+			case "duplicate":
+				useSessionsStore.getState().duplicateSession(tab.id);
+				return;
+			case "copy":
+				useSessionsStore.getState().copyTab(tab.id);
+				return;
+			default:
+				return;
+		}
 	};
 
 	/* ------------------------------- 渲染 ------------------------------- */
@@ -600,8 +774,14 @@ export default function Workspace() {
 						onOpenSftp={handleOpenSftp}
 						onOpenForward={handleOpenForward}
 						onHostContextMenu={handleHostContextMenu}
-						onAddHost={() => setEditingHostId("new")}
-						onEditHost={(h) => setEditingHostId(h.id)}
+						onAddHost={(groupId) => {
+							setEditingGroupId(groupId ?? null);
+							setEditingHostId("new");
+						}}
+						onEditHost={(h) => {
+							setEditingGroupId(h.groupId);
+							setEditingHostId(h.id);
+						}}
 					/>
 				);
 		}
@@ -665,10 +845,7 @@ export default function Workspace() {
 								onSelect={() => setActiveTab(tab.id)}
 								onClose={() => onCloseTab(tab)}
 								onContextMenu={(e) => onTabContextMenu(e, tab.id)}
-								onDoubleClick={() => {
-									setRenamingTabId(tab.id);
-									setRenameValue(tab.title);
-								}}
+								onDoubleClick={() => onTabDoubleClick(tab)}
 							/>
 						))}
 
@@ -690,7 +867,7 @@ export default function Workspace() {
 										type="button"
 										onClick={toggleBroadcastNow}
 										className="flex items-center gap-1 rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
-										title="广播输入到全部终端（Ctrl Shift I）"
+										title={`广播输入到全部终端（${kbd("broadcast") ?? "Ctrl Shift I"}）`}
 									>
 										<span className="icon-[lucide--radio] size-3" />
 										广播中 · {gridPanes.length} 个终端
@@ -699,21 +876,21 @@ export default function Workspace() {
 
 								<IconButton
 									icon="icon-[lucide--columns-2]"
-									label="向右分屏 (Ctrl Shift D)"
+									label={`水平分屏${kbd("split-horizontal") ? ` (${kbd("split-horizontal")})` : ""}`}
 									className="size-5.5"
 									onClick={splitRight}
 								/>
 
 								<IconButton
 									icon="icon-[lucide--rows-2]"
-									label="向下分屏 (Ctrl Shift E)"
+									label={`垂直分屏${kbd("split-vertical") ? ` (${kbd("split-vertical")})` : ""}`}
 									className="size-5.5"
 									onClick={splitDown}
 								/>
 
 								<IconButton
 									icon="icon-[lucide--folder-tree]"
-									label="切换 SFTP 面板 (Ctrl Shift S)"
+									label={`切换 SFTP 面板${kbd("open-sftp") ? ` (${kbd("open-sftp")})` : ""}`}
 									className={cn("size-5.5", embeddedSftpOpen && "text-primary")}
 									onClick={toggleEmbeddedSftp}
 								/>
@@ -813,7 +990,7 @@ export default function Workspace() {
 									/>
 									<span className="text-[10px] text-faint">{activeHostLabel} · 当前分屏格</span>
 									<div className="ml-auto flex items-center gap-2">
-										<Kbd>Ctrl Shift F</Kbd>
+										<Kbd>{kbd("search-terminal") ?? "Ctrl Shift F"}</Kbd>
 										<IconButton icon="icon-[lucide--x]" label="关闭搜索 (Esc)" className="size-5.5" onClick={closeSearch} />
 									</div>
 								</div>
@@ -885,299 +1062,244 @@ export default function Workspace() {
 						</div>
 					)}
 
-					{/* 终端右键菜单 */}
+					{/* 终端右键菜单：项目、顺序、快捷键文案对齐 Netcatty TerminalContextMenu */}
 					{menu && (
-						<>
-							<div
-								className="fixed inset-0 z-40"
-								onMouseDown={closeMenu}
-								onContextMenu={(event) => {
-									event.preventDefault();
+						<ContextMenu x={menu.x} y={menu.y} width={225} onClose={closeMenu} label="终端菜单">
+							<MenuHeader title="终端" subtitle={panes.find((p) => p.id === menu.paneId)?.title ?? activeHost?.name ?? "本地终端"} />
+							<MenuItem icon="icon-[lucide--copy]" label="复制" kbd={kbd("copy")} disabled={!menu.canCopy} onClick={() => void copySelection(menu.paneId)} />
+							<MenuItem icon="icon-[lucide--clipboard-paste]" label="粘贴" kbd={kbd("paste")} onClick={() => void pasteIntoTerminal(menu.paneId)} />
+							<MenuItem
+								icon="icon-[lucide--clipboard-paste]"
+								label="粘贴选中文本"
+								kbd={kbd("paste-selection")}
+								disabled={!menu.canCopy}
+								onClick={() => pasteSelectionInto(menu.paneId)}
+							/>
+							<MenuItem icon="icon-[lucide--terminal]" label="全选" kbd={kbd("select-all")} onClick={() => selectAll(menu.paneId)} />
+							{menu.canReconnect && (
+								<>
+									<MenuSeparator />
+									<MenuItem
+										icon="icon-[lucide--refresh-ccw]"
+										label="重新连接"
+										onClick={() => {
+											closeMenu();
+											useSessionsStore.getState().reconnectPane(menu.paneId);
+										}}
+									/>
+								</>
+							)}
+							<MenuSeparator />
+							<MenuItem icon="icon-[lucide--square-split-horizontal]" label="水平分屏" kbd={kbd("split-horizontal")} onClick={() => { closeMenu(); splitRight(); }} />
+							<MenuItem icon="icon-[lucide--square-split-vertical]" label="垂直分屏" kbd={kbd("split-vertical")} onClick={() => { closeMenu(); splitDown(); }} />
+							<MenuSeparator />
+							<MenuItem
+								icon="icon-[lucide--trash-2]"
+								label="清空缓冲区"
+								kbd={kbd("clear-buffer")}
+								onClick={() => {
+									handleFor(menu.paneId)?.clear();
 									closeMenu();
 								}}
 							/>
-							<div
-								className="fixed z-50 w-[215px] rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover backdrop-blur-md ring-1 ring-black/5"
-								style={{ left: menu.x, top: menu.y }}
-							>
-								<MenuHeader title="终端" subtitle={activeHost?.name ?? "本地终端"} />
-								<MenuItem icon="icon-[lucide--copy]" label="复制" kbd="Ctrl Shift C" disabled={!menu.canCopy} onClick={() => void copySelection(menu.paneId)} />
-								<MenuItem icon="icon-[lucide--clipboard-paste]" label="粘贴" kbd="Ctrl Shift V" onClick={() => void pasteIntoTerminal(menu.paneId)} />
-								<MenuItem icon="icon-[lucide--check-check]" label="全选" kbd="Ctrl Shift A" onClick={() => selectAll(menu.paneId)} />
-								<MenuSeparator />
-								<MenuItem
-									icon="icon-[lucide--search]"
-									label="在终端中查找…"
-									kbd="Ctrl Shift F"
-									onClick={() => {
-										closeMenu();
-										setSearchOpen(true);
-									}}
-								/>
-								<MenuSeparator />
-								<MenuItem icon="icon-[lucide--columns-2]" label="向右分屏" kbd="Ctrl Shift D" onClick={splitFromMenu} />
-								<MenuItem icon="icon-[lucide--rows-2]" label="向下分屏" kbd="Ctrl Shift E" onClick={() => { closeMenu(); splitDown(); }} />
-								<MenuItem
-									icon={effectiveMaximizedPaneId === menu.paneId ? "icon-[lucide--minimize-2]" : "icon-[lucide--maximize-2]"}
-									label={effectiveMaximizedPaneId === menu.paneId ? "还原分屏" : "最大化分屏"}
-									kbd="Ctrl Shift M"
-									onClick={() => {
-										toggleMaximize(menu.paneId);
-										closeMenu();
-									}}
-								/>
-								<MenuSeparator />
-								<MenuItem
-									icon="icon-[lucide--folder-tree]"
-									label="打开 SFTP 面板"
-									kbd="Ctrl Shift S"
-									onClick={() => {
-										if (!embeddedSftpOpen) toggleEmbeddedSftp();
-										closeMenu();
-									}}
-								/>
-								<MenuItem
-									icon="icon-[lucide--eraser]"
-									label="清空屏幕"
-									kbd="Ctrl L"
-									onClick={() => {
-										handleFor(menu.paneId)?.clear();
-										closeMenu();
-										toast({ title: "已清屏", tone: "default" });
-									}}
-								/>
-								<MenuItem
-									icon="icon-[lucide--download]"
-									label="导出屏幕文本…"
-									onClick={() => {
-										handleFor(menu.paneId)?.saveScreen();
-										closeMenu();
-										toast({ title: "已保存屏幕内容", tone: "success" });
-									}}
-								/>
-								<MenuSeparator />
-								<MenuItem
-									icon="icon-[lucide--refresh-cw]"
-									label="重新连接"
-									onClick={() => {
-										const p = panes.find((pane) => pane.id === menu.paneId);
-										if (p) useSessionsStore.getState().setStatus(p.tabId ?? activeTab?.id ?? "", "connecting");
-										closeMenu();
-									}}
-								/>
-								<MenuItem
-									icon="icon-[lucide--x]"
-									label="关闭分屏"
-									kbd="Ctrl Shift W"
-									onClick={() => {
-										closeMenu();
-										if (gridPanes.length > 1) {
-											useSessionsStore.getState().closePane(menu.paneId);
-										} else if (activeTab) {
-											onCloseTab(activeTab);
-										}
-									}}
-								/>
-							</div>
-						</>
-					)}
-
-					{/* 标签右键菜单 */}
-					{tabMenu && (
-						<>
-							<div
-								className="fixed inset-0 z-40"
-								onMouseDown={() => setTabMenu(null)}
-								onContextMenu={(event) => {
-									event.preventDefault();
-									setTabMenu(null);
+							<MenuSeparator />
+							<MenuItem icon="icon-[lucide--pencil]" label="重命名" onClick={() => renamePaneOrTab(menu.paneId)} />
+							{gridPanes.length > 1 && (
+								<>
+									<MenuSeparator />
+									<MenuItem icon="icon-[lucide--square-arrow-out-up-right]" label="从工作区移出" onClick={() => detachPane(menu.paneId)} />
+								</>
+							)}
+							{/* termx 原有的终端操作（Netcatty 插件菜单的位置） */}
+							<MenuSeparator />
+							<MenuItem
+								icon="icon-[lucide--search]"
+								label="在终端中查找…"
+								kbd={kbd("search-terminal")}
+								onClick={() => {
+									closeMenu();
+									setSearchOpen(true);
 								}}
 							/>
-							<div
-								className="fixed z-50 w-[185px] rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover backdrop-blur-md ring-1 ring-black/5"
-								style={{ left: tabMenu.x, top: tabMenu.y }}
-							>
-								<MenuHeader title="会话标签" subtitle={tabs.find((t) => t.id === tabMenu.tabId)?.title ?? ""} />
-								<MenuItem
-									icon="icon-[lucide--copy]"
-									label="复制会话"
-									onClick={() => duplicateTab(tabMenu.tabId)}
-								/>
-								<MenuItem
-									icon="icon-[lucide--refresh-cw]"
-									label="重新连接"
-									onClick={() => reconnectTab(tabMenu.tabId)}
-								/>
-								<MenuItem
-									icon="icon-[lucide--edit-3]"
-									label="重命名…"
-									onClick={() => {
-										const tab = tabs.find((t) => t.id === tabMenu.tabId);
-										if (tab) {
-											setRenamingTabId(tab.id);
-											setRenameValue(tab.title);
-										}
-										setTabMenu(null);
-									}}
-								/>
-								<MenuSeparator />
-								<MenuItem
-									icon="icon-[lucide--columns-2]"
-									label="向右分屏"
-									kbd="Ctrl Shift D"
-									onClick={() => {
-										setTabMenu(null);
-										splitRight();
-									}}
-								/>
-								<MenuItem
-									icon="icon-[lucide--rows-2]"
-									label="向下分屏"
-									kbd="Ctrl Shift E"
-									onClick={() => {
-										setTabMenu(null);
-										splitDown();
-									}}
-								/>
-								<MenuSeparator />
-								<MenuItem
-									icon="icon-[lucide--x]"
-									label="关闭标签"
-									kbd="Ctrl Shift W"
-									onClick={() => {
-										const t = tabs.find((t) => t.id === tabMenu.tabId);
-										if (t) onCloseTab(t);
-										setTabMenu(null);
-									}}
-								/>
-								<MenuItem
-									icon="icon-[lucide--x-circle]"
-									label="关闭其他标签"
-									disabled={tabs.length <= 1}
-									onClick={() => closeOtherTabs(tabMenu.tabId)}
-								/>
-							</div>
-						</>
-					)}
-
-					{/* 主机全局右键上下文菜单 */}
-					{hostMenu && (
-						<>
-							<div
-								className="fixed inset-0 z-40"
-								onMouseDown={() => setHostMenu(null)}
-								onContextMenu={(event) => {
-									event.preventDefault();
-									setHostMenu(null);
+							<MenuItem
+								icon={effectiveMaximizedPaneId === menu.paneId ? "icon-[lucide--minimize-2]" : "icon-[lucide--maximize-2]"}
+								label={effectiveMaximizedPaneId === menu.paneId ? "还原分屏" : "最大化分屏"}
+								kbd={kbd("toggle-pane-zoom")}
+								onClick={() => {
+									toggleMaximize(menu.paneId);
+									closeMenu();
 								}}
 							/>
-							<div
-								className="fixed z-50 w-[215px] rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover backdrop-blur-md ring-1 ring-black/5"
-								style={{ left: hostMenu.x, top: hostMenu.y }}
-							>
-								<MenuHeader title="主机" subtitle={`${hostMenu.host.username}@${hostMenu.host.name}`} />
+							<MenuItem
+								icon="icon-[lucide--folder-tree]"
+								label="打开 SFTP 面板"
+								kbd={kbd("open-sftp")}
+								onClick={() => {
+									if (!embeddedSftpOpen) toggleEmbeddedSftp();
+									closeMenu();
+								}}
+							/>
+							<MenuItem
+								icon="icon-[lucide--download]"
+								label="导出屏幕文本…"
+								onClick={() => {
+									handleFor(menu.paneId)?.saveScreen();
+									closeMenu();
+									toast({ title: "已保存屏幕内容", tone: "success" });
+								}}
+							/>
+							<MenuSeparator />
+							<MenuItem
+								icon="icon-[lucide--trash-2]"
+								label="关闭终端"
+								danger
+								onClick={() => {
+									closeMenu();
+									if (gridPanes.length > 1) {
+										useSessionsStore.getState().closePane(menu.paneId);
+									} else if (activeTab) {
+										onCloseTab(activeTab);
+									}
+								}}
+							/>
+						</ContextMenu>
+					)}
+
+					{/* 标签右键菜单：Netcatty SessionTabContextMenuContent + TopTabs 批量关闭 */}
+					{tabMenu && (() => {
+						const menuTab = tabs.find((t) => t.id === tabMenu.tabId);
+						if (!menuTab) return null;
+						const index = tabs.findIndex((t) => t.id === menuTab.id);
+						const tabPanes = panesOfTab(menuTab.id);
+						const editHost = hostStore.hosts.find((h) => h.id === menuTab.hostId) ?? null;
+						return (
+							<ContextMenu x={tabMenu.x} y={tabMenu.y} width={200} onClose={() => setTabMenu(null)} label="标签菜单">
+								<MenuHeader title="会话标签" subtitle={menuTab.title} />
+								<MenuItem icon="icon-[lucide--copy-plus]" label="复制标签页" onClick={() => copyTab(menuTab.id)} />
+								<MenuItem icon="icon-[lucide--copy]" label="复制会话" onClick={() => duplicateTab(menuTab.id)} />
+								{tabPanes.length > 1 && (
+									<MenuItem
+										icon="icon-[lucide--square-arrow-out-up-right]"
+										label="从工作区移出"
+										onClick={() => {
+											setTabMenu(null);
+											const target = tabPanes.find((p) => p.id === focusedPaneId) ?? tabPanes[tabPanes.length - 1];
+											detachPane(target.id);
+										}}
+									/>
+								)}
 								<MenuItem
-									icon="icon-[lucide--terminal]"
-									label="连接终端"
+									icon="icon-[lucide--pencil]"
+									label="重命名"
 									onClick={() => {
-										onOpenHost(hostMenu.host);
-										setHostMenu(null);
+										setRenamingTabId(menuTab.id);
+										setRenameValue(menuTab.title);
+										setTabMenu(null);
 									}}
 								/>
+								{editHost && (
+									<MenuItem
+										icon="icon-[lucide--settings-2]"
+										label="编辑主机"
+										onClick={() => {
+											setEditingGroupId(editHost.groupId);
+											setEditingHostId(editHost.id);
+											setTabMenu(null);
+										}}
+									/>
+								)}
 								<MenuItem
-									icon="icon-[lucide--plus-square]"
-									label="在新标签打开"
+									icon="icon-[lucide--refresh-ccw]"
+									label="重新连接"
+									disabled={menuTab.status === "connecting"}
+									onClick={() => reconnectTab(menuTab.id)}
+								/>
+								{/* termx 原有：从标签直接分屏 */}
+								<MenuItem icon="icon-[lucide--square-split-horizontal]" label="水平分屏" kbd={kbd("split-horizontal")} onClick={() => { setTabMenu(null); setActiveTab(menuTab.id); splitRight(); }} />
+								<MenuItem icon="icon-[lucide--square-split-vertical]" label="垂直分屏" kbd={kbd("split-vertical")} onClick={() => { setTabMenu(null); setActiveTab(menuTab.id); splitDown(); }} />
+								<MenuItem
+									icon="icon-[lucide--x]"
+									label="关闭"
+									kbd={kbd("close-tab")}
+									danger
 									onClick={() => {
-										onOpenHostInNewTab(hostMenu.host);
-										setHostMenu(null);
+										onCloseTab(menuTab);
+										setTabMenu(null);
 									}}
 								/>
+								<MenuSeparator />
+								<MenuItem icon="icon-[lucide--x-circle]" label="关闭其他标签" disabled={tabs.length <= 1} onClick={() => closeTabsWhere((t) => t.id === menuTab.id, menuTab.id)} />
+								<MenuItem icon="icon-[lucide--arrow-left-to-line]" label="关闭左侧标签" disabled={index <= 0} onClick={() => closeTabsWhere((_, i) => i >= index, menuTab.id)} />
+								<MenuItem icon="icon-[lucide--arrow-right-to-line]" label="关闭右侧标签" disabled={index >= tabs.length - 1} onClick={() => closeTabsWhere((_, i) => i <= index, menuTab.id)} />
+								<MenuItem icon="icon-[lucide--circle-x]" label="关闭所有标签" onClick={() => closeTabsWhere(() => false, menuTab.id)} />
+							</ContextMenu>
+						);
+					})()}
+
+					{/* 主机右键菜单：Netcatty VaultHostListSection / HostTreeContextMenus 的条目与顺序
+					 * （连接 / 编辑 / 重命名 / 复制 / 复制主机地址 / 复制账密信息 / 置顶 / 删除），
+					 * 中间插入 termx 原有的新标签、分屏、SFTP、转发、测速、复制 SSH 命令 */}
+					{hostMenu && (() => {
+						const host = hostStore.hosts.find((h) => h.id === hostMenu.host.id) ?? hostMenu.host;
+						const act = (fn: () => void) => () => {
+							setHostMenu(null);
+							fn();
+						};
+						return (
+							<ContextMenu x={hostMenu.x} y={hostMenu.y} onClose={() => setHostMenu(null)} label="主机">
+								<MenuHeader title="主机" subtitle={`${host.username}@${host.name}`} icon="icon-[lucide--server]" />
+								<MenuItem icon="icon-[lucide--plug]" label="连接" onClick={act(() => onOpenHost(host))} />
+								<MenuItem icon="icon-[lucide--plus-square]" label="在新标签打开" onClick={act(() => onOpenHostInNewTab(host))} />
 								{!isVaults && (
 									<>
-										<MenuItem
-											icon="icon-[lucide--columns-2]"
-											label="向右分屏打开"
-											onClick={() => {
-												onSplitWithHost(hostMenu.host, "horizontal");
-												setHostMenu(null);
-											}}
-										/>
-										<MenuItem
-											icon="icon-[lucide--rows-2]"
-											label="向下分屏打开"
-											onClick={() => {
-												onSplitWithHost(hostMenu.host, "vertical");
-												setHostMenu(null);
-											}}
-										/>
+										<MenuItem icon="icon-[lucide--columns-2]" label="向右分屏打开" onClick={act(() => onSplitWithHost(host, "horizontal"))} />
+										<MenuItem icon="icon-[lucide--rows-2]" label="向下分屏打开" onClick={act(() => onSplitWithHost(host, "vertical"))} />
 									</>
 								)}
 								<MenuSeparator />
 								<MenuItem
-									icon="icon-[lucide--folder-tree]"
-									label="打开 SFTP 文件"
-									onClick={() => {
-										handleOpenSftp(hostMenu.host);
-										setHostMenu(null);
-									}}
+									icon="icon-[lucide--edit-2]"
+									label="编辑"
+									onClick={act(() => {
+										setEditingGroupId(host.groupId);
+										setEditingHostId(host.id);
+									})}
 								/>
-								<MenuItem
-									icon="icon-[lucide--arrow-left-right]"
-									label="端口转发规则"
-									onClick={() => {
-										handleOpenForward(hostMenu.host);
-										setHostMenu(null);
-									}}
-								/>
-								<MenuItem
-									icon="icon-[lucide--activity]"
-									label="网络测速 (TCP 探测)"
-									onClick={() => {
-										void handleProbeHost(hostMenu.host);
-										setHostMenu(null);
-									}}
-								/>
-								<MenuSeparator />
+								<MenuItem icon="icon-[lucide--pencil]" label="重命名" onClick={act(() => setRenamingHost(host))} />
 								<MenuItem
 									icon="icon-[lucide--copy]"
-									label="复制 IP 地址"
-									onClick={() => {
-										void navigator.clipboard?.writeText(hostMenu.host.hostname).catch(() => undefined);
-										toast({ title: `已复制 IP：${hostMenu.host.hostname}`, tone: "success" });
-										setHostMenu(null);
-									}}
+									label="复制"
+									onClick={act(() => {
+										setEditingGroupId(host.groupId);
+										setDuplicateFromId(host.id);
+										setEditingHostId("new");
+									})}
 								/>
+								<MenuItem icon="icon-[lucide--file-symlink]" label="复制主机地址" onClick={act(() => void copyHostAddress(host))} />
+								<MenuItem icon="icon-[lucide--clipboard-copy]" label="复制账密信息" onClick={act(() => void copyHostCredentials(host))} />
+								<MenuItem
+									icon="icon-[lucide--pin]"
+									label={host.pinned ? "取消置顶" : "置顶"}
+									onClick={act(() => useHostsStore.getState().togglePinned(host.id))}
+								/>
+								<MenuSeparator />
+								<MenuItem icon="icon-[lucide--folder-tree]" label="打开 SFTP 文件" onClick={act(() => handleOpenSftp(host))} />
+								<MenuItem icon="icon-[lucide--arrow-left-right]" label="端口转发规则" onClick={act(() => handleOpenForward(host))} />
+								<MenuItem icon="icon-[lucide--activity]" label="网络测速 (TCP 探测)" onClick={act(() => void handleProbeHost(host))} />
 								<MenuItem
 									icon="icon-[lucide--terminal-square]"
 									label="复制 SSH 登录命令"
-									onClick={() => {
-										const cmd = `ssh -p ${hostMenu.host.port} ${hostMenu.host.username}@${hostMenu.host.hostname}`;
+									onClick={act(() => {
+										const cmd = `ssh -p ${host.port} ${host.username}@${host.hostname}`;
 										void navigator.clipboard?.writeText(cmd).catch(() => undefined);
 										toast({ title: "已复制 SSH 命令", description: cmd, tone: "success" });
-										setHostMenu(null);
-									}}
+									})}
 								/>
 								<MenuSeparator />
-								<MenuItem
-									icon="icon-[lucide--settings-2]"
-									label="编辑主机配置…"
-									onClick={() => {
-										setEditingHostId(hostMenu.host.id);
-										setHostMenu(null);
-									}}
-								/>
-								<MenuItem
-									icon="icon-[lucide--trash-2]"
-									label="删除主机"
-									danger
-									onClick={() => {
-										setDeleteConfirmHost(hostMenu.host);
-										setHostMenu(null);
-									}}
-								/>
-							</div>
-						</>
-					)}
+								<MenuItem icon="icon-[lucide--trash-2]" label="删除" danger onClick={act(() => setDeleteConfirmHost(host))} />
+							</ContextMenu>
+						);
+					})()}
 				</section>
 			</div>
 
@@ -1186,16 +1308,45 @@ export default function Workspace() {
 				open={editingHostId !== null}
 				hostId={editingHostId === "new" ? null : editingHostId}
 				initialGroupId={editingGroupId}
+				duplicateFromId={editingHostId === "new" ? duplicateFromId : null}
 				onClose={() => {
 					setEditingHostId(null);
 					setEditingGroupId(null);
+					setDuplicateFromId(null);
 				}}
 				onSaved={(savedHost, andConnect) => {
 					setEditingHostId(null);
 					setEditingGroupId(null);
+					setDuplicateFromId(null);
 					if (andConnect) {
 						onOpenHost(savedHost);
 					}
+				}}
+			/>
+
+			{/* 分屏格重命名（Netcatty 终端菜单「重命名」） */}
+			<PromptModal
+				open={renamingPane !== null}
+				title="重命名"
+				label="会话名称"
+				initialValue={renamingPane?.value ?? ""}
+				onClose={() => setRenamingPane(null)}
+				onSubmit={(value) => {
+					if (renamingPane) useSessionsStore.getState().setPaneTitle(renamingPane.id, value);
+					setRenamingPane(null);
+				}}
+			/>
+
+			{/* 主机重命名（Netcatty HostTree「重命名」） */}
+			<PromptModal
+				open={renamingHost !== null}
+				title="重命名主机"
+				initialValue={renamingHost?.name ?? ""}
+				confirmText="保存"
+				onClose={() => setRenamingHost(null)}
+				onSubmit={(name) => {
+					if (renamingHost) useHostsStore.getState().renameHost(renamingHost.id, name);
+					setRenamingHost(null);
 				}}
 			/>
 
@@ -1215,6 +1366,9 @@ export default function Workspace() {
 							onClick={() => {
 								if (deleteConfirmHost) {
 									hostStore.removeHost(deleteConfirmHost.id);
+									// 钥匙串里这台主机的登录 / 代理口令一并清掉，不留孤儿凭据
+									void secretDelete(deleteConfirmHost.id).catch(() => undefined);
+									void secretDelete(proxySecretAccount(deleteConfirmHost.id)).catch(() => undefined);
 									toast({ title: `已删除主机「${deleteConfirmHost.name}」`, tone: "default" });
 								}
 								setDeleteConfirmHost(null);
@@ -1259,11 +1413,15 @@ function HostsSidebar({
 	onOpenForward?: (host: Host) => void;
 	onHostContextMenu?: (event: ReactMouseEvent, host: Host) => void;
 	hostSearchRef: React.RefObject<HTMLInputElement | null>;
-	onAddHost?: () => void;
+	onAddHost?: (groupId?: string | null) => void;
 	onEditHost?: (host: Host) => void;
 }) {
 	const navigate = useNavigate();
 	const hostStore = useHostsStore();
+	const groupDialogs = useHostGroupDialogs();
+	const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; groupId: string } | null>(null);
+	/** 空白处右键：Netcatty TerminalHostTreeSidebar「新建主机」 */
+	const [blankMenu, setBlankMenu] = useState<{ x: number; y: number } | null>(null);
 	const toggleEmbeddedSftp = useUiStore((s) => s.toggleEmbeddedSftp);
 	const embeddedSftpOpen = useUiStore((s) => s.embeddedSftpOpen);
 
@@ -1310,6 +1468,36 @@ function HostsSidebar({
 		}
 	};
 
+	const pinnedHosts = useMemo(() => displayHosts.filter((h) => h.pinned), [displayHosts]);
+	const groupTree = useMemo(() => orderGroupsAsTree(hostStore.groups), [hostStore.groups]);
+	/** 自己或任一后代分组里有（过滤后的）主机的分组 */
+	const groupHasHosts = useMemo(() => {
+		const out = new Set<string>();
+		const byId = new Map(hostStore.groups.map((g) => [g.id, g]));
+		for (const h of displayHosts) {
+			let cur = h.groupId ? byId.get(h.groupId) : undefined;
+			const seen = new Set<string>();
+			while (cur && !seen.has(cur.id)) {
+				seen.add(cur.id);
+				out.add(cur.id);
+				cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+			}
+		}
+		return out;
+	}, [hostStore.groups, displayHosts]);
+	const ancestorCollapsed = (groupId: string) => {
+		const byId = new Map(hostStore.groups.map((g) => [g.id, g]));
+		const seen = new Set<string>();
+		let cur = byId.get(groupId);
+		while (cur?.parentId && !seen.has(cur.id)) {
+			seen.add(cur.id);
+			if (collapsed[cur.parentId]) return true;
+			cur = byId.get(cur.parentId);
+		}
+		return false;
+	};
+	const menuGroup = groupMenu ? hostStore.groups.find((g) => g.id === groupMenu.groupId) : undefined;
+
 	return (
 		<div className="flex h-full flex-col bg-surface-sunk">
 			{/* 顶栏：标题 + 数量徽标 + 新建/工作台视图 */}
@@ -1324,7 +1512,7 @@ function HostsSidebar({
 				<div className="flex items-center gap-1">
 					<button
 						type="button"
-						onClick={onAddHost ? onAddHost : () => navigate("/hosts/new")}
+						onClick={onAddHost ? () => onAddHost() : () => navigate("/hosts/new")}
 						className="flex size-6 items-center justify-center rounded-md text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
 						title="新建主机"
 					>
@@ -1360,11 +1548,7 @@ function HostsSidebar({
 						>
 							<span className="icon-[lucide--x] size-2.5" />
 						</button>
-					) : (
-						<kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 font-mono text-[9px] text-faint bg-surface-raised px-1 py-0.2 rounded border border-border/40">
-							Ctrl P
-						</kbd>
-					)}
+					) : null}
 				</div>
 
 				{/* 现代分段切换胶囊 (Segmented Control) */}
@@ -1400,7 +1584,14 @@ function HostsSidebar({
 			</div>
 
 			{/* 可滚动的主机列表主体 */}
-			<div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2">
+			<div
+				className="min-h-0 flex-1 overflow-y-auto px-1.5 py-2"
+				onContextMenu={(e) => {
+					if (e.defaultPrevented) return;
+					e.preventDefault();
+					setBlankMenu({ x: e.clientX, y: e.clientY });
+				}}
+			>
 				{hostStore.query ? (
 					<>
 						<GroupLabel
@@ -1429,20 +1620,57 @@ function HostsSidebar({
 					</>
 				) : (
 					<>
-						{hostStore.groups.map((group) => {
+						{pinnedHosts.length > 0 && (
+							<div className="mb-2">
+								<GroupLabel
+									label="已置顶"
+									icon="icon-[lucide--pin] text-primary"
+									count={pinnedHosts.length}
+									collapsed={collapsed["__pinned"]}
+									onToggle={() => toggleCollapse("__pinned")}
+								/>
+								{!collapsed["__pinned"] && (
+									<div className="mt-1">
+										{pinnedHosts.map((host) => (
+											<HostItem
+												key={host.id}
+												host={host}
+												selected={host.id === activeHostId}
+												onOpen={() => onOpenHost(host)}
+												onOpenInNewTab={() => onOpenHostInNewTab?.(host)}
+												onOpenSftp={() => handleOpenSftp(host)}
+												onOpenForward={() => onOpenForward?.(host)}
+												onEdit={() => (onEditHost ? onEditHost(host) : navigate(`/hosts/${host.id}/edit`))}
+												onContextMenu={(e) => onHostContextMenu?.(e, host)}
+											/>
+										))}
+									</div>
+								)}
+							</div>
+						)}
+
+						{groupTree.map(({ group, depth }) => {
 							const members = displayHosts.filter((h) => h.groupId === group.id);
-							if (members.length === 0) return null;
+							// 有后代主机的父分组也要显示，否则子分组会「悬空」
+							if (members.length === 0 && !groupHasHosts.has(group.id)) return null;
+							// 任一祖先折叠时整棵子树都隐藏
+							if (ancestorCollapsed(group.id)) return null;
 							const isCollapsed = collapsed[group.id];
 							return (
-								<div key={group.id} className="mb-2">
+								<div key={group.id} className="mb-2" style={depth ? { marginLeft: depth * 10 } : undefined}>
 									<GroupLabel
 										label={group.name}
 										icon="icon-[lucide--folder] text-amber-500"
 										count={members.length}
 										collapsed={isCollapsed}
 										onToggle={() => toggleCollapse(group.id)}
+										onContextMenu={(e) => {
+											e.preventDefault();
+											e.stopPropagation();
+											setGroupMenu({ x: e.clientX, y: e.clientY, groupId: group.id });
+										}}
 									/>
-									{!isCollapsed && (
+									{!isCollapsed && members.length > 0 && (
 										<div className="mt-1">
 											{members.map((host) => (
 												<HostItem
@@ -1498,7 +1726,7 @@ function HostsSidebar({
 								<div className="text-[10px] text-faint mt-0.5">添加常用服务器开始快速连接</div>
 								<button
 									type="button"
-									onClick={onAddHost ? onAddHost : () => navigate("/hosts/new")}
+									onClick={onAddHost ? () => onAddHost() : () => navigate("/hosts/new")}
 									className="mt-2 inline-flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[10px] font-medium text-white hover:bg-primary-hover transition-colors cursor-pointer"
 								>
 									<span className="icon-[lucide--plus] size-3" />
@@ -1509,6 +1737,41 @@ function HostsSidebar({
 					</>
 				)}
 			</div>
+
+			{menuGroup && groupMenu && (
+				<HostGroupContextMenu
+					x={groupMenu.x}
+					y={groupMenu.y}
+					group={menuGroup}
+					onClose={() => setGroupMenu(null)}
+					onNewHost={() => onAddHost?.(menuGroup.id)}
+					onNewSubgroup={() => groupDialogs.openCreate(menuGroup.id)}
+					onRename={() => groupDialogs.openRename(menuGroup)}
+					onDelete={() => groupDialogs.openDelete(menuGroup)}
+				/>
+			)}
+			{blankMenu && (
+				<ContextMenu x={blankMenu.x} y={blankMenu.y} onClose={() => setBlankMenu(null)} label="主机列表">
+					<MenuItem
+						icon="icon-[lucide--plus]"
+						label="新建主机"
+						onClick={() => {
+							setBlankMenu(null);
+							if (onAddHost) onAddHost();
+							else navigate("/hosts/new");
+						}}
+					/>
+					<MenuItem
+						icon="icon-[lucide--folder-plus]"
+						label="新建分组"
+						onClick={() => {
+							setBlankMenu(null);
+							groupDialogs.openCreate(null);
+						}}
+					/>
+				</ContextMenu>
+			)}
+			{groupDialogs.dialogs}
 
 			{/* 底部活跃连接简报 */}
 			<div className="mt-auto border-t border-border/80 bg-surface/40 px-3 py-2 text-[10.5px]">
@@ -1938,23 +2201,65 @@ function panesForTab(tab: SessionTab, panes: TerminalPaneModel[]): TerminalPaneM
 	];
 }
 
+/**
+ * 分组右键菜单：Netcatty HostTreeContextMenus 的分组菜单（在此分组中新建主机 / 新建分组 / 重命名分组 / 删除分组），
+ * 其中「新建分组」按 Vault 列表的语义建为子分组（Netcatty VaultHostListSection「新建子分组」）。
+ */
+function HostGroupContextMenu({
+	x,
+	y,
+	group,
+	onClose,
+	onNewHost,
+	onNewSubgroup,
+	onRename,
+	onDelete,
+}: {
+	x: number;
+	y: number;
+	group: { id: string; name: string };
+	onClose: () => void;
+	onNewHost: () => void;
+	onNewSubgroup: () => void;
+	onRename: () => void;
+	onDelete: () => void;
+}) {
+	const act = (fn: () => void) => () => {
+		onClose();
+		fn();
+	};
+	return (
+		<ContextMenu x={x} y={y} onClose={onClose} label="分组">
+			<MenuHeader title="分组" subtitle={group.name} icon="icon-[lucide--folder]" />
+			<MenuItem icon="icon-[lucide--plus]" label="在此分组中新建主机" onClick={act(onNewHost)} />
+			<MenuItem icon="icon-[lucide--folder-plus]" label="新建子分组" onClick={act(onNewSubgroup)} />
+			<MenuItem icon="icon-[lucide--pencil]" label="重命名分组" onClick={act(onRename)} />
+			<MenuSeparator />
+			<MenuItem icon="icon-[lucide--trash-2]" label="删除分组" danger onClick={act(onDelete)} />
+		</ContextMenu>
+	);
+}
+
 function GroupLabel({
 	label,
 	icon,
 	count,
 	collapsed,
 	onToggle,
+	onContextMenu,
 }: {
 	label: string;
 	icon?: string;
 	count?: number;
 	collapsed?: boolean;
 	onToggle?: () => void;
+	onContextMenu?: (event: ReactMouseEvent) => void;
 }) {
 	return (
 		<button
 			type="button"
 			onClick={onToggle}
+			onContextMenu={onContextMenu}
 			className="group flex w-full items-center justify-between rounded-lg px-2 py-1 text-left select-none text-[11px] font-semibold tracking-tight text-muted hover:bg-surface hover:text-surface-foreground transition-all cursor-pointer"
 		>
 			<div className="flex items-center gap-1.5 min-w-0">
@@ -2038,6 +2343,7 @@ function HostItem({
 					{host.name}
 				</span>
 
+				{host.pinned && <span className="icon-[lucide--pin] size-3 shrink-0 text-primary" title="已置顶" />}
 				{host.favorite && (
 					<span className="icon-[lucide--star] size-3 shrink-0 text-amber-500 fill-amber-500" />
 				)}
@@ -2200,60 +2506,6 @@ function TabItem({
 	);
 }
 
-function MenuHeader({ title, subtitle }: { title: string; subtitle: string }) {
-	return (
-		<div className="flex items-center gap-2 border-b border-border px-2.5 pt-1 pb-1.5 text-[10px] text-faint">
-			<span className="icon-[lucide--square-terminal] size-3 text-muted" />
-			<span className="text-muted">{title}</span>
-			<span className="truncate font-mono">{subtitle}</span>
-		</div>
-	);
-}
-
-function MenuSeparator() {
-	return <div className="my-1 border-t border-border" />;
-}
-
-function MenuItem({
-	icon,
-	label,
-	kbd,
-	disabled,
-	danger,
-	onClick,
-}: {
-	icon: string;
-	label: string;
-	kbd?: string;
-	disabled?: boolean;
-	danger?: boolean;
-	onClick: () => void;
-}) {
-	return (
-		<button
-			type="button"
-			disabled={disabled}
-			onClick={onClick}
-			className={cn(
-				"group flex h-7.5 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[11.5px] transition-all cursor-pointer select-none",
-				disabled && "cursor-not-allowed opacity-40 text-faint",
-				!disabled && !danger && "text-surface-foreground hover:bg-primary/15 hover:text-primary font-normal hover:font-medium",
-				!disabled && danger && "text-danger hover:bg-danger/15 hover:text-danger font-normal hover:font-medium",
-			)}
-		>
-			<span
-				className={cn(
-					icon,
-					"size-3.5 shrink-0 transition-colors",
-					disabled ? "text-faint" : danger ? "text-danger" : "text-muted group-hover:text-primary",
-				)}
-			/>
-			<span className="flex-1 truncate">{label}</span>
-			{kbd && <span className="font-mono text-[9.5px] text-faint group-hover:text-primary/80">{kbd}</span>}
-		</button>
-	);
-}
-
 /* ============================ 主机工作台视图 ============================ */
 
 function HostWorkbench({
@@ -2287,10 +2539,11 @@ function HostWorkbench({
 	const navigate = useNavigate();
 	const [selectedGroup, setSelectedGroup] = useState<string>("all");
 	const [searchQuery, setSearchQuery] = useState("");
-	const [createGroupModalOpen, setCreateGroupModalOpen] = useState(false);
-	const [renameGroupModal, setRenameGroupModal] = useState<{ id: string; name: string } | null>(null);
-	const [deleteGroupModal, setDeleteGroupModal] = useState<{ id: string; name: string } | null>(null);
-	const [groupNameInput, setGroupNameInput] = useState("");
+	const groupDialogs = useHostGroupDialogs({
+		onCreated: (group) => setSelectedGroup(group.id),
+		onDeleted: (ids) => setSelectedGroup((cur) => (ids.has(cur) ? "all" : cur)),
+	});
+	const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; groupId: string } | null>(null);
 	const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
 	const toggleCollapse = (id: string) => {
@@ -2299,6 +2552,14 @@ function HostWorkbench({
 
 	const allHosts = hostStore.hosts;
 	const groups = hostStore.groups;
+	/** 先序排好的分组树（子分组紧跟父分组），显示名用完整路径「父 / 子」 */
+	const groupTree = useMemo(() => orderGroupsAsTree(groups), [groups]);
+	const menuGroup = groupMenu ? groups.find((g) => g.id === groupMenu.groupId) : undefined;
+	const openGroupMenu = (e: ReactMouseEvent, groupId: string) => {
+		e.preventDefault();
+		e.stopPropagation();
+		setGroupMenu({ x: e.clientX, y: e.clientY, groupId });
+	};
 
 	const searchedHosts = useMemo(() => {
 		if (!searchQuery.trim()) return allHosts;
@@ -2313,6 +2574,7 @@ function HostWorkbench({
 	}, [allHosts, searchQuery]);
 
 	const validGroupIds = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
+	const pinnedHosts = useMemo(() => searchedHosts.filter((h) => h.pinned), [searchedHosts]);
 	const ungroupedHosts = useMemo(() => searchedHosts.filter((h) => !h.groupId || !validGroupIds.has(h.groupId)), [searchedHosts, validGroupIds]);
 
 	const handleOpenSftp = (host: Host) => {
@@ -2324,36 +2586,6 @@ function HostWorkbench({
 				useUiStore.getState().toggleEmbeddedSftp();
 			}
 		}
-	};
-
-	const handleCreateGroup = () => {
-		const trimmed = groupNameInput.trim();
-		if (!trimmed) return;
-		const newG = hostStore.addGroup(trimmed);
-		toast({ title: `已创建分组「${trimmed}」`, tone: "success" });
-		setGroupNameInput("");
-		setCreateGroupModalOpen(false);
-		setSelectedGroup(newG.id);
-	};
-
-	const handleRenameGroup = () => {
-		if (!renameGroupModal) return;
-		const trimmed = groupNameInput.trim();
-		if (!trimmed) return;
-		hostStore.renameGroup(renameGroupModal.id, trimmed);
-		toast({ title: `分组已重命名为「${trimmed}」`, tone: "success" });
-		setGroupNameInput("");
-		setRenameGroupModal(null);
-	};
-
-	const handleDeleteGroup = () => {
-		if (!deleteGroupModal) return;
-		hostStore.removeGroup(deleteGroupModal.id);
-		toast({ title: `已删除分组「${deleteGroupModal.name}」`, tone: "default" });
-		if (selectedGroup === deleteGroupModal.id) {
-			setSelectedGroup("all");
-		}
-		setDeleteGroupModal(null);
 	};
 
 	const handleQuickConnect = () => {
@@ -2453,10 +2685,7 @@ function HostWorkbench({
 						size="sm"
 						variant="default"
 						icon="icon-[lucide--folder-plus]"
-						onClick={() => {
-							setGroupNameInput("");
-							setCreateGroupModalOpen(true);
-						}}
+						onClick={() => groupDialogs.openCreate(null)}
 						className="h-8 text-xs cursor-pointer"
 					>
 						新建分组
@@ -2492,7 +2721,7 @@ function HostWorkbench({
 					</span>
 				</button>
 
-				{groups.map((group) => {
+				{groupTree.map(({ group }) => {
 					const count = allHosts.filter((h) => h.groupId === group.id).length;
 					const active = selectedGroup === group.id;
 					return (
@@ -2500,6 +2729,7 @@ function HostWorkbench({
 							key={group.id}
 							type="button"
 							onClick={() => setSelectedGroup(group.id)}
+							onContextMenu={(e) => openGroupMenu(e, group.id)}
 							className={cn(
 								"flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all duration-150 cursor-pointer shrink-0",
 								active
@@ -2508,7 +2738,7 @@ function HostWorkbench({
 							)}
 						>
 							<span className={cn("icon-[lucide--folder] size-3.5", active ? "text-primary-foreground" : "text-amber-500")} />
-							<span>{group.name}</span>
+							<span>{groupPathLabel(groups, group.id)}</span>
 							<span className={cn("font-mono text-[10.5px]", active ? "text-primary-foreground/80" : "text-faint")}>
 								({count})
 							</span>
@@ -2537,10 +2767,7 @@ function HostWorkbench({
 
 				<button
 					type="button"
-					onClick={() => {
-						setGroupNameInput("");
-						setCreateGroupModalOpen(true);
-					}}
+					onClick={() => groupDialogs.openCreate(null)}
 					className="flex items-center gap-1 rounded-full border border-dashed border-border/80 bg-surface px-2.5 py-1 text-xs text-muted hover:border-primary hover:text-primary transition-colors cursor-pointer shrink-0 ml-1"
 					title="新建分组"
 				>
@@ -2569,10 +2796,7 @@ function HostWorkbench({
 							</div>
 							<button
 								type="button"
-								onClick={() => {
-									setGroupNameInput("");
-									setCreateGroupModalOpen(true);
-								}}
+								onClick={() => groupDialogs.openCreate(null)}
 								className="flex items-center gap-1 text-[11.5px] font-medium text-primary hover:underline cursor-pointer"
 							>
 								<span className="icon-[lucide--folder-plus] size-3.5" />
@@ -2598,7 +2822,34 @@ function HostWorkbench({
 				) : (
 					/* 存在分组：按组分区渲染 */
 					<>
-						{groups
+						{selectedGroup === "all" && pinnedHosts.length > 0 && (
+							<div className="space-y-3">
+								<div className="flex items-center gap-2 border-b border-border/60 pb-2">
+									<span className="icon-[lucide--pin] size-4 text-primary" />
+									<span className="text-[13px] font-bold text-surface-foreground">已置顶</span>
+									<span className="rounded-full bg-surface-raised px-2 py-0.5 font-mono text-[10.5px] text-faint border border-border/50">
+										{pinnedHosts.length} 台
+									</span>
+								</div>
+								<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+									{pinnedHosts.map((host) => (
+										<WorkbenchHostCard
+											key={host.id}
+											host={host}
+											onConnect={() => onOpenHost(host)}
+											onOpenInNewTab={() => onOpenHostInNewTab?.(host)}
+											onSplitWithHost={(dir) => onSplitWithHost?.(host, dir)}
+											onOpenSftp={() => handleOpenSftp(host)}
+											onOpenForward={() => onOpenForward?.(host)}
+											onEdit={() => (onEditHost ? onEditHost(host) : navigate(`/hosts/${host.id}/edit`))}
+											onContextMenu={(e) => onHostContextMenu?.(e, host)}
+										/>
+									))}
+								</div>
+							</div>
+						)}
+						{groupTree
+							.map(({ group }) => group)
 							.filter((g) => selectedGroup === "all" || selectedGroup === g.id)
 							.map((group) => {
 								const members = searchedHosts.filter((h) => h.groupId === group.id);
@@ -2607,7 +2858,10 @@ function HostWorkbench({
 								return (
 									<div key={group.id} className="space-y-3">
 										{/* 分组头部 */}
-										<div className="flex items-center justify-between border-b border-border/60 pb-2">
+										<div
+											className="flex items-center justify-between border-b border-border/60 pb-2"
+											onContextMenu={(e) => openGroupMenu(e, group.id)}
+										>
 											<div className="flex items-center gap-2">
 												<button
 													type="button"
@@ -2624,7 +2878,7 @@ function HostWorkbench({
 												</button>
 												<span className="icon-[lucide--folder] size-4 text-amber-500" />
 												<span className="text-[13px] font-bold text-surface-foreground">
-													{group.name}
+													{groupPathLabel(groups, group.id)}
 												</span>
 												<span className="rounded-full bg-surface-raised px-2 py-0.5 font-mono text-[10.5px] text-faint border border-border/50">
 													{members.length} 台
@@ -2644,10 +2898,7 @@ function HostWorkbench({
 												</button>
 												<button
 													type="button"
-													onClick={() => {
-														setGroupNameInput(group.name);
-														setRenameGroupModal({ id: group.id, name: group.name });
-													}}
+													onClick={() => groupDialogs.openRename(group)}
 													className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-surface-foreground transition-colors cursor-pointer"
 													title="重命名分组"
 												>
@@ -2655,7 +2906,7 @@ function HostWorkbench({
 												</button>
 												<button
 													type="button"
-													onClick={() => setDeleteGroupModal({ id: group.id, name: group.name })}
+													onClick={() => groupDialogs.openDelete(group)}
 													className="flex size-6 items-center justify-center rounded text-muted hover:bg-danger/10 hover:text-danger transition-colors cursor-pointer"
 													title="删除分组"
 												>
@@ -2763,91 +3014,19 @@ function HostWorkbench({
 				)}
 			</div>
 
-			{/* 新建分组弹窗 */}
-			<Modal
-				open={createGroupModalOpen}
-				onClose={() => setCreateGroupModalOpen(false)}
-				title="新建主机分组"
-				footer={
-					<div className="flex items-center gap-2">
-						<Button size="sm" onClick={() => setCreateGroupModalOpen(false)}>
-							取消
-						</Button>
-						<Button size="sm" variant="primary" onClick={handleCreateGroup}>
-							创建
-						</Button>
-					</div>
-				}
-			>
-				<div className="space-y-3">
-					<div className="text-muted">请输入新分组名称（如：生产集群、测试服务器、海外节点）：</div>
-					<Input
-						autoFocus
-						value={groupNameInput}
-						onChange={(e) => setGroupNameInput(e.target.value)}
-						onKeyDown={(e) => {
-							if (e.key === "Enter") handleCreateGroup();
-						}}
-						placeholder="分组名称..."
-					/>
-				</div>
-			</Modal>
-
-			{/* 重命名分组弹窗 */}
-			<Modal
-				open={renameGroupModal !== null}
-				onClose={() => setRenameGroupModal(null)}
-				title="重命名主机分组"
-				footer={
-					<div className="flex items-center gap-2">
-						<Button size="sm" onClick={() => setRenameGroupModal(null)}>
-							取消
-						</Button>
-						<Button size="sm" variant="primary" onClick={handleRenameGroup}>
-							保存
-						</Button>
-					</div>
-				}
-			>
-				<div className="space-y-3">
-					<div className="text-muted">修改「{renameGroupModal?.name}」的名称：</div>
-					<Input
-						autoFocus
-						value={groupNameInput}
-						onChange={(e) => setGroupNameInput(e.target.value)}
-						onKeyDown={(e) => {
-							if (e.key === "Enter") handleRenameGroup();
-						}}
-						placeholder="新分组名称..."
-					/>
-				</div>
-			</Modal>
-
-			{/* 删除分组确认弹窗 */}
-			<Modal
-				open={deleteGroupModal !== null}
-				onClose={() => setDeleteGroupModal(null)}
-				title="删除主机分组"
-				footer={
-					<div className="flex items-center gap-2">
-						<Button size="sm" onClick={() => setDeleteGroupModal(null)}>
-							取消
-						</Button>
-						<Button size="sm" variant="danger" onClick={handleDeleteGroup}>
-							确认删除
-						</Button>
-					</div>
-				}
-			>
-				<div className="space-y-2">
-					<div className="text-surface-foreground">
-						确认删除分组「<span className="font-semibold text-danger">{deleteGroupModal?.name}</span>」吗？
-					</div>
-					<div className="text-[11px] text-faint">
-						删除分组后，该组内的主机将自动移至「未分组」，不会被删除或影响已有会话。
-					</div>
-				</div>
-			</Modal>
+			{menuGroup && groupMenu && (
+				<HostGroupContextMenu
+					x={groupMenu.x}
+					y={groupMenu.y}
+					group={menuGroup}
+					onClose={() => setGroupMenu(null)}
+					onNewHost={() => onAddHost?.(menuGroup.id)}
+					onNewSubgroup={() => groupDialogs.openCreate(menuGroup.id)}
+					onRename={() => groupDialogs.openRename(menuGroup)}
+					onDelete={() => groupDialogs.openDelete(menuGroup)}
+				/>
+			)}
+			{groupDialogs.dialogs}
 		</div>
 	);
 }
@@ -2902,6 +3081,7 @@ function WorkbenchHostCard({
 						<span className="truncate text-[13px] font-semibold text-surface-foreground group-hover:text-primary transition-colors">
 							{host.name}
 						</span>
+						{host.pinned && <span className="icon-[lucide--pin] size-3 shrink-0 text-primary" title="已置顶" />}
 						<StatusDot status={status} size={6} className="shrink-0" />
 					</div>
 					<div className="mt-1 font-mono text-[11px] text-muted truncate">

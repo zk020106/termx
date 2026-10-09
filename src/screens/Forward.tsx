@@ -15,6 +15,7 @@ import { draftForwardRule, useForwardsStore } from "@/store/forwards";
 import { useHostsStore } from "@/store/hosts";
 import { useSessionsStore } from "@/store/sessions";
 import { toast } from "@/store/toast";
+import { ContextMenu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 
@@ -119,6 +120,8 @@ export default function Forward() {
 	const [selectedId, setSelectedId] = useState("");
 	const [draft, setDraft] = useState<RuleDraft | null>(null);
 	const [errors, setErrors] = useState<Record<string, string>>({});
+	/** 规则右键菜单（Netcatty RuleCard：编辑 / 复制 / 启动 / 停止 / 删除） */
+	const [menu, setMenu] = useState<{ x: number; y: number; rule: ForwardRule } | null>(null);
 
 	const selected = rules.find((rule) => rule.id === selectedId) ?? rules[0] ?? null;
 	const host = hosts.find((h) => h.id === selected?.hostId) ?? null;
@@ -241,6 +244,23 @@ export default function Forward() {
 		});
 	}
 
+	/** Netcatty duplicateRule：整条复制、名称加后缀、状态归零（不自动启动） */
+	function duplicateRule(rule: ForwardRule) {
+		const copy: ForwardRule = {
+			...rule,
+			id: `fw-${crypto.randomUUID().slice(0, 12)}`,
+			name: `${rule.name} (复制)`,
+			state: "stopped",
+			connections: 0,
+			trafficIn: 0,
+			trafficOut: 0,
+			error: undefined,
+		};
+		upsert(copy);
+		setSelectedId(copy.id);
+		toast({ title: `已复制规则 ${rule.name}`, description: "副本与原规则端口相同，启动前请按需修改", tone: "success" });
+	}
+
 	function removeRule(rule: ForwardRule) {
 		void disposeForward(rule.id);
 		remove(rule.id);
@@ -295,6 +315,11 @@ export default function Forward() {
 										key={rule.id}
 										type="button"
 										onClick={() => setSelectedId(rule.id)}
+										onContextMenu={(event) => {
+											event.preventDefault();
+											setSelectedId(rule.id);
+											setMenu({ x: event.clientX, y: event.clientY, rule });
+										}}
 										className={cn(
 											"w-full rounded border p-2.5 text-left transition-colors",
 											active && rule.state === "error"
@@ -725,6 +750,43 @@ export default function Forward() {
 					</>
 				)}
 			</Modal>
+			{menu && (
+				<ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} label="转发规则菜单">
+					<MenuItem
+						icon="icon-[lucide--pencil]"
+						label="编辑"
+						onClick={() => {
+							setErrors({});
+							setDraft(draftFrom(menu.rule));
+							setMenu(null);
+						}}
+					/>
+					<MenuItem icon="icon-[lucide--copy]" label="复制" onClick={() => (duplicateRule(menu.rule), setMenu(null))} />
+					<MenuSeparator />
+					<MenuItem
+						icon="icon-[lucide--play]"
+						label="启动"
+						disabled={menu.rule.state === "running" || menu.rule.state === "starting"}
+						onClick={() => {
+							const rule = menu.rule;
+							setMenu(null);
+							void startRule(rule);
+						}}
+					/>
+					<MenuItem
+						icon="icon-[lucide--square]"
+						label="停止"
+						disabled={menu.rule.state === "stopped" || menu.rule.state === "error"}
+						onClick={() => {
+							const rule = menu.rule;
+							setMenu(null);
+							void stopRule(rule);
+						}}
+					/>
+					<MenuSeparator />
+					<MenuItem icon="icon-[lucide--trash-2]" label="删除" danger onClick={() => (removeRule(menu.rule), setMenu(null))} />
+				</ContextMenu>
+			)}
 		</WindowChrome>
 	);
 }

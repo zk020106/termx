@@ -1,3 +1,4 @@
+import { ContextMenu, MenuItem } from "@/components/ui/Menu";
 import { Kbd } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/Display";
 import type { CommandItem } from "@/data/types";
@@ -31,11 +32,11 @@ const GROUP_TITLE: Record<PaletteGroupKey, string> = {
 
 /** 应用真实存在的快捷动作与设置入口（不是示例数据，是产品自身的功能清单） */
 const STATIC_ACTIONS: CommandItem[] = [
-	{ id: "act-new-tab", group: "command", title: "新建标签", shortcut: "Ctrl Shift T", icon: "icon-[lucide--square-plus]", keywords: ["tab", "标签"] },
-	{ id: "act-split-right", group: "command", title: "向右分屏", shortcut: "Ctrl Shift D", icon: "icon-[lucide--columns-2]", keywords: ["split", "分屏"] },
-	{ id: "act-split-down", group: "command", title: "向下分屏", shortcut: "Ctrl Shift E", icon: "icon-[lucide--rows-2]" },
-	{ id: "act-toggle-sftp", group: "command", title: "显示 / 隐藏 SFTP 面板", shortcut: "Ctrl Shift S", icon: "icon-[lucide--folder-tree]", keywords: ["sftp", "文件"] },
-	{ id: "act-broadcast", group: "command", title: "广播输入到全部终端", shortcut: "Ctrl Shift I", icon: "icon-[lucide--radio]" },
+	{ id: "act-new-tab", group: "command", title: "新建标签", shortcut: "Ctrl T", icon: "icon-[lucide--square-plus]", keywords: ["tab", "标签"] },
+	{ id: "act-split-right", group: "command", title: "水平分屏", shortcut: "Ctrl Shift D", icon: "icon-[lucide--columns-2]", keywords: ["split", "分屏"] },
+	{ id: "act-split-down", group: "command", title: "垂直分屏", shortcut: "Ctrl Shift E", icon: "icon-[lucide--rows-2]" },
+	{ id: "act-toggle-sftp", group: "command", title: "显示 / 隐藏 SFTP 面板", shortcut: "Ctrl Shift O", icon: "icon-[lucide--folder-tree]", keywords: ["sftp", "文件"] },
+	{ id: "act-broadcast", group: "command", title: "广播输入到全部终端", shortcut: "Ctrl B", icon: "icon-[lucide--radio]" },
 	{ id: "act-new-forward", group: "command", title: "新建端口转发规则", icon: "icon-[lucide--waypoints]", keywords: ["forward", "转发"] },
 	{ id: "act-lock", group: "command", title: "锁定应用", shortcut: "Ctrl Shift L", icon: "icon-[lucide--lock]" },
 	{ id: "set-appearance", group: "setting", title: "外观与主题", icon: "icon-[lucide--palette]", keywords: ["主题", "深色", "浅色"] },
@@ -138,6 +139,8 @@ export function CommandPalettePanel({
 	const navigate = useNavigate();
 	const [query, setQuery] = useState(initialQuery);
 	const [activeIndex, setActiveIndex] = useState(0);
+	/** 主机条目右键：Netcatty QuickSwitcher 的「连接 / 编辑主机」 */
+	const [hostMenu, setHostMenu] = useState<{ x: number; y: number; item: CommandItem } | null>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
 
 	const items = usePaletteItems();
@@ -320,6 +323,14 @@ export function CommandPalettePanel({
 											selected={indexOf.get(item.id) === activeIndex}
 											onHover={() => setActiveIndex(indexOf.get(item.id) ?? 0)}
 											onRun={() => run(item)}
+											onContextMenu={
+												item.id.startsWith("host-")
+													? (e) => {
+															e.preventDefault();
+															setHostMenu({ x: e.clientX, y: e.clientY, item });
+														}
+													: undefined
+											}
 										/>
 									))}
 								</div>
@@ -327,6 +338,30 @@ export function CommandPalettePanel({
 						))
 					)}
 				</div>
+
+				{hostMenu && (
+					<ContextMenu x={hostMenu.x} y={hostMenu.y} onClose={() => setHostMenu(null)} label="主机">
+						<MenuItem
+							icon="icon-[lucide--plug]"
+							label="连接"
+							onClick={() => {
+								const item = hostMenu.item;
+								setHostMenu(null);
+								run(item);
+							}}
+						/>
+						<MenuItem
+							icon="icon-[lucide--edit-2]"
+							label="编辑主机"
+							onClick={() => {
+								const hostId = hostMenu.item.id.slice("host-".length);
+								setHostMenu(null);
+								onClose?.();
+								navigate(`/hosts/${hostId}/edit`);
+							}}
+						/>
+					</ContextMenu>
+				)}
 
 				{/* 底部快捷键提示 */}
 				<div className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-surface-sunk px-3 font-mono text-[10.5px] text-faint">
@@ -355,16 +390,19 @@ function ResultRow({
 	selected,
 	onHover,
 	onRun,
+	onContextMenu,
 }: {
 	item: CommandItem;
 	selected: boolean;
 	onHover: () => void;
 	onRun: () => void;
+	onContextMenu?: (event: React.MouseEvent) => void;
 }) {
 	return (
 		<button
 			type="button"
 			onClick={onRun}
+			onContextMenu={onContextMenu}
 			onMouseMove={onHover}
 			className={cn(
 				"flex h-9 w-full items-center justify-between gap-2 rounded border px-2.5 text-left text-[12px] transition-colors",

@@ -11,20 +11,18 @@ import {
 	sftpList,
 	sftpMkdir,
 	sftpRealPath,
-	sftpRemove,
-	sftpRename,
 	sftpCreateEmptyFile,
 	type SftpFileEntry,
 } from "@/lib/sftp";
 import { useHostsStore } from "@/store/hosts";
 import { enqueueTransfers } from "@/lib/transferManager";
 import { toast } from "@/store/toast";
-import { toSafeLocalName } from "@/lib/pathSafety";
-import { detectPlatform } from "@/lib/platform";
 import { useUiStore } from "@/store/ui";
-import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { useSftpPaneActions, type SftpPaneRef } from "@/components/sftp/useSftpPaneActions";
+import { useSettingsStore } from "@/store/settings";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link } from "react-router";
 
 interface SftpSidebarProps {
 	activeTab: SessionTab | null;
@@ -33,7 +31,6 @@ interface SftpSidebarProps {
 }
 
 export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarProps) {
-	const navigate = useNavigate();
 	const hosts = useHostsStore((s) => s.hosts);
 	const toggleEmbeddedSftp = useUiStore((s) => s.toggleEmbeddedSftp);
 	const embeddedSftpOpen = useUiStore((s) => s.embeddedSftpOpen);
@@ -46,15 +43,12 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 	const [entries, setEntries] = useState<SftpFileEntry[]>([]);
 	const [loading, setLoading] = useState<boolean>(false);
 	const [filter, setFilter] = useState<string>("");
-	const [selected, setSelected] = useState<string | null>(null);
+	const [selected, setSelected] = useState<Set<string>>(new Set());
 
 	// 弹窗状态
-	const [modalMode, setModalMode] = useState<"mkdir" | "touch" | "rename" | "delete" | null>(null);
-	const [targetEntry, setTargetEntry] = useState<SftpFileEntry | null>(null);
+	const [modalMode, setModalMode] = useState<"mkdir" | "touch" | null>(null);
 	const [inputName, setInputName] = useState<string>("");
 
-	// 右键菜单
-	const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry?: SftpFileEntry } | null>(null);
 
 	const loadDir = useCallback(
 		async (path: string) => {
@@ -65,7 +59,7 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 				const list = await sftpList(sessionKey, resolved);
 				setEntries(list);
 				setRemotePath(resolved);
-				setSelected(null);
+				setSelected(new Set());
 			} catch (e) {
 				toast({ title: "读取远程目录失败", description: String(e), tone: "danger" });
 			} finally {
@@ -84,15 +78,16 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 		}
 	}, [isConnected, sessionKey, loadDir]);
 
-	// 过滤与排序
+	// 过滤与排序（Netcatty sftpShowHiddenFiles）
+	const showHidden = useSettingsStore((s) => s.sftpShowHiddenFiles);
 	const filteredEntries = useMemo(() => {
-		const list = entries.filter((e) => e.name.toLowerCase().includes(filter.toLowerCase()));
+		const list = entries.filter((e) => (showHidden || !e.name.startsWith(".")) && e.name.toLowerCase().includes(filter.toLowerCase()));
 		list.sort((a, b) => {
 			if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
 			return a.name.localeCompare(b.name);
 		});
 		return list;
-	}, [entries, filter]);
+	}, [entries, filter, showHidden]);
 
 	// 上传文件
 	const handleUpload = async () => {
@@ -128,39 +123,6 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 		);
 	};
 
-	// 下载文件
-	const handleDownload = async (entry: SftpFileEntry) => {
-		if (!sessionKey || entry.is_dir) return;
-		let dest: string | null;
-		try {
-			// 远程文件名不可信：预填前先消毒，避免 `../` 之类把默认位置带出用户选的目录
-			dest = await saveFileDialog({ defaultPath: toSafeLocalName(entry.name, detectPlatform() === "windows") });
-		} catch (e) {
-			toast({ title: "保存文件失败", description: String(e), tone: "danger" });
-			return;
-		}
-		if (!dest) return;
-		await enqueueTransfers(
-			[
-				{
-					name: entry.name,
-					direction: "download",
-					hostId: activeHost?.id ?? "",
-					sessionKey,
-					localPath: dest,
-					remotePath: entry.path,
-					size: entry.size,
-					// 系统「另存为」对话框已经问过是否覆盖
-					overwriteConfirmed: true,
-				},
-			],
-			{
-				onItemDone: (item) => toast({ title: `下载完成: ${item.name}`, tone: "success" }),
-				onItemFailed: (item, error) => toast({ title: `下载失败: ${item.name}`, description: error, tone: "danger" }),
-			},
-		);
-	};
-
 	// 弹窗提交
 	const handleModalSubmit = async () => {
 		if (!modalMode || !sessionKey) return;
@@ -177,33 +139,32 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 				await sftpCreateEmptyFile(sessionKey, newP);
 				toast({ title: `已创建文本文件: ${inputName}`, tone: "success" });
 				loadDir(remotePath);
-			} else if (modalMode === "rename" && targetEntry) {
-				if (!inputName.trim()) return;
-				const parent = posixDirname(targetEntry.path);
-				const newP = posixJoin(parent, inputName.trim());
-				await sftpRename(sessionKey, targetEntry.path, newP);
-				toast({ title: `已重命名为: ${inputName}`, tone: "success" });
-				loadDir(remotePath);
-			} else if (modalMode === "delete" && targetEntry) {
-				await sftpRemove(sessionKey, targetEntry.path, targetEntry.is_dir);
-				toast({ title: `已删除: ${targetEntry.name}`, tone: "success" });
-				loadDir(remotePath);
 			}
 		} catch (e) {
 			toast({ title: "操作失败", description: String(e), tone: "danger" });
 		} finally {
 			setModalMode(null);
-			setTargetEntry(null);
 			setInputName("");
 		}
 	};
 
-	// 点击空白处关闭右键菜单
-	useEffect(() => {
-		const onClick = () => setContextMenu(null);
-		window.addEventListener("click", onClick);
-		return () => window.removeEventListener("click", onClick);
-	}, []);
+	// 右键菜单 / 快捷键 / 打开方式 / 解压…（对齐 Netcatty SFTP 侧栏，没有「另一侧」）
+	const pane: SftpPaneRef = useMemo(
+		() => ({
+			target: { side: "remote", sessionKey, hostId: activeHost?.id ?? null },
+			currentPath: remotePath,
+			reload: () => loadDir(remotePath),
+		}),
+		[sessionKey, activeHost?.id, remotePath, loadDir],
+	);
+	const actions = useSftpPaneActions({
+		pane,
+		entries: filteredEntries,
+		selected,
+		setSelected,
+		navigate: (path) => void loadDir(path),
+		hostLabel: activeHost?.name,
+	});
 
 	return (
 		<div className="flex h-full flex-col bg-surface-sunk select-none text-[11px]">
@@ -288,8 +249,7 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 					className="flex flex-1 min-h-0 flex-col"
 					onContextMenu={(e) => {
 						if ((e.target as HTMLElement).closest(".file-row")) return;
-						e.preventDefault();
-						setContextMenu({ x: e.clientX, y: e.clientY });
+						actions.openContextMenu(e, null);
 					}}
 				>
 					{/* 路径与快捷操作条 */}
@@ -384,7 +344,14 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 					</div>
 
 					{/* 文件条目列表 */}
-					<div className="flex-1 min-h-0 overflow-y-auto px-1 py-1">
+					<div
+						ref={(el) => {
+							actions.containerRef.current = el;
+						}}
+						tabIndex={0}
+						onKeyDown={actions.handleKeyDown}
+						className="flex-1 min-h-0 overflow-y-auto px-1 py-1 outline-none"
+					>
 						{filteredEntries.length === 0 ? (
 							<div className="flex h-32 items-center justify-center text-[10.5px] text-faint">
 								{loading ? "正在读取…" : "当前目录为空"}
@@ -392,29 +359,22 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 						) : (
 							<div className="space-y-0.5">
 								{filteredEntries.map((entry) => {
-									const isSelected = selected === entry.name;
+									const isSelected = selected.has(entry.name);
 									const iconClass = getFileIcon(entry.name, entry.is_dir, entry.is_symlink);
 									return (
 										<div
 											key={entry.name}
-											onClick={() => setSelected(entry.name)}
-											onDoubleClick={() => {
-												if (entry.is_dir) {
-													loadDir(entry.path);
-												} else {
-													navigate(
-														`/editor?sessionKey=${sessionKey}&path=${encodeURIComponent(
-															entry.path,
-														)}&name=${encodeURIComponent(entry.name)}&hostId=${activeHost?.id ?? ""}`,
-													);
-												}
+											data-sftp-row={entry.name}
+											onClick={(e) => {
+												if (e.ctrlKey || e.metaKey) {
+													const next = new Set(selected);
+													if (next.has(entry.name)) next.delete(entry.name);
+													else next.add(entry.name);
+													setSelected(next);
+												} else setSelected(new Set([entry.name]));
 											}}
-											onContextMenu={(e) => {
-												e.preventDefault();
-												e.stopPropagation();
-												setSelected(entry.name);
-												setContextMenu({ x: e.clientX, y: e.clientY, entry });
-											}}
+											onDoubleClick={() => actions.openEntry(entry)}
+											onContextMenu={(e) => actions.openContextMenu(e, entry)}
 											className={cn(
 												"file-row group flex items-center justify-between rounded px-1.5 py-1 cursor-pointer transition-colors select-none",
 												isSelected
@@ -456,173 +416,16 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 				</div>
 			)}
 
-			{/* 右键上下文菜单 */}
-			{contextMenu && (
-				<div
-					style={{
-						left: Math.min(contextMenu.x, window.innerWidth - 180),
-						top: Math.min(contextMenu.y, window.innerHeight - 200),
-					}}
-					onClick={(e) => e.stopPropagation()}
-					className="fixed z-50 flex w-44 flex-col rounded-card border border-border bg-surface-raised py-1 text-[11px] shadow-xl animate-in fade-in zoom-in-95 duration-75"
-				>
-					{contextMenu.entry ? (
-						<>
-							{!contextMenu.entry.is_dir ? (
-								<>
-									<button
-										type="button"
-										onClick={() => {
-											navigate(
-												`/editor?sessionKey=${sessionKey}&path=${encodeURIComponent(
-													contextMenu.entry!.path,
-												)}&name=${encodeURIComponent(contextMenu.entry!.name)}&hostId=${activeHost?.id ?? ""}`,
-											);
-											setContextMenu(null);
-										}}
-										className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-primary/10 hover:text-primary"
-									>
-										<span className="icon-[lucide--file-code] size-3.5 text-primary" />
-										<span>在编辑器中编辑</span>
-									</button>
-									<button
-										type="button"
-										onClick={() => {
-											handleDownload(contextMenu.entry!);
-											setContextMenu(null);
-										}}
-										className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-primary/10 hover:text-primary"
-									>
-										<span className="icon-[lucide--download] size-3.5" />
-										<span>下载到本地…</span>
-									</button>
-								</>
-							) : (
-								<button
-									type="button"
-									onClick={() => {
-										loadDir(contextMenu.entry!.path);
-										setContextMenu(null);
-									}}
-									className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-primary/10 hover:text-primary"
-								>
-									<span className="icon-[lucide--folder-open] size-3.5 text-primary" />
-									<span>进入该目录</span>
-								</button>
-							)}
-
-							<div className="my-1 border-t border-border/60" />
-
-							<button
-								type="button"
-								onClick={() => {
-									setTargetEntry(contextMenu.entry!);
-									setInputName(contextMenu.entry!.name);
-									setModalMode("rename");
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-							>
-								<span className="icon-[lucide--edit-3] size-3.5" />
-								<span>重命名</span>
-							</button>
-							<button
-								type="button"
-								onClick={() => {
-									navigator.clipboard.writeText(contextMenu.entry!.path);
-									toast({ title: "已复制远程路径", tone: "default" });
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-							>
-								<span className="icon-[lucide--copy] size-3.5" />
-								<span>复制路径</span>
-							</button>
-
-							<div className="my-1 border-t border-border/60" />
-
-							<button
-								type="button"
-								onClick={() => {
-									setTargetEntry(contextMenu.entry!);
-									setModalMode("delete");
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-danger hover:bg-danger/10"
-							>
-								<span className="icon-[lucide--trash-2] size-3.5" />
-								<span>删除</span>
-							</button>
-						</>
-					) : (
-						<>
-							<button
-								type="button"
-								onClick={() => {
-									setModalMode("touch");
-									setInputName("");
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-							>
-								<span className="icon-[lucide--file-plus] size-3.5 text-primary" />
-								<span>新建文本文件</span>
-							</button>
-							<button
-								type="button"
-								onClick={() => {
-									setModalMode("mkdir");
-									setInputName("");
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-							>
-								<span className="icon-[lucide--folder-plus] size-3.5" />
-								<span>新建目录</span>
-							</button>
-							<button
-								type="button"
-								onClick={() => {
-									handleUpload();
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-							>
-								<span className="icon-[lucide--upload] size-3.5" />
-								<span>上传文件到此目录</span>
-							</button>
-							<div className="my-1 border-t border-border/60" />
-							<button
-								type="button"
-								onClick={() => {
-									loadDir(remotePath);
-									setContextMenu(null);
-								}}
-								className="flex items-center gap-2 px-3 py-1.5 text-left text-surface-foreground hover:bg-surface"
-							>
-								<span className="icon-[lucide--refresh-cw] size-3.5" />
-								<span>刷新</span>
-							</button>
-						</>
-					)}
-				</div>
-			)}
-
 			{/* 模态弹窗 */}
 			<Modal
 				open={modalMode !== null}
 				onClose={() => {
 					setModalMode(null);
-					setTargetEntry(null);
 				}}
 				title={
 					modalMode === "mkdir"
 						? "新建远程目录"
-						: modalMode === "touch"
-						? "新建文本文件"
-						: modalMode === "rename"
-						? "重命名"
-						: "确认删除"
+						: "新建文本文件"
 				}
 				footer={
 					<div className="flex items-center gap-2">
@@ -630,7 +433,6 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 							type="button"
 							onClick={() => {
 								setModalMode(null);
-								setTargetEntry(null);
 							}}
 							className="rounded px-2.5 py-1 text-[11px] text-muted hover:bg-surface"
 						>
@@ -641,10 +443,10 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 							onClick={handleModalSubmit}
 							className={cn(
 								"rounded px-3 py-1 text-[11px] font-medium text-white shadow-xs",
-								modalMode === "delete" ? "bg-danger hover:bg-danger/90" : "bg-primary hover:bg-primary/90",
+								"bg-primary hover:bg-primary/90",
 							)}
 						>
-							{modalMode === "delete" ? "确认删除" : "确定"}
+							确定
 						</button>
 					</div>
 				}
@@ -679,28 +481,6 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 					</div>
 				)}
 
-				{modalMode === "rename" && (
-					<div className="space-y-3">
-						<div className="text-muted">请输入新名称：</div>
-						<Input
-							autoFocus
-							value={inputName}
-							onChange={(e) => setInputName(e.target.value)}
-							onKeyDown={(e) => {
-								if (e.key === "Enter") handleModalSubmit();
-							}}
-						/>
-					</div>
-				)}
-
-				{modalMode === "delete" && targetEntry && (
-					<div className="space-y-2">
-						<div className="text-surface-foreground">
-							确认删除「<span className="font-semibold text-danger">{targetEntry.name}</span>」吗？
-						</div>
-						<div className="text-[11px] text-faint">此操作不可撤销。</div>
-					</div>
-				)}
 			</Modal>
 		</div>
 	);

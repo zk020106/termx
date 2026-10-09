@@ -5,12 +5,13 @@ import { flushNow, migrateLegacySecrets, snapshotConfig } from "@/store/persiste
 import { useForwardsStore } from "@/store/forwards";
 import { useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
+import { useProxyProfilesStore } from "@/store/proxyProfiles";
 import { useSnippetsStore } from "@/store/snippets";
 
 /* =============================================================================
  * 配置的手动导入 / 导出。
  *
- * 导出的是**未加密**的 JSON：它包含主机、分组、密钥引用、片段、转发规则与偏好，
+ * 导出的是**未加密**的 JSON：它包含主机、分组、密钥引用、片段、转发规则、代理配置与偏好，
  * 不含任何密码（密码在系统钥匙串里），但里面有主机地址与用户名，
  * 所以导出文件按敏感文件对待 —— 界面文案如实说「未加密」。
  * 定时 / 加密备份是另一件事，需要备份服务，本文件不做假。
@@ -44,6 +45,7 @@ export interface ImportSummary {
 	keys: number;
 	snippets: number;
 	forwards: number;
+	proxyProfiles: number;
 	/** 导入文件里带着的旧版明文密码：迁进钥匙串的条数 / 只留在本次运行内存里的条数 */
 	secretsMigrated: number;
 	secretsSessionOnly: number;
@@ -103,11 +105,13 @@ export async function mergeConfig(incoming: PersistedConfig): Promise<ImportSumm
 	const keys = mergeById(useKeysStore.getState().keys, incoming.keys);
 	const snippets = mergeById(useSnippetsStore.getState().snippets, incoming.snippets);
 	const forwards = mergeById(useForwardsStore.getState().rules, incoming.forwards);
+	const proxyProfiles = mergeById(useProxyProfilesStore.getState().profiles, incoming.proxyProfiles);
 
 	useHostsStore.getState().setAll(mergedHosts, groups);
 	useKeysStore.getState().setAll(keys);
 	useSnippetsStore.getState().setAll(snippets);
 	useForwardsStore.getState().setAll(forwards);
+	useProxyProfilesStore.getState().setAll(proxyProfiles);
 	// 导入是用户的明确动作，立刻落盘，不等去抖
 	await flushNow();
 	const migration = await migrateLegacySecrets(
@@ -124,6 +128,7 @@ export async function mergeConfig(incoming: PersistedConfig): Promise<ImportSumm
 		keys: incoming.keys.length,
 		snippets: incoming.snippets.length,
 		forwards: incoming.forwards.length,
+		proxyProfiles: incoming.proxyProfiles.length,
 		secretsMigrated: migration?.migrated ?? 0,
 		secretsSessionOnly: migration?.sessionOnly.length ?? 0,
 	};

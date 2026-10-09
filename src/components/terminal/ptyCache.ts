@@ -203,6 +203,11 @@ export function closePty(paneId: string): void {
 }
 
 /** 写入键盘输入 */
+/** 清空本地终端的回放缓冲（同 clearSshReplay） */
+export function clearPtyReplay(paneId: string): void {
+	entries.get(paneId)?.replay.clear();
+}
+
 export function writePty(paneId: string, data: string): boolean {
 	const entry = entries.get(paneId);
 	if (!entry?.handle) return false;

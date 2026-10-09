@@ -8,6 +8,8 @@ import { secretDelete, secretLoad, secretSave } from "@/lib/secret";
 import { proxySecretAccount } from "@/lib/configSecrets";
 import { useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
+import { useProxyProfilesStore } from "@/store/proxyProfiles";
+import { formatProxyConfigEndpoint, formatProxyConfigType, isValidProxyPort } from "@/lib/proxyProfiles";
 import { toast } from "@/store/toast";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
@@ -17,6 +19,11 @@ export interface HostEditModalProps {
 	open: boolean;
 	hostId?: string | null;
 	initialGroupId?: string | null;
+	/**
+	 * 「复制主机」：以这台主机为模板打开新建表单（同 Netcatty handleDuplicateHost —— 复制全部字段，
+	 * 名称追加「(复制)」，不带置顶 / 最近连接，保存前可修改）。只在 hostId 为空 / "new" 时生效。
+	 */
+	duplicateFromId?: string | null;
 	onClose: () => void;
 	onSaved?: (host: Host, andConnect?: boolean) => void;
 }
@@ -100,6 +107,8 @@ interface FormState {
 	encoding: string;
 	termType: string;
 	proxyEnabled: boolean;
+	/** 选中的已保存代理（空 = 自定义代理），同 Netcatty「已保存代理 / 自定义代理」 */
+	proxyProfileId: string;
 	proxyType: "socks5" | "http";
 	proxyHost: string;
 	proxyPort: string;
@@ -115,7 +124,7 @@ interface FormState {
 	cursorStyle: "block" | "bar" | "underline";
 }
 
-export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }: HostEditModalProps) {
+export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, onClose, onSaved }: HostEditModalProps) {
 	const navigate = useNavigate();
 	const hosts = useHostsStore((s) => s.hosts);
 	const groups = useHostsStore((s) => s.groups);
@@ -123,12 +132,20 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 	const upsertHost = useHostsStore((s) => s.upsertHost);
 	const removeHost = useHostsStore((s) => s.removeHost);
 	const keys = useKeysStore((s) => s.keys);
+	const proxyProfiles = useProxyProfilesStore((s) => s.profiles);
 
 	const isEditing = Boolean(hostId && hostId !== "new");
 	const targetHost = useMemo(() => {
 		if (!isEditing || !hostId) return null;
 		return hosts.find((h) => h.id === hostId) ?? null;
 	}, [isEditing, hostId, hosts]);
+	/** 复制主机时的模板 */
+	const sourceHost = useMemo(() => {
+		if (isEditing || !duplicateFromId) return null;
+		return hosts.find((h) => h.id === duplicateFromId) ?? null;
+	}, [isEditing, duplicateFromId, hosts]);
+	/** 表单的数据来源：编辑的主机，或被复制的主机 */
+	const formSource = targetHost ?? sourceHost;
 
 	const [tab, setTab] = useState<TabKey>("basic");
 	const [form, setForm] = useState<FormState>(() => toForm(targetHost, keys[0]?.id, initialGroupId));
@@ -136,7 +153,7 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 	/** 本次编辑里动过「终端外观」 */
 	const [appearanceTouched, setAppearanceTouched] = useState(false);
 	/** 已经是自定义外观，或者这次改了外观：保存后这台主机的终端用它自己的外观 */
-	const appearanceCustom = Boolean(targetHost?.terminal?.custom) || appearanceTouched;
+	const appearanceCustom = Boolean(formSource?.terminal?.custom) || appearanceTouched;
 	const [errors, setErrors] = useState<Record<string, string>>({});
 	const [showPassword, setShowPassword] = useState(false);
 	const [showPassphrase, setShowPassphrase] = useState(false);
@@ -155,7 +172,8 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 			setCreatingGroup(false);
 			return;
 		}
-		const initialValues = toForm(targetHost, keys[0]?.id, initialGroupId);
+		const initialValues = toForm(formSource, keys[0]?.id, initialGroupId);
+		if (sourceHost && !targetHost) initialValues.name = `${sourceHost.name} (复制)`;
 		setForm(initialValues);
 		setInitial(initialValues);
 		setAppearanceTouched(false);
@@ -164,8 +182,8 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 		setShowPassword(false);
 		setShowPassphrase(false);
 
-		if (targetHost && targetHost.auth.rememberPassword) {
-			void secretLoad(targetHost.id).then((saved) => {
+		if (formSource && formSource.auth.rememberPassword) {
+			void secretLoad(formSource.id).then((saved) => {
 				if (saved) {
 					setForm((f) => ({ ...f, password: saved }));
 					setInitial((f) => ({ ...f, password: saved }));
@@ -173,15 +191,15 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 			});
 		}
 		// 代理口令同样只在钥匙串里
-		if (targetHost?.proxy?.username) {
-			void secretLoad(proxySecretAccount(targetHost.id)).then((saved) => {
+		if (formSource?.proxy?.username) {
+			void secretLoad(proxySecretAccount(formSource.id)).then((saved) => {
 				if (saved) {
 					setForm((f) => ({ ...f, proxyPassword: saved }));
 					setInitial((f) => ({ ...f, proxyPassword: saved }));
 				}
 			});
 		}
-	}, [open, targetHost, keys]);
+	}, [open, targetHost, sourceHost, keys]);
 
 	// 键盘快捷键监听 (Esc / Ctrl+Enter)
 	useEffect(() => {
@@ -202,6 +220,8 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 		window.addEventListener("keydown", handleKeyDown);
 		return () => window.removeEventListener("keydown", handleKeyDown);
 	}, [open, isDirty, form]);
+
+	const selectedProxyProfile = proxyProfiles.find((p) => p.id === form.proxyProfileId);
 
 	const update = <K extends keyof FormState>(key: K, value: FormState[K]) => {
 		if ((APPEARANCE_FIELDS as readonly string[]).includes(key)) setAppearanceTouched(true);
@@ -261,6 +281,17 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 			setTab("basic");
 			return false;
 		}
+		// Netcatty prepareProxyConfigForSave：引用的已保存代理不存在 / 自定义代理端口非法时拒绝保存
+		if (form.proxyEnabled && form.proxyProfileId && !selectedProxyProfile) {
+			toast({ title: "保存的代理不存在", tone: "danger" });
+			setTab("network");
+			return false;
+		}
+		if (form.proxyEnabled && !form.proxyProfileId && !isValidProxyPort(form.proxyPort.trim() || "1080")) {
+			toast({ title: "端口必须在 1 到 65535 之间。", tone: "danger" });
+			setTab("network");
+			return false;
+		}
 		return true;
 	};
 
@@ -282,8 +313,10 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 			username: form.username.trim() || "root",
 			tags: tagsList,
 			favorite: form.favorite,
-			os: form.osPreset !== "auto" ? { name: form.osPreset, icon: "" } : targetHost?.os,
-			spec: targetHost?.spec,
+			os: form.osPreset !== "auto" ? { name: form.osPreset, icon: "" } : formSource?.os,
+			spec: formSource?.spec,
+			// 置顶是列表状态：编辑时保留，复制出来的新主机不带（同 Netcatty pinned: undefined）
+			...(targetHost?.pinned ? { pinned: true } : {}),
 			auth: {
 				method: form.authMethod,
 				keyId:
@@ -294,10 +327,10 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 					form.authMethod === "key" || form.authMethod === "key-passphrase"
 						? form.keyPath.trim() || undefined
 						: undefined,
-				rememberPassword: form.authMethod === "password" ? form.rememberPassword : targetHost?.auth.rememberPassword,
+				rememberPassword: form.authMethod === "password" ? form.rememberPassword : formSource?.auth.rememberPassword,
 			},
 			jumpHostIds: form.jumpHostIds,
-			proxy: form.proxyEnabled
+			proxy: form.proxyEnabled && !form.proxyProfileId
 				? {
 						type: form.proxyType,
 						host: form.proxyHost.trim() || "127.0.0.1",
@@ -306,6 +339,7 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 						...(form.proxyUsername.trim() ? { username: form.proxyUsername.trim() } : {}),
 				  }
 				: null,
+			...(form.proxyEnabled && form.proxyProfileId ? { proxyProfileId: form.proxyProfileId } : {}),
 			encoding: form.encoding,
 			termType: form.termType,
 			envVars: form.envVars.filter((v) => v.key.trim() !== ""),
@@ -408,7 +442,7 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 						<div>
 							<div className="flex items-center gap-2">
 								<h2 className="text-[14px] font-bold tracking-tight text-surface-foreground">
-									{isEditing ? "编辑主机配置" : "新建主机节点"}
+									{isEditing ? "编辑主机配置" : sourceHost ? "复制主机" : "新建主机节点"}
 								</h2>
 								{isDirty && (
 									<span className="flex items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-[9.5px] font-medium text-warning">
@@ -939,6 +973,40 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 									</div>
 
 									{form.proxyEnabled && (
+										<div className="space-y-1 pt-2 border-t border-border/40">
+											<Field label="已保存代理">
+												<Select
+													value={form.proxyProfileId}
+													onChange={(e) => update("proxyProfileId", e.target.value)}
+													className="h-8 text-xs"
+												>
+													<option value="">自定义代理</option>
+													{proxyProfiles.map((profile) => (
+														<option key={profile.id} value={profile.id}>
+															{profile.label} · {formatProxyConfigType(profile.config)} {formatProxyConfigEndpoint(profile.config)}
+														</option>
+													))}
+													{form.proxyProfileId && !selectedProxyProfile && (
+														<option value={form.proxyProfileId}>缺失 · 保存的代理不存在</option>
+													)}
+												</Select>
+											</Field>
+											{form.proxyProfileId && !selectedProxyProfile && (
+												<p className="text-[10.5px] text-danger">保存的代理不存在，请重新选择或改用自定义代理</p>
+											)}
+											{proxyProfiles.length === 0 && (
+												<p className="text-[10.5px] text-muted">
+													还没有已保存代理，可在
+													<button type="button" className="mx-0.5 text-primary hover:underline" onClick={() => navigate("/proxies")}>
+														代理
+													</button>
+													页创建后在这里选择。
+												</p>
+											)}
+										</div>
+									)}
+
+									{form.proxyEnabled && !form.proxyProfileId && (
 										<div className="grid grid-cols-[100px_1fr_100px] gap-2 pt-2 border-t border-border/40">
 											<Field label="协议类型">
 												<Select
@@ -1345,7 +1413,8 @@ function toForm(host?: Host | null, defaultKeyId?: string, fallbackGroupId?: str
 		jumpHostIds: host?.jumpHostIds ?? [],
 		encoding: host?.encoding ?? "UTF-8",
 		termType: host?.termType ?? "xterm-256color",
-		proxyEnabled: Boolean(host?.proxy),
+		proxyEnabled: Boolean(host?.proxy || host?.proxyProfileId),
+		proxyProfileId: host?.proxy ? "" : (host?.proxyProfileId ?? ""),
 		proxyType: host?.proxy?.type ?? "socks5",
 		proxyHost: host?.proxy?.host ?? "127.0.0.1",
 		proxyPort: String(host?.proxy?.port ?? 1080),

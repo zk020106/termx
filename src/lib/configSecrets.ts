@@ -24,6 +24,11 @@ export function proxySecretAccount(hostId: string): string {
 	return `proxy:${hostId}`;
 }
 
+/** 代理配置（proxyProfiles）口令在钥匙串里的账户名 */
+export function proxyProfileSecretAccount(profileId: string): string {
+	return `proxy-profile:${profileId}`;
+}
+
 /** 剥掉每台主机里的明文登录密码与代理口令；返回干净的主机列表与剥下来的值（只收非空字符串） */
 export function stripHostSecrets(hosts: Host[]): { hosts: Host[]; legacy: LegacySecret[] } {
 	const legacy: LegacySecret[] = [];

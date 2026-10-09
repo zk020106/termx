@@ -55,6 +55,11 @@ export default function Editor() {
 		const sessionKey = searchParams.get("sessionKey");
 		const path = searchParams.get("path");
 		const name = searchParams.get("name") || (path ? path.split("/").pop() : "") || "untitled";
+		const localPath = searchParams.get("localPath");
+		if (localPath) {
+			void openLocalPath(localPath);
+			return;
+		}
 
 		if (sessionKey && path) {
 			const tabId = `remote-${sessionKey}-${path}`;
@@ -160,14 +165,18 @@ export default function Editor() {
 
 	// 打开本地文件
 	const handleOpenLocalFile = async () => {
+		const res = await openFileDialog({ multiple: false });
+		if (!res || Array.isArray(res)) return;
+		await openLocalPath(res);
+	};
+
+	/** 按路径打开本地文件：对话框选的，或 SFTP 本地栏右键「编辑」带过来的 ?localPath= */
+	async function openLocalPath(filePath: string) {
 		try {
-			const res = await openFileDialog({ multiple: false });
-			if (!res || Array.isArray(res)) return;
-			const filePath = res;
 			const fileName = filePath.replace(/\\/g, "/").split("/").pop() || "untitled";
 			const tabId = `local-${filePath}`;
 
-			const existing = tabs.find((t) => t.id === tabId);
+			const existing = useEditorStore.getState().tabs.find((t) => t.id === tabId);
 			if (existing) {
 				setActiveTabId(tabId);
 				return;
@@ -185,12 +194,12 @@ export default function Editor() {
 				saving: false,
 				mtime,
 			};
-			setTabs((prev) => [...prev, newTab]);
+			setTabs((prev) => (prev.some((t) => t.id === tabId) ? prev : [...prev, newTab]));
 			setActiveTabId(tabId);
 		} catch (e) {
 			toast({ title: "打开本地文件失败", description: String(e), tone: "danger" });
 		}
-	};
+	}
 
 	// 关闭标签：有未保存修改先确认
 	const handleCloseTab = (tabId: string, confirmed = false) => {

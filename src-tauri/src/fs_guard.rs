@@ -265,6 +265,28 @@ async fn ask(app: &AppHandle, path: &Path, action: &str, reason: &str) -> Result
     }
 }
 
+/// 通用的原生确认框（打开本地文件 / 用指定程序打开）：同一 key 本次运行只问一次
+pub async fn confirm_native(app: &AppHandle, key: &str, title: &str, message: String, ok_label: &str) -> Result<(), String> {
+    if already_confirmed(key) {
+        return Ok(());
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(ok_label.to_string(), "取消".into()))
+        .show(move |ok| {
+            let _ = tx.send(ok);
+        });
+    if rx.await.unwrap_or(false) {
+        remember_confirmed(key.to_string());
+        Ok(())
+    } else {
+        Err("已取消".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

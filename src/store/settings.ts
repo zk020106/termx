@@ -51,6 +51,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 		const state = get();
 		return {
 			terminal: {
+				...pickTerminalExtras(state),
 				fontFamily: state.fontFamily,
 				fontSize: state.fontSize,
 				lineHeight: state.lineHeight,
@@ -76,3 +77,33 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 	},
 }));
 
+
+/** 移植自 Netcatty 的终端行为字段：逐项抄出，不把 store 的函数带进配置文件 */
+function pickTerminalExtras(state: TerminalPreferences) {
+	return {
+		middleClick: state.middleClick,
+		showContextMenuOverFullscreenApps: state.showContextMenuOverFullscreenApps,
+		copyOnSelect: state.copyOnSelect,
+		cursorBlink: state.cursorBlink,
+		drawBoldInBrightColors: state.drawBoldInBrightColors,
+		fontWeight: state.fontWeight,
+		fontWeightBold: state.fontWeightBold,
+		minimumContrastRatio: state.minimumContrastRatio,
+		altAsMeta: state.altAsMeta,
+		wordSeparators: state.wordSeparators,
+		smoothScrolling: state.smoothScrolling,
+		scrollOnInput: state.scrollOnInput,
+		disableBracketedPaste: state.disableBracketedPaste,
+		clearWipesScrollback: state.clearWipesScrollback,
+		keywordHighlightEnabled: state.keywordHighlightEnabled,
+		keywordHighlightRules: state.keywordHighlightRules,
+		tabDoubleClick: state.tabDoubleClick,
+		hotkeyScheme: state.hotkeyScheme,
+		customKeyBindings: state.customKeyBindings,
+		disableTerminalFontZoom: state.disableTerminalFontZoom,
+		sftpDoubleClickBehavior: state.sftpDoubleClickBehavior,
+		sftpAutoSync: state.sftpAutoSync,
+		sftpShowHiddenFiles: state.sftpShowHiddenFiles,
+		sftpFileOpeners: state.sftpFileOpeners,
+	};
+}
