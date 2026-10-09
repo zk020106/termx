@@ -724,14 +724,21 @@ export default function Snippets() {
 		<WindowChrome>
 			<div className="flex min-h-0 flex-1 bg-surface">
 				{/* 左侧：片段库（搜索 + 分组筛选 + 分组列表） */}
-				<aside className="flex w-[280px] shrink-0 flex-col border-r border-border bg-surface-sunk">
+				<aside className="flex w-[300px] shrink-0 flex-col border-r border-border bg-surface-sunk">
 					<div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
-						<div className="flex items-center gap-1.5">
-							<span className="icon-[lucide--terminal-square] size-3.5 text-primary" />
-							<h1 className="text-[12px] font-semibold text-surface-foreground">命令片段库</h1>
+						<div className="flex shrink-0 items-center gap-1.5 min-w-0">
+							<span className="icon-[lucide--terminal-square] size-3.5 shrink-0 text-primary" />
+							<h1 className="whitespace-nowrap text-[12px] font-semibold text-surface-foreground">命令片段库</h1>
 						</div>
-						<div className="flex items-center gap-1">
-							<Button size="sm" variant="ghost" icon="icon-[lucide--upload]" onClick={() => void importSnippets()} title="导入片段（Netcatty JSON）">
+						<div className="flex shrink-0 items-center gap-1">
+							<Button
+								size="sm"
+								variant="ghost"
+								icon="icon-[lucide--upload]"
+								onClick={() => void importSnippets()}
+								title="导入片段（Netcatty JSON）"
+								className="h-6.5 px-2 text-[11px]"
+							>
 								导入
 							</Button>
 							<Button
@@ -741,16 +748,29 @@ export default function Snippets() {
 								onClick={() => void exportSnippets(library, "all")}
 								disabled={library.length === 0}
 								title="导出全部片段（Netcatty JSON）"
+								className="h-6.5 px-2 text-[11px]"
 							>
 								导出
 							</Button>
-							<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
+							<Button
+								size="sm"
+								variant="primary"
+								icon="icon-[lucide--plus]"
+								onClick={openNew}
+								className="h-6.5 px-2.5 text-[11px]"
+							>
 								新建
 							</Button>
 						</div>
 					</div>
-					<div className="flex items-center gap-1 border-b border-border px-2 py-1">
-						<Button size="sm" variant={historyOpen ? "primary" : "ghost"} icon="icon-[lucide--clock]" onClick={() => setHistoryOpen(!historyOpen)}>
+					<div className="flex items-center gap-1 border-b border-border px-2.5 py-1">
+						<Button
+							size="sm"
+							variant={historyOpen ? "primary" : "ghost"}
+							icon="icon-[lucide--clock]"
+							onClick={() => setHistoryOpen(!historyOpen)}
+							className="h-6.5 px-2 text-[11px]"
+						>
 							Shell 历史
 						</Button>
 						<div className="flex-1" />
@@ -761,6 +781,7 @@ export default function Snippets() {
 							title="选择代码片段"
 							aria-label="选择代码片段"
 							onClick={() => (multiSelect ? clearSelection() : setMultiSelect(true))}
+							className="h-6.5 w-6.5 p-0"
 						/>
 					</div>
 					{multiSelect && (

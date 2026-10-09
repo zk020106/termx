@@ -209,9 +209,9 @@ export default function Transfers() {
 				{/* 左侧任务列表 (280px) */}
 				<aside className="flex w-[280px] shrink-0 flex-col border-r border-border bg-surface-sunk">
 					<div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
-						<div className="flex items-center gap-1.5">
-							<span className="icon-[lucide--arrow-down-up] size-3.5 text-primary" />
-							<h1 className="text-[12px] font-semibold text-surface-foreground">传输队列</h1>
+						<div className="flex shrink-0 items-center gap-1.5 min-w-0">
+							<span className="icon-[lucide--arrow-down-up] size-3.5 shrink-0 text-primary" />
+							<h1 className="whitespace-nowrap text-[12px] font-semibold text-surface-foreground">传输队列</h1>
 						</div>
 						<div className="flex items-center gap-2 font-mono text-[11px] tabular-nums text-muted">
 							<span>{visible.length} 个任务</span>

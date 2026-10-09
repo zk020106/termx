@@ -376,18 +376,18 @@ export default function Keys() {
 	return (
 		<WindowChrome>
 			<div className="relative flex min-h-0 flex-1 bg-surface">
-				{/* 左侧密钥列表 (280px) */}
-				<aside className="flex w-[280px] shrink-0 flex-col border-r border-border bg-surface-sunk">
-					<div className="flex h-10 items-center justify-between border-b border-border px-3">
-						<div className="flex items-center gap-1.5">
-							<span className="icon-[lucide--key-round] size-3.5 text-primary" />
-							<h1 className="text-[12px] font-semibold text-surface-foreground">SSH 密钥管理</h1>
+				{/* 左侧密钥列表 (300px) */}
+				<aside className="flex w-[300px] shrink-0 flex-col border-r border-border bg-surface-sunk">
+					<div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
+						<div className="flex shrink-0 items-center gap-1.5 min-w-0">
+							<span className="icon-[lucide--key-round] size-3.5 shrink-0 text-primary" />
+							<h1 className="whitespace-nowrap text-[12px] font-semibold text-surface-foreground">SSH 密钥管理</h1>
 						</div>
-						<div className="flex items-center gap-1">
-							<Button size="sm" variant="primary" icon="icon-[lucide--key-round]" className="h-6 px-2 text-[11px]" onClick={() => setGenerateOpen(true)}>
+						<div className="flex shrink-0 items-center gap-1">
+							<Button size="sm" variant="primary" icon="icon-[lucide--key-round]" className="h-6.5 px-2 text-[11px]" onClick={() => setGenerateOpen(true)}>
 								生成密钥
 							</Button>
-							<Button size="sm" icon="icon-[lucide--file-key]" className="h-6 px-2 text-[11px]" onClick={() => setImportOpen(true)}>
+							<Button size="sm" icon="icon-[lucide--file-key]" className="h-6.5 px-2 text-[11px]" onClick={() => setImportOpen(true)}>
 								导入密钥
 							</Button>
 						</div>

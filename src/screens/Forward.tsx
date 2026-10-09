@@ -275,10 +275,10 @@ export default function Forward() {
 			<div className="flex min-h-0 flex-1 bg-surface">
 				{/* 左侧规则列表 */}
 				<aside className="flex w-[280px] shrink-0 flex-col border-r border-border bg-surface-sunk">
-					<div className="flex h-10 items-center justify-between border-b border-border px-3">
-						<div className="flex items-center gap-1.5">
-							<span className="icon-[lucide--waypoints] size-3.5 text-primary" />
-							<h1 className="text-[12px] font-semibold text-surface-foreground">端口转发规则</h1>
+					<div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
+						<div className="flex shrink-0 items-center gap-1.5 min-w-0">
+							<span className="icon-[lucide--waypoints] size-3.5 shrink-0 text-primary" />
+							<h1 className="whitespace-nowrap text-[12px] font-semibold text-surface-foreground">端口转发规则</h1>
 						</div>
 						<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
 							新建
