@@ -817,18 +817,18 @@ export default function Snippets() {
 
 					<div className="px-2 pt-2">
 						<div className="relative">
-							<span className="icon-[lucide--search] pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2 text-muted" />
+							<span className="icon-[lucide--search] pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted" />
 							<Input
 								value={query}
 								onChange={(event) => setQuery(event.target.value)}
 								placeholder="搜索片段名称或脚本…"
-								className="h-7 pl-6 text-[11px]"
+								className="h-7.5 pl-8 text-[11.5px]"
 							/>
 						</div>
 					</div>
 
 					{/* 分组筛选 */}
-					<div className="flex flex-wrap gap-1 px-2 py-2">
+					<div className="flex flex-wrap gap-1.5 px-2 py-2">
 						{[ALL_GROUPS, ...groups].map((name) => {
 							const count = name === ALL_GROUPS ? library.length : library.filter((item) => item.group === name).length;
 							return (
@@ -840,14 +840,16 @@ export default function Snippets() {
 										if (name !== ALL_GROUPS) openMenu(event, { kind: "group", group: name });
 									}}
 									className={cn(
-										"flex h-5 items-center gap-1 rounded border px-1.5 text-[10px] transition-colors",
+										"inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition-colors cursor-pointer select-none",
 										name === group
-											? "border-primary/40 bg-primary/15 font-medium text-primary"
-											: "border-border bg-surface text-muted hover:bg-surface-raised hover:text-surface-foreground",
+											? "border-primary/50 bg-primary/15 text-primary font-semibold shadow-2xs"
+											: "border-border/70 bg-surface text-muted hover:border-border hover:bg-surface-raised hover:text-surface-foreground",
 									)}
 								>
-									{name}
-									<span className="font-mono text-[9px] text-faint">{count}</span>
+									<span>{name}</span>
+									<span className={cn("font-mono text-[10px]", name === group ? "text-primary/80 font-bold" : "text-faint")}>
+										{count}
+									</span>
 								</button>
 							);
 						})}

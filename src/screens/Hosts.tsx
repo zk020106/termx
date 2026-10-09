@@ -304,14 +304,14 @@ export default function Hosts() {
 												}
 											}}
 											className={cn(
-												"flex h-5 items-center gap-1 rounded-md px-1.5 text-[10px] font-mono transition-colors cursor-pointer border select-none",
+												"inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-[11px] font-mono transition-colors cursor-pointer border select-none",
 												isTagSelected
-													? "border-primary/40 bg-primary/15 text-primary font-medium"
+													? "border-primary/50 bg-primary/15 text-primary font-medium shadow-2xs"
 													: "border-border/60 bg-surface/60 text-muted hover:border-border hover:bg-surface hover:text-surface-foreground",
 											)}
 										>
 											<span>#{tag}</span>
-											<span className="text-[9px] text-faint">{count}</span>
+											<span className={cn("text-[10px]", isTagSelected ? "text-primary/80 font-bold" : "text-faint")}>{count}</span>
 										</button>
 									);
 								})}

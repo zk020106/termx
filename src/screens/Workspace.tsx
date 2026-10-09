@@ -2116,14 +2116,14 @@ function ForwardSidebar({
 						onClearFilter?.();
 					}}
 					className={cn(
-						"flex h-5 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium transition-all cursor-pointer border select-none",
+						"inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium transition-all cursor-pointer border select-none",
 						scope === "all"
-							? "border-primary/40 bg-primary/15 text-primary font-semibold"
+							? "border-primary/50 bg-primary/15 text-primary font-semibold shadow-2xs"
 							: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
 					)}
 				>
 					全部规则
-					<span className="font-mono text-[9px] opacity-75">{rules.length}</span>
+					<span className="font-mono text-[10px] opacity-75">{rules.length}</span>
 				</button>
 
 				{hostInfo && (
@@ -2131,15 +2131,15 @@ function ForwardSidebar({
 						type="button"
 						onClick={() => setScope("host")}
 						className={cn(
-							"flex h-5 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium transition-all cursor-pointer border select-none truncate max-w-[130px]",
+							"inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium transition-all cursor-pointer border select-none truncate max-w-[130px]",
 							scope === "host"
-								? "border-primary/40 bg-primary/15 text-primary font-semibold"
+								? "border-primary/50 bg-primary/15 text-primary font-semibold shadow-2xs"
 								: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
 						)}
 						title={`当前主机：${hostInfo.name}`}
 					>
 						<span className="truncate">{hostInfo.name}</span>
-						<span className="font-mono text-[9px] opacity-75 shrink-0">{hostRulesCount}</span>
+						<span className="font-mono text-[10px] opacity-75 shrink-0">{hostRulesCount}</span>
 					</button>
 				)}
 			</div>
