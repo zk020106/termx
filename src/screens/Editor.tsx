@@ -1,31 +1,51 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button } from "@/components/ui/Button";
 import { Badge, EmptyState } from "@/components/ui/Display";
+import { Modal } from "@/components/ui/Overlay";
 import { cn } from "@/lib/cn";
-import { fsLocalReadFile, fsLocalWriteFile, getFileIcon, sftpReadFile, sftpWriteFile } from "@/lib/sftp";
+import {
+	conflictMtime,
+	formatUnixTime,
+	fsLocalReadFile,
+	fsLocalStat,
+	fsLocalWriteFile,
+	getFileIcon,
+	sftpReadFile,
+	sftpStat,
+	sftpWriteFile,
+} from "@/lib/sftp";
+import { useEditorStore, type EditorFileTab } from "@/store/editor";
 import { toast } from "@/store/toast";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, useNavigate, Link } from "react-router";
 
-interface EditorTab {
-	id: string;
-	name: string;
-	path: string;
-	side: "remote" | "local";
-	sessionKey?: string;
-	content: string;
-	savedContent: string;
-	loading: boolean;
-	saving: boolean;
+type EditorTab = EditorFileTab;
+
+/** 读取内容并记下当时的修改时间（之后保存时据此判断文件有没有被别人改过） */
+async function readWithMtime(tab: Pick<EditorTab, "side" | "sessionKey" | "path">): Promise<{ text: string; mtime: number }> {
+	if (tab.side === "remote" && tab.sessionKey) {
+		const key = tab.sessionKey;
+		const [stat, text] = await Promise.all([sftpStat(key, tab.path).catch(() => null), sftpReadFile(key, tab.path)]);
+		return { text, mtime: stat?.exists ? stat.mtime : 0 };
+	}
+	const [stat, text] = await Promise.all([fsLocalStat(tab.path).catch(() => null), fsLocalReadFile(tab.path)]);
+	return { text, mtime: stat?.exists ? stat.mtime : 0 };
 }
 
 export default function Editor() {
 	const navigate = useNavigate();
 	const [searchParams] = useSearchParams();
 
-	const [tabs, setTabs] = useState<EditorTab[]>([]);
-	const [activeTabId, setActiveTabId] = useState<string>("");
+	// 打开的文件放在 store 里：离开编辑器再回来，未保存的修改还在
+	const tabs = useEditorStore((s) => s.tabs);
+	const setTabs = useEditorStore((s) => s.setTabs);
+	const activeTabId = useEditorStore((s) => s.activeTabId);
+	const setActiveTabId = useEditorStore((s) => s.setActiveTabId);
+	/** 保存时发现文件已被别人改过 */
+	const [conflict, setConflict] = useState<{ tabId: string; diskMtime: number } | null>(null);
+	/** 关闭有未保存修改的标签前确认 */
+	const [closing, setClosing] = useState<string | null>(null);
 
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const lineNumbersRef = useRef<HTMLDivElement>(null);
@@ -54,17 +74,22 @@ export default function Editor() {
 					savedContent: "",
 					loading: true,
 					saving: false,
+					mtime: 0,
 				};
 				setActiveTabId(tabId);
 				return [...prev, newTab];
 			});
+			// 已经打开过（可能有未保存修改）：只切过去，不重新读、不覆盖
+			if (useEditorStore.getState().tabs.some((t) => t.id === tabId && !t.loading)) return;
 
 			// 异步读取远程文件
-			sftpReadFile(sessionKey, path)
-				.then((text) => {
+			readWithMtime({ side: "remote", sessionKey, path })
+				.then(({ text, mtime }) => {
 					setTabs((prev) =>
 						prev.map((t) =>
-							t.id === tabId ? { ...t, content: text, savedContent: text, loading: false } : t,
+							t.id === tabId
+								? { ...t, content: text, savedContent: text, loading: false, mtime, readError: undefined }
+								: t,
 						),
 					);
 				})
@@ -79,9 +104,10 @@ export default function Editor() {
 							t.id === tabId
 								? {
 										...t,
-										content: `/* 读取文件失败: ${err} */`,
+										content: "",
 										savedContent: "",
 										loading: false,
+										readError: String(err),
 									}
 								: t,
 						),
@@ -93,19 +119,23 @@ export default function Editor() {
 	const activeTab = useMemo(() => tabs.find((t) => t.id === activeTabId) ?? null, [tabs, activeTabId]);
 
 	// 保存文件
-	const handleSave = async (tab: EditorTab = activeTab!) => {
-		if (!tab || tab.saving) return;
+	// force = 用户已确认覆盖别人对磁盘文件的修改
+	const handleSave = async (tab: EditorTab = activeTab!, force = false) => {
+		if (!tab || tab.saving || tab.loading || tab.readError) return;
 
 		setTabs((prev) => prev.map((t) => (t.id === tab.id ? { ...t, saving: true } : t)));
+		const content = tab.content;
+		const expected = force || !tab.mtime ? null : tab.mtime;
 		try {
-			if (tab.side === "remote" && tab.sessionKey) {
-				await sftpWriteFile(tab.sessionKey, tab.path, tab.content);
-			} else {
-				await fsLocalWriteFile(tab.path, tab.content);
-			}
+			// 先写临时文件再原子替换（后端实现），中途失败不会留下半截文件
+			const mtime =
+				tab.side === "remote" && tab.sessionKey
+					? await sftpWriteFile(tab.sessionKey, tab.path, content, expected)
+					: await fsLocalWriteFile(tab.path, content, expected);
 			setTabs((prev) =>
 				prev.map((t) =>
-					t.id === tab.id ? { ...t, savedContent: t.content, saving: false } : t,
+					// 保存期间用户又改了内容：只把「保存时的那份」记为已保存
+					t.id === tab.id ? { ...t, savedContent: content, saving: false, mtime } : t,
 				),
 			);
 			toast({
@@ -115,6 +145,11 @@ export default function Editor() {
 			});
 		} catch (e) {
 			setTabs((prev) => prev.map((t) => (t.id === tab.id ? { ...t, saving: false } : t)));
+			const diskMtime = conflictMtime(e);
+			if (diskMtime !== null) {
+				setConflict({ tabId: tab.id, diskMtime });
+				return;
+			}
 			toast({
 				title: `保存失败: ${tab.name}`,
 				description: String(e),
@@ -138,7 +173,7 @@ export default function Editor() {
 				return;
 			}
 
-			const content = await fsLocalReadFile(filePath);
+			const { text: content, mtime } = await readWithMtime({ side: "local", path: filePath });
 			const newTab: EditorTab = {
 				id: tabId,
 				name: fileName,
@@ -148,6 +183,7 @@ export default function Editor() {
 				savedContent: content,
 				loading: false,
 				saving: false,
+				mtime,
 			};
 			setTabs((prev) => [...prev, newTab]);
 			setActiveTabId(tabId);
@@ -156,8 +192,13 @@ export default function Editor() {
 		}
 	};
 
-	// 关闭标签
-	const handleCloseTab = (tabId: string) => {
+	// 关闭标签：有未保存修改先确认
+	const handleCloseTab = (tabId: string, confirmed = false) => {
+		const tab = tabs.find((t) => t.id === tabId);
+		if (!confirmed && tab && !tab.readError && tab.content !== tab.savedContent) {
+			setClosing(tabId);
+			return;
+		}
 		setTabs((prev) => {
 			const filtered = prev.filter((t) => t.id !== tabId);
 			if (activeTabId === tabId) {
@@ -165,6 +206,25 @@ export default function Editor() {
 			}
 			return filtered;
 		});
+	};
+
+	/** 冲突时选择「重新载入」：丢弃本地修改，读磁盘上的新版本 */
+	const reloadFromDisk = async (tabId: string) => {
+		const tab = tabs.find((t) => t.id === tabId);
+		if (!tab) return;
+		setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, loading: true } : t)));
+		try {
+			const { text, mtime } = await readWithMtime(tab);
+			setTabs((prev) =>
+				prev.map((t) =>
+					t.id === tabId ? { ...t, content: text, savedContent: text, mtime, loading: false, readError: undefined } : t,
+				),
+			);
+			toast({ title: `已重新载入: ${tab.name}`, description: tab.path, tone: "default" });
+		} catch (e) {
+			setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, loading: false } : t)));
+			toast({ title: `重新载入失败: ${tab.name}`, description: String(e), tone: "danger" });
+		}
 	};
 
 	// 键盘快捷键监听 (Ctrl+S)
@@ -242,7 +302,23 @@ export default function Editor() {
 									<span className={cn(iconClass, "size-3 shrink-0 text-primary")} />
 									<span className="truncate max-w-[140px]">{tab.name}</span>
 									{isDirty ? (
-										<span className="size-2 rounded-full bg-primary animate-pulse" title="未保存更改" />
+										<span className="relative flex size-4 items-center justify-center">
+											<span
+												className="size-2 rounded-full bg-primary animate-pulse group-hover:hidden"
+												title="未保存更改"
+											/>
+											<button
+												type="button"
+												title="关闭（有未保存更改）"
+												onClick={(e) => {
+													e.stopPropagation();
+													handleCloseTab(tab.id);
+												}}
+												className="hidden size-4 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-surface-foreground group-hover:flex"
+											>
+												×
+											</button>
+										</span>
 									) : (
 										<button
 											type="button"
@@ -279,7 +355,7 @@ export default function Editor() {
 									size="sm"
 									variant={activeTab.content !== activeTab.savedContent ? "primary" : "default"}
 									onClick={() => handleSave(activeTab)}
-									disabled={activeTab.saving}
+									disabled={activeTab.saving || activeTab.loading || !!activeTab.readError}
 									className="h-6 text-[10.5px]"
 								>
 									<span className="icon-[lucide--save] size-3" />
@@ -327,6 +403,19 @@ export default function Editor() {
 							<div className="flex h-full w-full items-center justify-center gap-2 text-muted">
 								<span className="icon-[lucide--refresh-cw] size-4 animate-spin text-primary" />
 								<span>正在加载文件内容...</span>
+							</div>
+						) : activeTab.readError ? (
+							<div className="flex h-full w-full items-center justify-center">
+								<EmptyState
+									icon="icon-[lucide--file-x]"
+									title="读取文件失败"
+									description={activeTab.readError}
+									action={
+										<Button size="sm" icon="icon-[lucide--refresh-cw]" onClick={() => void reloadFromDisk(activeTab.id)}>
+											重试
+										</Button>
+									}
+								/>
 							</div>
 						) : (
 							<div className="relative flex min-h-0 flex-1 overflow-hidden">
@@ -387,6 +476,95 @@ export default function Editor() {
 					</div>
 				)}
 			</div>
+
+			{/* 保存冲突：文件在打开后被别人改过 */}
+			<Modal
+				open={conflict !== null}
+				onClose={() => setConflict(null)}
+				title="文件已被其他程序修改"
+				icon="icon-[lucide--git-compare]"
+				width={440}
+				footer={
+					<>
+						<Button size="sm" onClick={() => setConflict(null)}>
+							取消
+						</Button>
+						<Button
+							size="sm"
+							icon="icon-[lucide--refresh-cw]"
+							onClick={() => {
+								const id = conflict?.tabId;
+								setConflict(null);
+								if (id) void reloadFromDisk(id);
+							}}
+						>
+							放弃我的修改并重新载入
+						</Button>
+						<Button
+							size="sm"
+							variant="danger"
+							onClick={() => {
+								const tab = tabs.find((t) => t.id === conflict?.tabId);
+								setConflict(null);
+								if (tab) void handleSave(tab, true);
+							}}
+						>
+							仍然覆盖
+						</Button>
+					</>
+				}
+			>
+				{conflict && (
+					<p>
+						{tabs.find((t) => t.id === conflict.tabId)?.path} 在你打开之后被修改过
+						{conflict.diskMtime ? `（磁盘上的版本修改于 ${formatUnixTime(conflict.diskMtime)}）` : ""}
+						。直接保存会覆盖对方的修改。
+					</p>
+				)}
+			</Modal>
+
+			{/* 关闭未保存的标签 */}
+			<Modal
+				open={closing !== null}
+				onClose={() => setClosing(null)}
+				title="有未保存的修改"
+				icon="icon-[lucide--alert-triangle]"
+				width={400}
+				footer={
+					<>
+						<Button size="sm" onClick={() => setClosing(null)}>
+							取消
+						</Button>
+						<Button
+							size="sm"
+							variant="danger"
+							onClick={() => {
+								const id = closing;
+								setClosing(null);
+								if (id) handleCloseTab(id, true);
+							}}
+						>
+							放弃修改并关闭
+						</Button>
+						<Button
+							size="sm"
+							variant="primary"
+							onClick={async () => {
+								const tab = tabs.find((t) => t.id === closing);
+								setClosing(null);
+								if (!tab) return;
+								await handleSave(tab);
+								const after = useEditorStore.getState().tabs.find((t) => t.id === tab.id);
+								if (after && after.content === after.savedContent) handleCloseTab(tab.id, true);
+							}}
+						>
+							保存并关闭
+						</Button>
+					</>
+				}
+			>
+				<p>{tabs.find((t) => t.id === closing)?.name} 还有未保存的修改。</p>
+			</Modal>
 		</WindowChrome>
 	);
 }

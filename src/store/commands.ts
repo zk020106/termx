@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { isSensitiveCommand } from "@/lib/sensitive";
 import { useSnippetsStore } from "./snippets";
 
 /* =============================================================================
@@ -56,7 +57,14 @@ function loadSavedHistory(): CommandRecord[] {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (!raw) return [];
 		const parsed = JSON.parse(raw);
-		if (Array.isArray(parsed)) return parsed;
+		if (Array.isArray(parsed)) {
+			// 旧版本过滤得不严：载入时把已经混进来的敏感命令清掉，并立即写回
+			const clean = (parsed as CommandRecord[]).filter(
+				(item) => typeof item?.command === "string" && !isSensitiveCommand(item.command),
+			);
+			if (clean.length !== parsed.length) localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
+			return clean;
+		}
 	} catch {
 		// 忽略读取错误
 	}
@@ -108,8 +116,9 @@ export const useCommandsStore = create<CommandsState>((set, get) => ({
 		const command = rawCommand.trim();
 		// 忽略超短命令、空命令或纯控制字符
 		if (!command || command.length < 2) return;
-		// 敏感过滤：包含明显密码或 token 样式的命令不入历史库
-		if (/--password[=\s]|token[=\s]|secret[=\s]/i.test(command)) return;
+		// 敏感过滤：命令行里带着密码 / token / 凭据的不入历史库
+		// （在密码提示符下敲的内容由终端在回车时识别并跳过，根本不会走到这里）
+		if (isSensitiveCommand(command)) return;
 
 		set((state) => {
 			const now = Date.now();

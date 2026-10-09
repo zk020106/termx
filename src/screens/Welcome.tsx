@@ -3,12 +3,22 @@ import { Field, Input, Select } from "@/components/ui/Input";
 import { AUTH_LABEL, type AuthMethod } from "@/data/types";
 import { cn } from "@/lib/cn";
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
+import { parseHostCsv, parseSshConfig, toHosts, expandHome, type ImportResult } from "@/lib/hostImport";
+import { createVerifier, lockCryptoAvailable } from "@/lib/lock";
+import { fsLocalHome, fsLocalReadFile } from "@/lib/sftp";
+import { isTauri } from "@/lib/tauri";
+import { useHostsStore } from "@/store/hosts";
 import { useSessionsStore } from "@/store/sessions";
+import { useSettingsStore } from "@/store/settings";
+import { toast } from "@/store/toast";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
 /* 首次启动（对应 termx.vetd/frames/welcome.tsx，需求书 06）。
- * 整页界面，不套 WindowChrome。四步流程：欢迎 → 导入会话 → 手动新建 → 设置主密码（可跳过），可前进/后退。 */
+ * 整页界面，不套 WindowChrome。四步流程：欢迎 → 导入会话 → 手动新建 → 设置主密码（可跳过），可前进/后退。
+ * 每一步都是真的：~/.ssh/config 真实解析计数并导入；CSV 选文件后导入；手动新建写入主机库；
+ * 主密码生成 PBKDF2 校验材料并开启 15 分钟自动锁定。Xshell / FinalShell / MobaXterm 的格式尚未支持，如实标注。 */
 
 interface ImportSource {
 	id: string;
@@ -16,13 +26,15 @@ interface ImportSource {
 	detail: string;
 	icon: string;
 	count: number;
+	/** 还不支持的来源：显示原因，不可选 */
+	unsupported?: string;
 }
 
-const IMPORT_SOURCES: ImportSource[] = [
-	{ id: "ssh-config", name: "~/.ssh/config", detail: "OpenSSH 客户端配置", icon: "icon-[lucide--file-code]", count: 12 },
-	{ id: "xshell", name: "Xshell", detail: "会话备份（.xsh / 导出目录）", icon: "icon-[lucide--archive]", count: 8 },
-	{ id: "finalshell", name: "FinalShell", detail: "conn/*.json 连接配置", icon: "icon-[lucide--folder-tree]", count: 6 },
-	{ id: "mobaxterm", name: "MobaXterm", detail: "MobaXterm.ini 会话段", icon: "icon-[lucide--notebook-tabs]", count: 4 },
+const BASE_SOURCES: ImportSource[] = [
+	{ id: "ssh-config", name: "~/.ssh/config", detail: "OpenSSH 客户端配置", icon: "icon-[lucide--file-code]", count: 0 },
+	{ id: "xshell", name: "Xshell", detail: "会话备份（.xsh / 导出目录）", icon: "icon-[lucide--archive]", count: 0, unsupported: "格式暂不支持" },
+	{ id: "finalshell", name: "FinalShell", detail: "conn/*.json 连接配置", icon: "icon-[lucide--folder-tree]", count: 0, unsupported: "格式暂不支持" },
+	{ id: "mobaxterm", name: "MobaXterm", detail: "MobaXterm.ini 会话段", icon: "icon-[lucide--notebook-tabs]", count: 0, unsupported: "格式暂不支持" },
 	{ id: "csv", name: "CSV 表格", detail: "通用列：名称 / 地址 / 用户 / 端口", icon: "icon-[lucide--table]", count: 0 },
 ];
 
@@ -41,7 +53,75 @@ export default function Welcome() {
 		const raw = Number(search.get("step") ?? "1");
 		return Number.isFinite(raw) ? Math.min(Math.max(Math.round(raw) - 1, 0), STEPS.length - 1) : 0;
 	});
-	const [picked, setPicked] = useState<string[]>(["ssh-config", "xshell"]);
+	const [picked, setPicked] = useState<string[]>([]);
+	/** 各来源真实解析出的结果（按来源 id） */
+	const [parsed, setParsed] = useState<Record<string, ImportResult & { label: string }>>({});
+	const [home, setHome] = useState("");
+	const [importedOnce, setImportedOnce] = useState(false);
+	const [createdHostId, setCreatedHostId] = useState<string | null>(null);
+	const sshConfigPath = useSettingsStore((s) => s.sshConfigPath);
+	const IMPORT_SOURCES = BASE_SOURCES.map((source) => ({ ...source, count: parsed[source.id]?.hosts.length ?? 0 }));
+
+	// 自动检测 ~/.ssh/config（读不到就是「未检测到」，不编数字）
+	useEffect(() => {
+		if (!isTauri()) return;
+		let cancelled = false;
+		void (async () => {
+			try {
+				const h = await fsLocalHome();
+				if (cancelled) return;
+				setHome(h);
+				const path = expandHome(sshConfigPath, h) ?? sshConfigPath;
+				const text = await fsLocalReadFile(path);
+				if (cancelled) return;
+				const result = parseSshConfig(text);
+				setParsed((prev) => ({ ...prev, "ssh-config": { ...result, label: path } }));
+				if (result.hosts.length > 0) setPicked((prev) => (prev.includes("ssh-config") ? prev : [...prev, "ssh-config"]));
+			} catch {
+				/* 没有这个文件：保持未检测到 */
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [sshConfigPath]);
+
+	/** CSV 来源：选中时让用户挑文件 */
+	const pickCsv = async () => {
+		try {
+			const file = await openFileDialog({ multiple: false, directory: false, filters: [{ name: "CSV", extensions: ["csv", "txt"] }] });
+			if (!file || Array.isArray(file)) return false;
+			const result = parseHostCsv(await fsLocalReadFile(file));
+			setParsed((prev) => ({ ...prev, csv: { ...result, label: file } }));
+			if (result.hosts.length === 0) {
+				toast({ title: "CSV 里没有可导入的主机", description: result.skipped.join("；"), tone: "warning" });
+				return false;
+			}
+			return true;
+		} catch (error) {
+			toast({ title: "读取 CSV 失败", description: String(error), tone: "danger" });
+			return false;
+		}
+	};
+
+	/** 把勾选来源的主机写入主机库；同名 / 同地址的跳过并说明 */
+	const runImport = () => {
+		const store = useHostsStore.getState();
+		const all = pickedSources.flatMap((source) => parsed[source.id]?.hosts ?? []);
+		if (all.length === 0) return;
+		const defaultUser = home.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || undefined;
+		const { hosts, conflicts } = toHosts(all, store.hosts, { home, defaultUser });
+		for (const h of hosts) store.upsertHost(h);
+		const skipped = pickedSources.flatMap((source) => parsed[source.id]?.skipped ?? []);
+		setImportedOnce(true);
+		toast({
+			title: `已导入 ${hosts.length} 台主机`,
+			description: [conflicts.length ? `跳过 ${conflicts.length} 项：${conflicts.slice(0, 3).join("；")}${conflicts.length > 3 ? "…" : ""}` : "", skipped.length ? `未导入 ${skipped.length} 条规则` : ""]
+				.filter(Boolean)
+				.join(" · ") || "密码未导入，首次连接时输入",
+			tone: hosts.length > 0 ? "success" : "warning",
+		});
+	};
 	const [host, setHost] = useState({ address: "", user: "", port: "22", auth: "key" as AuthMethod, group: "", note: "" });
 	const [hostErrors, setHostErrors] = useState<{ address?: string; user?: string }>({});
 	const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -53,8 +133,13 @@ export default function Welcome() {
 	const importTotal = pickedSources.reduce((sum, source) => sum + source.count, 0);
 	const hostReady = host.address.trim() !== "" && host.user.trim() !== "";
 
-	const toggleSource = (id: string) =>
+	const toggleSource = (id: string) => {
+		if (id === "csv" && !picked.includes("csv")) {
+			void pickCsv().then((ok) => ok && setPicked((current) => [...current, "csv"]));
+			return;
+		}
 		setPicked((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+	};
 
 	// 引导结束后回首页（主机库）：那里才有「连哪台」的下一步
 	const finish = () => {
@@ -62,14 +147,47 @@ export default function Welcome() {
 		navigate("/workspace");
 	};
 
-	const next = () => {
+	const next = async () => {
+		if (step === 1 && !importedOnce && pickedSources.length > 0) runImport();
 		if (step === 2) {
-			const errors = {
-				address: host.address.trim() ? undefined : "地址不能为空，例如 10.0.3.21 或 order-api-01",
-				user: host.user.trim() ? undefined : "用户名不能为空，例如 deploy",
-			};
-			setHostErrors(errors);
-			if (errors.address || errors.user) return;
+			const hostsNow = useHostsStore.getState().hosts;
+			// 已经导入过主机、这一页什么都没填：允许直接下一步
+			const blank = !host.address.trim() && !host.user.trim();
+			if (!(blank && hostsNow.length > 0)) {
+				const port = Number(host.port || "22");
+				const errors = {
+					address: host.address.trim() ? undefined : "地址不能为空，例如 10.0.3.21 或 order-api-01",
+					user: host.user.trim() ? undefined : "用户名不能为空，例如 deploy",
+				};
+				setHostErrors(errors);
+				if (errors.address || errors.user) return;
+				if (!Number.isInteger(port) || port < 1 || port > 65535) {
+					setHostErrors({ address: "端口需为 1-65535 的整数" });
+					return;
+				}
+				const store = useHostsStore.getState();
+				const groupName = host.group.trim();
+				const groupId = groupName
+					? (store.groups.find((g) => g.name === groupName)?.id ?? store.addGroup(groupName).id)
+					: null;
+				const id = createdHostId ?? `host-${Date.now().toString(36)}`;
+				store.upsertHost({
+					id,
+					name: host.address.trim(),
+					groupId,
+					hostname: host.address.trim(),
+					port,
+					username: host.user.trim(),
+					tags: [],
+					favorite: false,
+					spec: host.note.trim() || undefined,
+					auth: { method: host.auth },
+					jumpHostIds: [],
+					reachable: false,
+				});
+				if (!createdHostId) toast({ title: `已添加主机 ${host.address.trim()}`, tone: "success" });
+				setCreatedHostId(id);
+			}
 		}
 		if (step === STEPS.length - 1) {
 			if (password || confirm) {
@@ -81,6 +199,12 @@ export default function Welcome() {
 					setPasswordError("两次输入的主密码不一致");
 					return;
 				}
+				if (!lockCryptoAvailable()) {
+					setPasswordError("当前环境没有 WebCrypto，无法设置主密码");
+					return;
+				}
+				useSettingsStore.getState().setSecurity({ lockVerifier: await createVerifier(password), autoLock: "15" });
+				toast({ title: "主密码已设置", description: "闲置 15 分钟自动锁定，可在设置中调整", tone: "success" });
 			}
 			setPasswordError(null);
 			finish();
@@ -120,7 +244,9 @@ export default function Welcome() {
 						</span>
 						<button
 							type="button"
-							onClick={() => setPicked(IMPORT_SOURCES.filter((source) => source.count > 0).map((source) => source.id))}
+							onClick={() =>
+								setPicked(IMPORT_SOURCES.filter((source) => source.count > 0 && !source.unsupported).map((source) => source.id))
+							}
 							className="text-primary hover:underline"
 						>
 							全选
@@ -145,7 +271,7 @@ export default function Welcome() {
 							<Input
 								value={host.address}
 								onChange={(e) => setHost({ ...host, address: e.target.value })}
-								onKeyDown={(e) => e.key === "Enter" && next()}
+								onKeyDown={(e) => e.key === "Enter" && void next()}
 								placeholder="10.0.3.21"
 								autoFocus
 							/>
@@ -155,7 +281,7 @@ export default function Welcome() {
 							<Input
 								value={host.user}
 								onChange={(e) => setHost({ ...host, user: e.target.value })}
-								onKeyDown={(e) => e.key === "Enter" && next()}
+								onKeyDown={(e) => e.key === "Enter" && void next()}
 								placeholder="deploy"
 							/>
 						</Field>
@@ -215,7 +341,7 @@ export default function Welcome() {
 					<div className="mt-5 space-y-2 font-mono text-[11.5px] text-muted">
 						<div className="flex items-center gap-2">
 							<span className="icon-[lucide--shield-check] size-3.5 text-primary" />
-							AES-256 加密 + 系统钥匙串托管
+							PBKDF2-SHA256 校验，主密码本身不保存
 						</div>
 						<div className="flex items-center gap-2">
 							<span className="icon-[lucide--timer] size-3.5 text-primary" />
@@ -239,13 +365,13 @@ export default function Welcome() {
 					<EntryRow
 						icon="icon-[lucide--file-code]"
 						title="导入 ~/.ssh/config 会话"
-						meta="检测到 12 台"
+						meta={IMPORT_SOURCES[0].count > 0 ? `检测到 ${IMPORT_SOURCES[0].count} 台` : "未检测到"}
 						onClick={() => setStep(1)}
 					/>
 					<EntryRow
 						icon="icon-[lucide--import]"
-						title="从 Xshell / FinalShell 导入备份"
-						meta="共 14 台"
+						title="从 CSV 表格导入（Xshell / FinalShell 暂不支持）"
+						meta="选择文件"
 						onClick={() => setStep(1)}
 					/>
 					{/* 设计帧里这一项是实心主色按钮，作为「没有现成配置」时的主动作 */}
@@ -333,7 +459,7 @@ export default function Welcome() {
 							<button type="button" onClick={finish} className="text-[11.5px] text-faint transition-colors hover:text-surface-foreground">
 								稍后在设置中启用
 							</button>
-							<Button variant="primary" size="sm" onClick={next}>
+							<Button variant="primary" size="sm" onClick={() => void next()}>
 								保存并进入
 								<span className="icon-[lucide--arrow-right] size-3" />
 							</Button>
@@ -360,7 +486,7 @@ export default function Welcome() {
 									setConfirm(e.target.value);
 									setPasswordError(null);
 								}}
-								onKeyDown={(e) => e.key === "Enter" && next()}
+								onKeyDown={(e) => e.key === "Enter" && void next()}
 								placeholder="再次输入"
 							/>
 						</Field>
@@ -455,7 +581,7 @@ export default function Welcome() {
 						<Button variant="default" size="md" icon="icon-[lucide--arrow-left]" onClick={back} disabled={step === 0}>
 							上一步
 						</Button>
-						<Button variant="primary" size="md" onClick={next}>
+						<Button variant="primary" size="md" onClick={() => void next()}>
 							{primaryLabel}
 							<span className="icon-[lucide--arrow-right] size-3" />
 						</Button>
@@ -528,7 +654,8 @@ function ImportRow({
 	selected: boolean;
 	onToggle: () => void;
 }) {
-	const empty = source.count === 0;
+	// CSV 要先选文件才知道数量，所以 0 台时也可以点
+	const empty = source.unsupported !== undefined || (source.count === 0 && source.id !== "csv");
 
 	return (
 		<button
@@ -558,7 +685,7 @@ function ImportRow({
 				<span className="block truncate font-mono text-[10.5px] text-faint">{source.detail}</span>
 			</span>
 			<span className={cn("shrink-0 font-mono text-[11px]", empty ? "text-faint" : "text-muted")}>
-				{empty ? "未检测到" : `${source.count} 台`}
+				{source.unsupported ?? (source.count > 0 ? `${source.count} 台` : source.id === "csv" ? "选择文件" : "未检测到")}
 			</span>
 		</button>
 	);

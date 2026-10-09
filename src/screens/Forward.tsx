@@ -2,15 +2,20 @@ import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button } from "@/components/ui/Button";
 import { Badge, EmptyState, Segmented } from "@/components/ui/Display";
 import { Field, Input, ReadonlyValue, Select } from "@/components/ui/Input";
-import { Drawer } from "@/components/ui/Overlay";
+import { Drawer, Modal } from "@/components/ui/Overlay";
 import { Checkbox } from "@/components/ui/Toggle";
 import { FORWARD_LABEL, type ForwardRule, type ForwardState, type ForwardType } from "@/data/types";
 import { cn } from "@/lib/cn";
+import { formatBytes } from "@/lib/format";
+import { disposeForward, restartForward, startForward, stopForward, useForwardRuntime } from "@/lib/forwardManager";
+import { LISTEN_PORTS_COMMAND, parseListeningPorts, type ListeningPort } from "@/lib/listenPorts";
+import { sshExec, sshReplaceHostKey, sshTrustHost } from "@/lib/ssh";
+import { sshSessionAlive } from "@/components/terminal/sshCache";
 import { draftForwardRule, useForwardsStore } from "@/store/forwards";
 import { useHostsStore } from "@/store/hosts";
 import { useSessionsStore } from "@/store/sessions";
 import { toast } from "@/store/toast";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 
 /* =============================================================================
@@ -18,23 +23,27 @@ import { useNavigate } from "react-router";
  * 覆盖状态：规则列表（可空）/ 三种类型的抽屉表单（本地 -L、远程反向 -R、动态 SOCKS5 -D）/
  * 运行中 / 已停止 / 启动出错。
  *
- * 诚实边界：
- * - 规则本身能真实保存、编辑、删除、开关；
- * - 连接数与流量需要真实的转发隧道，SSH 层接入前没有数据源，一律显示 —；
- * - 远程监听端口发现必须先建立 SSH 连接，没有连接就没有任何端口列表。
+ * 运行时（lib/forwardManager.ts）：
+ * - 启动 / 停止真实调用 Rust 的 forward_start / forward_stop，每条规则一条独立 SSH 连接，
+ *   走主机自己的跳板链与代理；
+ * - 连接数与流量来自 forward://state 事件（每秒最多一次）；
+ * - 主机指纹未知 / 变化时进入「启动出错」，并在这里提供核对指纹再启动；
+ * - 远程监听端口发现在这台主机已有的终端会话上执行 ss / netstat，没有会话就如实说明。
  * ========================================================================== */
 
 const STATE_TEXT: Record<ForwardState, string> = {
+	starting: "启动中",
 	running: "运行中",
 	stopped: "已停止",
 	error: "启动出错",
 };
 
-/** 没有 SSH 层就拿不到真实失败原因，不编造错误信息 */
-const UNKNOWN_ERROR = "转发隧道尚未接入 SSH 层，未收到真实失败原因";
+/** 后端没给原因时的兜底文案（不编造具体原因） */
+const UNKNOWN_ERROR = "转发异常结束，没有收到具体失败原因";
 
 function stateVisual(state: ForwardState) {
 	if (state === "running") return { text: "text-success", dot: "bg-success" };
+	if (state === "starting") return { text: "text-warning", dot: "bg-warning" };
 	if (state === "error") return { text: "text-danger", dot: "bg-danger" };
 	return { text: "text-faint", dot: "bg-border" };
 }
@@ -51,7 +60,8 @@ function targetText(rule: ForwardRule) {
 
 function ruleNote(rule: ForwardRule) {
 	if (rule.state === "error") return rule.error ?? UNKNOWN_ERROR;
-	if (rule.state === "running") return `→ ${targetText(rule)} · 隧道状态由 SSH 层维护`;
+	if (rule.state === "running") return `→ ${targetText(rule)} · ${rule.connections} 个连接`;
+	if (rule.state === "starting") return `→ ${targetText(rule)} · 正在建立 SSH 连接…`;
 	if (rule.error) return `上次失败：${rule.error}`;
 	return `已停止 · → ${targetText(rule)}`;
 }
@@ -103,7 +113,6 @@ export default function Forward() {
 	const rules = useForwardsStore((s) => s.rules);
 	const upsert = useForwardsStore((s) => s.upsert);
 	const remove = useForwardsStore((s) => s.remove);
-	const setRuleState = useForwardsStore((s) => s.setRuleState);
 	const toggleAutoStart = useForwardsStore((s) => s.toggleAutoStart);
 	const hosts = useHostsStore((s) => s.hosts);
 
@@ -125,18 +134,51 @@ export default function Forward() {
 		setDraft(freshDraft(hosts[0].id));
 	}
 
-	function startRule(rule: ForwardRule) {
-		setRuleState(rule.id, "running", undefined);
-		toast({
-			title: `${rule.name} 已启动`,
-			description: `${bindText(rule)} → ${targetText(rule)}`,
-			tone: "success",
-		});
+	async function startRule(rule: ForwardRule) {
+		const result = await startForward(rule.id);
+		if (result.ok) {
+			const bound = useForwardRuntime.getState().bound[rule.id];
+			toast({
+				title: `${rule.name} 已启动`,
+				description: `${bound ?? bindText(rule)} → ${targetText(rule)}`,
+				tone: "success",
+			});
+		} else if (result.error) {
+			toast({ title: `${rule.name} 启动失败`, description: result.error, tone: "danger" });
+		}
 	}
 
-	function stopRule(rule: ForwardRule) {
-		setRuleState(rule.id, "stopped", undefined);
-		toast({ title: `${rule.name} 已停止`, tone: "default" });
+	async function stopRule(rule: ForwardRule) {
+		const wasRunning = rule.state === "running" || rule.state === "starting";
+		await stopForward(rule.id);
+		toast({ title: wasRunning ? `${rule.name} 已停止` : `${rule.name} 已切回「已停止」`, tone: "default" });
+	}
+
+	/* 指纹核对（与连接页同一套：信任写入 known_hosts，变更则替换旧记录） */
+	const trustRequests = useForwardRuntime((s) => s.trust);
+	const boundMap = useForwardRuntime((s) => s.bound);
+	const totalMap = useForwardRuntime((s) => s.total);
+	const [trustFor, setTrustFor] = useState<string | null>(null);
+	const [trusting, setTrusting] = useState(false);
+	const trustRequest = trustFor ? trustRequests[trustFor] : undefined;
+
+	async function confirmTrust() {
+		if (!trustFor || !trustRequest || trusting) return;
+		setTrusting(true);
+		try {
+			const note =
+				trustRequest.kind === "host_changed"
+					? await sshReplaceHostKey(trustRequest.host, trustRequest.port, trustRequest.fingerprint)
+					: await sshTrustHost(trustRequest.host, trustRequest.port, trustRequest.fingerprint);
+			toast({ title: "已写入 known_hosts", description: note, tone: "success" });
+			const rule = useForwardsStore.getState().rules.find((r) => r.id === trustFor);
+			setTrustFor(null);
+			if (rule) await startRule({ ...rule, state: "stopped" });
+		} catch (error) {
+			toast({ title: "没能写入 known_hosts", description: String(error), tone: "danger" });
+		} finally {
+			setTrusting(false);
+		}
 	}
 
 	function submitDraft() {
@@ -147,8 +189,18 @@ export default function Forward() {
 		const bindPort = Number(draft.bindPort);
 		if (!draft.bindPort.trim() || !Number.isInteger(bindPort) || bindPort < 1 || bindPort > 65535) {
 			next.bindPort = "端口需为 1-65535 的整数";
-		} else if (rules.some((r) => r.id !== draft.id && r.bindAddress === draft.bindAddress && r.bindPort === bindPort)) {
-			next.bindPort = `本地端口 ${bindPort} 已被占用`;
+		} else if (
+			rules.some(
+				(r) =>
+					r.id !== draft.id &&
+					// 远程 -R 监听在服务器上，和本地监听不冲突；同一台服务器上的两条 -R 才冲突
+					(r.type === "remote") === (draft.type === "remote") &&
+					(draft.type !== "remote" || r.hostId === draft.hostId) &&
+					r.bindAddress === draft.bindAddress &&
+					r.bindPort === bindPort,
+			)
+		) {
+			next.bindPort = `${draft.type === "remote" ? "远程" : "本地"}端口 ${bindPort} 已被其他规则占用`;
 		}
 		if (draft.type !== "dynamic") {
 			if (!draft.targetHost.trim()) next.targetHost = "请填写目标主机";
@@ -180,6 +232,8 @@ export default function Forward() {
 		upsert(rule);
 		setSelectedId(rule.id);
 		setDraft(null);
+		// 在跑的规则改了参数：按新参数重启，避免界面和实际监听不一致
+		if (existing && (existing.state === "running" || existing.state === "starting")) void restartForward(rule.id);
 		toast({
 			title: existing ? `已保存规则 ${rule.name}` : `已创建规则 ${rule.name}`,
 			description: `${bindText(rule)} → ${targetText(rule)}`,
@@ -188,6 +242,7 @@ export default function Forward() {
 	}
 
 	function removeRule(rule: ForwardRule) {
+		void disposeForward(rule.id);
 		remove(rule.id);
 		setSelectedId((id) => (id === rule.id ? "" : id));
 		toast({ title: `已删除规则 ${rule.name}`, tone: "default" });
@@ -322,12 +377,25 @@ export default function Forward() {
 									<div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-danger/30 bg-danger/10 p-2.5 text-[11.5px] text-danger">
 										<span className="icon-[lucide--alert-circle] size-4 shrink-0" />
 										<span className="min-w-0 flex-1">
-											{selected.error ?? UNKNOWN_ERROR}。可以改绑一个空闲端口，或先把状态切回「已停止」。
+											{selected.error ?? UNKNOWN_ERROR}。
+											{trustRequests[selected.id]
+												? "核对指纹无误后可信任并重新启动。"
+												: "可以改绑一个空闲端口，或先把状态切回「已停止」。"}
 										</span>
 										<div className="flex items-center gap-1.5">
+											{trustRequests[selected.id] && (
+												<Button
+													size="sm"
+													variant="primary"
+													icon="icon-[lucide--fingerprint]"
+													onClick={() => setTrustFor(selected.id)}
+												>
+													核对指纹
+												</Button>
+											)}
 											<Button
 												size="sm"
-												variant="primary"
+												variant={trustRequests[selected.id] ? "default" : "primary"}
 												icon="icon-[lucide--pencil-line]"
 												onClick={() => {
 													setErrors({});
@@ -336,7 +404,7 @@ export default function Forward() {
 											>
 												修改绑定端口
 											</Button>
-											<Button size="sm" onClick={() => stopRule(selected)}>
+											<Button size="sm" onClick={() => void stopRule(selected)}>
 												停止规则
 											</Button>
 										</div>
@@ -382,15 +450,30 @@ export default function Forward() {
 									</div>
 								</div>
 
-								{/* 运行指标：没有真实隧道就没有数据源 */}
+								{/* 运行指标：来自 Rust 端的真实计数（每秒刷新一次） */}
 								<div className="mt-4 grid grid-cols-3 gap-3">
-									<MetricCell label="当前连接数" value="—" />
-									<MetricCell label="入站流量" value="—" />
-									<MetricCell label="出站流量" value="—" />
+									<MetricCell
+										label="当前连接数"
+										value={selected.state === "running" ? String(selected.connections) : "—"}
+									/>
+									<MetricCell
+										label="入站流量"
+										value={selected.state === "stopped" && !totalMap[selected.id] ? "—" : formatBytes(selected.trafficIn)}
+									/>
+									<MetricCell
+										label="出站流量"
+										value={selected.state === "stopped" && !totalMap[selected.id] ? "—" : formatBytes(selected.trafficOut)}
+									/>
 								</div>
 								<p className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-faint">
 									<span className="icon-[lucide--info] size-3" />
-									SSH 层接入前没有数据源。
+									{selected.state === "running"
+										? `实际监听 ${boundMap[selected.id] ?? bindText(selected)} · 累计 ${totalMap[selected.id] ?? 0} 个连接 · 入站 = 从隧道流回本端的字节`
+										: selected.state === "starting"
+											? "正在建立 SSH 连接…"
+											: totalMap[selected.id]
+												? `本次运行累计 ${totalMap[selected.id]} 个连接（已停止）`
+												: "启动后显示实时连接数与流量。"}
 								</p>
 
 								<div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-3">
@@ -401,12 +484,12 @@ export default function Forward() {
 										className="min-w-0"
 									/>
 									<div className="flex shrink-0 items-center gap-2">
-										{selected.state === "running" ? (
-											<Button size="sm" onClick={() => stopRule(selected)}>
-												停止转发
+										{selected.state === "running" || selected.state === "starting" ? (
+											<Button size="sm" onClick={() => void stopRule(selected)}>
+												{selected.state === "starting" ? "取消启动" : "停止转发"}
 											</Button>
 										) : (
-											<Button size="sm" variant="primary" icon="icon-[lucide--play]" onClick={() => startRule(selected)}>
+											<Button size="sm" variant="primary" icon="icon-[lucide--play]" onClick={() => void startRule(selected)}>
 												启动转发
 											</Button>
 										)}
@@ -427,43 +510,28 @@ export default function Forward() {
 							</div>
 						)}
 
-						{/* 远程自动端口发现：必须先有 SSH 连接 */}
-						<div>
-							<div className="mb-2 flex items-center justify-between">
-								<div className="flex items-center gap-2">
-									<span className="icon-[lucide--radio] size-3.5 text-primary" />
-									<h3 className="text-[13px] font-semibold text-surface-foreground">远程自动端口发现</h3>
-								</div>
-								<span className="font-mono text-[11px] text-faint">监听端口 —</span>
-							</div>
-
-							<div className="overflow-hidden rounded-lg border border-border bg-surface">
-								<EmptyState
-									icon="icon-[lucide--radio]"
-									title="没有可发现的远程监听端口"
-									description="需要先建立 SSH 连接。"
-									action={
-										hosts.length === 0 ? (
-											<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={() => navigate("/hosts/new")}>
-												新建主机
-											</Button>
-										) : (
-											<Button
-												size="sm"
-												variant="primary"
-												icon="icon-[lucide--terminal]"
-												onClick={() => {
-													useSessionsStore.getState().setActiveTab("vaults");
-													navigate("/workspace");
-												}}
-											>
-												去打开会话
-											</Button>
-										)
-									}
-								/>
-							</div>
-						</div>
+						{/* 远程自动端口发现：在这台主机已有的终端会话上跑 ss / netstat */}
+						<PortDiscovery
+							host={host}
+							hasHosts={hosts.length > 0}
+							onForward={(port) => {
+								if (!host) return;
+								setErrors({});
+								const base = freshDraft(host.id);
+								setDraft({
+									...base,
+									name: `${host.name} ${port.port}`,
+									bindPort: String(port.port),
+									targetHost: port.address === "0.0.0.0" || port.address === "::" ? "127.0.0.1" : port.address,
+									targetPort: String(port.port),
+								});
+							}}
+							onOpenSession={() => {
+								useSessionsStore.getState().setActiveTab("vaults");
+								navigate("/workspace");
+							}}
+							onNewHost={() => navigate("/hosts/new")}
+						/>
 					</div>
 				</div>
 			</div>
@@ -616,6 +684,47 @@ export default function Forward() {
 					</div>
 				)}
 			</Drawer>
+
+			{/* 指纹核对：与连接页一致，信任前展示真实指纹 */}
+			<Modal
+				open={trustRequest !== undefined}
+				onClose={() => setTrustFor(null)}
+				title={trustRequest?.kind === "host_changed" ? "主机指纹与记录不一致" : "首次连接，请核对主机指纹"}
+				icon={trustRequest?.kind === "host_changed" ? "icon-[lucide--shield-alert]" : "icon-[lucide--fingerprint]"}
+				width={460}
+				footer={
+					<>
+						<Button size="sm" onClick={() => setTrustFor(null)}>
+							取消
+						</Button>
+						<Button
+							size="sm"
+							variant={trustRequest?.kind === "host_changed" ? "danger" : "primary"}
+							disabled={trusting}
+							onClick={() => void confirmTrust()}
+						>
+							{trusting ? "正在写入…" : trustRequest?.kind === "host_changed" ? "确认已核对，替换旧记录并启动" : "信任并启动"}
+						</Button>
+					</>
+				}
+			>
+				{trustRequest && (
+					<>
+						<p>{trustRequest.detail}</p>
+						<div className="mt-2.5 space-y-1 rounded border border-border bg-surface-sunk p-2.5 font-mono text-[11.5px]">
+							<div>
+								<span className="text-faint">主机 </span>
+								{trustRequest.host}:{trustRequest.port}
+							</div>
+							<div className="break-all">
+								<span className="text-faint">指纹 </span>
+								{trustRequest.fingerprint ?? "（后端没有给出指纹）"}
+							</div>
+						</div>
+						<p className="mt-2 text-[10.5px] text-faint">请通过可信渠道（例如服务器控制台）核对后再确认。</p>
+					</>
+				)}
+			</Modal>
 		</WindowChrome>
 	);
 }
@@ -625,6 +734,126 @@ function MetricCell({ label, value }: { label: string; value: string }) {
 		<div className="rounded border border-border bg-surface px-2.5 py-2">
 			<div className="text-[10.5px] text-faint">{label}</div>
 			<div className="mt-0.5 font-mono text-[12.5px] tabular-nums text-surface-foreground">{value}</div>
+		</div>
+	);
+}
+
+/** 远程监听端口发现：复用这台主机已经建立的终端会话（另开 exec 通道，不占用终端） */
+function PortDiscovery({
+	host,
+	hasHosts,
+	onForward,
+	onOpenSession,
+	onNewHost,
+}: {
+	host: { id: string; name: string } | null;
+	hasHosts: boolean;
+	onForward: (port: ListeningPort) => void;
+	onOpenSession: () => void;
+	onNewHost: () => void;
+}) {
+	const tabs = useSessionsStore((s) => s.tabs);
+	const panes = useSessionsStore((s) => s.panes);
+	const sessionKey = useMemo(() => {
+		if (!host) return null;
+		const keys = [
+			...tabs.filter((t) => t.hostId === host.id).map((t) => t.sessionKey),
+			...panes.filter((p) => p.hostId === host.id).map((p) => p.sessionKey),
+		];
+		return keys.find((k): k is string => !!k && sshSessionAlive(k)) ?? null;
+	}, [host, tabs, panes]);
+
+	const [ports, setPorts] = useState<ListeningPort[] | null>(null);
+	const [loading, setLoading] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+
+	async function scan(key: string) {
+		setLoading(true);
+		setError(null);
+		try {
+			const out = await sshExec(key, LISTEN_PORTS_COMMAND, 8000);
+			const parsed = parseListeningPorts(out.stdout);
+			if (parsed.length === 0 && out.code !== 0) {
+				setError(out.stderr.trim() || "服务器上没有 ss / netstat 命令，无法列出监听端口");
+				setPorts(null);
+			} else {
+				setPorts(parsed);
+			}
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+			setPorts(null);
+		} finally {
+			setLoading(false);
+		}
+	}
+
+	useEffect(() => {
+		setPorts(null);
+		setError(null);
+		if (sessionKey) void scan(sessionKey);
+	}, [sessionKey]);
+
+	return (
+		<div>
+			<div className="mb-2 flex items-center justify-between">
+				<div className="flex items-center gap-2">
+					<span className="icon-[lucide--radio] size-3.5 text-primary" />
+					<h3 className="text-[13px] font-semibold text-surface-foreground">远程自动端口发现</h3>
+				</div>
+				<div className="flex items-center gap-2">
+					<span className="font-mono text-[11px] text-faint">监听端口 {ports ? ports.length : "—"}</span>
+					{sessionKey && (
+						<Button size="sm" variant="ghost" icon="icon-[lucide--refresh-cw]" disabled={loading} onClick={() => void scan(sessionKey)}>
+							{loading ? "扫描中…" : "刷新"}
+						</Button>
+					)}
+				</div>
+			</div>
+
+			<div className="overflow-hidden rounded-lg border border-border bg-surface">
+				{sessionKey && ports && ports.length > 0 ? (
+					<ul className="divide-y divide-border">
+						{ports.map((port) => (
+							<li key={`${port.address}|${port.port}`} className="flex items-center justify-between gap-3 px-3 py-2 text-[12px]">
+								<span className="font-mono text-surface-foreground">
+									{port.address.includes(":") ? `[${port.address}]` : port.address}:{port.port}
+								</span>
+								<span className="flex items-center gap-2">
+									{port.loopback && <span className="text-[10.5px] text-faint">仅本机可访问</span>}
+									<Button size="sm" icon="icon-[lucide--arrow-down-to-line]" onClick={() => onForward(port)}>
+										转发到本地
+									</Button>
+								</span>
+							</li>
+						))}
+					</ul>
+				) : (
+					<EmptyState
+						icon="icon-[lucide--radio]"
+						title={
+							sessionKey
+								? loading
+									? "正在读取远程监听端口…"
+									: error
+										? "没能列出远程监听端口"
+										: "没有可发现的远程监听端口"
+								: "没有可发现的远程监听端口"
+						}
+						description={sessionKey ? (error ?? undefined) : `需要先建立 SSH 连接${host ? `（${host.name}）` : ""}。`}
+						action={
+							sessionKey ? undefined : !hasHosts ? (
+								<Button size="sm" variant="primary" icon="icon-[lucide--server]" onClick={onNewHost}>
+									新建主机
+								</Button>
+							) : (
+								<Button size="sm" variant="primary" icon="icon-[lucide--terminal]" onClick={onOpenSession}>
+									去打开会话
+								</Button>
+							)
+						}
+					/>
+				)}
+			</div>
 		</div>
 	);
 }

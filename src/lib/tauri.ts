@@ -26,7 +26,13 @@ export async function spawnLocalShell(
 	const key = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
 	const unlistenData = await listen<string>(`pty://data/${key}`, (event) => onData(event.payload));
-	const unlistenExit = await listen<number | null>(`pty://exit/${key}`, (event) => onExit(event.payload));
+	// shell 自己退出后监听就没用了：报完退出码顺手注销，别让监听跟着标签一直挂着
+	let unlistenExit: () => void = () => undefined;
+	unlistenExit = await listen<number | null>(`pty://exit/${key}`, (event) => {
+		onExit(event.payload);
+		unlistenData();
+		unlistenExit();
+	});
 
 	try {
 		await invoke("pty_spawn", { key, cols, rows });

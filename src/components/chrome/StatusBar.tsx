@@ -9,6 +9,7 @@ import { useForwardsStore } from "@/store/forwards";
 import { useProbeStore } from "@/store/probe";
 import { useSessionsStore } from "@/store/sessions";
 import { transferSummary, useTransfersStore } from "@/store/transfers";
+import { useScreenActive } from "@/lib/screenActive";
 import { useEffect } from "react";
 import { Link } from "react-router";
 
@@ -132,19 +133,29 @@ function latencyReading(
  * 它不会在服务端日志里留下预认证失败记录，也不会另开连接。
  */
 function useSshRttPolling(sessionKey: string | undefined, connected: boolean, intervalMs = 5000) {
+	// 常驻但隐藏的工作区不重复测量（可见的那一份状态栏会测）
+	const active = useScreenActive();
 	useEffect(() => {
-		if (!sessionKey || !connected) return;
+		if (!sessionKey || !connected || !active) return;
 
+		// 用「测完再排下一次」的链式定时，而不是 setInterval：
+		// 一次测量变慢（网络抖动、超时）时不会和下一次叠在一起
+		let stopped = false;
+		let timer: number | undefined;
 		const tick = async () => {
 			const report = await useProbeStore.getState().measureRtt(sessionKey, { samples: 3, timeoutMs: 1000 });
+			if (stopped) return;
 			// 会话在这一轮里结束了：把结果清掉，别让旧数字留在状态栏
 			if (!report) useProbeStore.getState().forgetRtt(sessionKey);
+			timer = window.setTimeout(() => void tick(), intervalMs);
 		};
 
 		void tick();
-		const timer = window.setInterval(() => void tick(), intervalMs);
-		return () => window.clearInterval(timer);
-	}, [sessionKey, connected, intervalMs]);
+		return () => {
+			stopped = true;
+			if (timer !== undefined) window.clearTimeout(timer);
+		};
+	}, [sessionKey, connected, intervalMs, active]);
 
 	// 断开时顺手清掉这个会话的往返结果
 	useEffect(() => {

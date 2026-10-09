@@ -1,6 +1,7 @@
 import type { PersistedConfig } from "./persist";
 import { normalizeConfig } from "./persist";
-import { flushNow, snapshotConfig } from "@/store/persistence";
+import { proxySecretAccount, stripHostSecrets } from "./configSecrets";
+import { flushNow, migrateLegacySecrets, snapshotConfig } from "@/store/persistence";
 import { useForwardsStore } from "@/store/forwards";
 import { useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
@@ -43,6 +44,9 @@ export interface ImportSummary {
 	keys: number;
 	snippets: number;
 	forwards: number;
+	/** 导入文件里带着的旧版明文密码：迁进钥匙串的条数 / 只留在本次运行内存里的条数 */
+	secretsMigrated: number;
+	secretsSessionOnly: number;
 }
 
 /** 解析导入文件；读不懂就抛错，由调用方提示 */
@@ -66,20 +70,25 @@ export async function mergeConfig(incoming: PersistedConfig): Promise<ImportSumm
 	const byAddress = new Map(mergedHosts.map((host) => [`${host.hostname}:${host.port}`, host]));
 	let hostsAdded = 0;
 	let hostsUpdated = 0;
+	// 导入文件若带着旧版的明文密码：不进 store、不落盘，按合并后的主机 id 迁进钥匙串
+	const { hosts: incomingHosts, legacy } = stripHostSecrets(incoming.hosts);
+	const finalId = new Map<string, string>();
 
-	for (const host of incoming.hosts) {
+	for (const host of incomingHosts) {
 		const key = `${host.hostname}:${host.port}`;
 		const existing = byAddress.get(key);
 		if (existing) {
 			const index = mergedHosts.findIndex((item) => item.id === existing.id);
 			// 保留本机 id：分屏格、会话标签、转发规则都按 id 引用主机
 			mergedHosts[index] = { ...host, id: existing.id };
+			finalId.set(host.id, existing.id);
 			hostsUpdated += 1;
 			continue;
 		}
 		const conflict = mergedHosts.some((item) => item.id === host.id);
 		const next = conflict ? { ...host, id: `${host.id}-imported` } : host;
 		mergedHosts.push(next);
+		finalId.set(host.id, next.id);
 		byAddress.set(key, next);
 		hostsAdded += 1;
 	}
@@ -101,6 +110,12 @@ export async function mergeConfig(incoming: PersistedConfig): Promise<ImportSumm
 	useForwardsStore.getState().setAll(forwards);
 	// 导入是用户的明确动作，立刻落盘，不等去抖
 	await flushNow();
+	const migration = await migrateLegacySecrets(
+		legacy.map((item) => {
+			const hostId = finalId.get(item.hostId) ?? item.hostId;
+			return { ...item, hostId, account: item.kind === "proxy" ? proxySecretAccount(hostId) : hostId };
+		}),
+	);
 
 	return {
 		hostsAdded,
@@ -109,5 +124,7 @@ export async function mergeConfig(incoming: PersistedConfig): Promise<ImportSumm
 		keys: incoming.keys.length,
 		snippets: incoming.snippets.length,
 		forwards: incoming.forwards.length,
+		secretsMigrated: migration?.migrated ?? 0,
+		secretsSessionOnly: migration?.sessionOnly.length ?? 0,
 	};
 }

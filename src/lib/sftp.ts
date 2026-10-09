@@ -43,8 +43,40 @@ export async function sftpReadFile(sessionKey: string, path: string): Promise<st
 	return invoke<string>("sftp_read_file", { key: sessionKey, path });
 }
 
-export async function sftpWriteFile(sessionKey: string, path: string, content: string): Promise<void> {
-	return invoke<void>("sftp_write_file", { key: sessionKey, path, content });
+/** 文件当前状态（保存前做冲突检查用；mtime 为秒） */
+export interface FileStat {
+	exists: boolean;
+	isDir: boolean;
+	size: number;
+	mtime: number;
+}
+
+/** 保存冲突：磁盘上的文件在打开后被别人改过。错误文本以此开头，后面是当前 mtime */
+export const CONFLICT_PREFIX = "CONFLICT:";
+
+export function conflictMtime(error: unknown): number | null {
+	const text = error instanceof Error ? error.message : String(error);
+	if (!text.startsWith(CONFLICT_PREFIX)) return null;
+	const value = Number(text.slice(CONFLICT_PREFIX.length));
+	return Number.isFinite(value) ? value : 0;
+}
+
+export async function sftpStat(sessionKey: string, path: string): Promise<FileStat> {
+	return invoke<FileStat>("sftp_stat", { key: sessionKey, path });
+}
+
+/**
+ * 原子保存（先写临时文件再改名替换，保留原权限）。
+ * expectedMtime 为打开时记下的修改时间：文件在此之后被改过就抛 CONFLICT 错误；传 null 表示强制覆盖。
+ * 返回保存后的新 mtime。
+ */
+export async function sftpWriteFile(
+	sessionKey: string,
+	path: string,
+	content: string,
+	expectedMtime: number | null = null,
+): Promise<number> {
+	return invoke<number>("sftp_write_file", { key: sessionKey, path, content, expectedMtime });
 }
 
 export async function sftpUpload(sessionKey: string, localPath: string, remotePath: string): Promise<number> {
@@ -78,6 +110,10 @@ export async function fsLocalRemove(path: string, isDir: boolean): Promise<void>
 }
 
 export async function fsLocalRename(oldPath: string, newPath: string): Promise<void> {
+	// 本地 rename 会静默覆盖同名目标：先查一下（只改大小写的重命名除外，大小写不敏感的盘上那是同一个文件）
+	if (oldPath.toLowerCase() !== newPath.toLowerCase() && (await fsLocalStat(newPath)).exists) {
+		throw new Error(`目标已存在：${newPath}`);
+	}
 	return invoke<void>("fs_local_rename", { oldPath, newPath });
 }
 
@@ -85,8 +121,24 @@ export async function fsLocalReadFile(path: string): Promise<string> {
 	return invoke<string>("fs_local_read_file", { path });
 }
 
-export async function fsLocalWriteFile(path: string, content: string): Promise<void> {
-	return invoke<void>("fs_local_write_file", { path, content });
+export async function fsLocalStat(path: string): Promise<FileStat> {
+	return invoke<FileStat>("fs_local_stat", { path });
+}
+
+/** 本地原子保存，语义同 sftpWriteFile */
+export async function fsLocalWriteFile(path: string, content: string, expectedMtime: number | null = null): Promise<number> {
+	return invoke<number>("fs_local_write_file", { path, content, expectedMtime });
+}
+
+/** 新建空文件：同名文件已存在时报错，而不是把它清空 */
+export async function sftpCreateEmptyFile(sessionKey: string, path: string): Promise<void> {
+	if ((await sftpStat(sessionKey, path)).exists) throw new Error(`已存在同名文件或目录：${path}`);
+	await sftpWriteFile(sessionKey, path, "");
+}
+
+export async function fsLocalCreateEmptyFile(path: string): Promise<void> {
+	if ((await fsLocalStat(path)).exists) throw new Error(`已存在同名文件或目录：${path}`);
+	await fsLocalWriteFile(path, "");
 }
 
 /* ------------------------------- 工具函数 ------------------------------- */

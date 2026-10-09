@@ -1,8 +1,10 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
+import { useScreenActive } from "@/lib/screenActive";
+import { startForward, stopForward } from "@/lib/forwardManager";
 import { HostEditModal } from "@/components/host/HostEditModal";
 import { EmbeddedSftpDrawer } from "@/components/sftp/EmbeddedSftpDrawer";
 import { SftpSidebar } from "@/components/sftp/SftpSidebar";
-import { closeSshSession, observeSshLifecycle } from "@/components/terminal/sshCache";
+import { observeSshLifecycle } from "@/components/terminal/sshCache";
 import { type TerminalHandle, type TerminalMatchInfo } from "@/components/terminal/Terminal";
 import { TerminalPane } from "@/components/terminal/TerminalPane";
 import { Button, IconButton, Kbd } from "@/components/ui/Button";
@@ -86,7 +88,12 @@ export default function Workspace() {
 	const closeTab = useSessionsStore((s) => s.closeTab);
 	const reopenTab = useSessionsStore((s) => s.reopenTab);
 
-	const hostStore = useHostsStore();
+	// 只订阅用得到的两项，避免主机库里任何无关状态（搜索词、视图）变化都让整个工作区重渲染
+	const hostStore = {
+		hosts: useHostsStore((s) => s.hosts),
+		removeHost: useHostsStore((s) => s.removeHost),
+	};
+	const screenActive = useScreenActive();
 
 	const sidebarOpen = useUiStore((s) => s.sidebarOpen);
 	const activity = useUiStore((s) => s.activity);
@@ -226,6 +233,8 @@ export default function Workspace() {
 	/* ---------------------------- 全局快捷键 ---------------------------- */
 
 	useEffect(() => {
+		// 工作区常驻：隐藏时（在别的界面）不响应自己的快捷键
+		if (!screenActive) return;
 		const onKey = (event: KeyboardEvent) => {
 			const key = event.key.toLowerCase();
 			if (event.key === "Escape") {
@@ -318,16 +327,13 @@ export default function Workspace() {
 		};
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, [menu, tabMenu, renamingTabId, searchOpen, focusId, activeTab, effectiveMaximizedPaneId, gridPanes.length]);
+	}, [menu, tabMenu, renamingTabId, searchOpen, focusId, activeTab, effectiveMaximizedPaneId, gridPanes.length, screenActive]);
 
 	/* ------------------------------ 交互动作 ---------------------------- */
 
 	const onCloseTab = (tab: SessionTab) => {
+		// 会话由 store 挂起几秒再销毁：撤销时能原样找回真实会话（输出不丢）
 		closeTab(tab.id);
-		const key = tab.sessionKey;
-		if (key && !useSessionsStore.getState().tabs.some((t) => t.sessionKey === key)) {
-			void closeSshSession(key);
-		}
 		toast({
 			title: `已关闭 ${tab.title}`,
 			tone: "default",
@@ -1635,7 +1641,6 @@ function ForwardSidebar({
 	onOpenAddRule?: (hostId?: string) => void;
 }) {
 	const rules = useForwardsStore((s) => s.rules);
-	const setRuleState = useForwardsStore((s) => s.setRuleState);
 	const hostStore = useHostsStore();
 
 	const effectiveHostId = filterHostId ?? activeHost?.id ?? null;
@@ -1756,7 +1761,13 @@ function ForwardSidebar({
 										<span
 											className={cn(
 												"size-1.5 rounded-full shrink-0",
-												rule.state === "running" ? "bg-success" : "bg-muted",
+												rule.state === "running"
+													? "bg-success"
+													: rule.state === "starting"
+														? "bg-warning"
+														: rule.state === "error"
+															? "bg-danger"
+															: "bg-muted",
 											)}
 										/>
 										<span className="font-medium text-surface-foreground truncate">{rule.name || "未命名规则"}</span>
@@ -1765,7 +1776,8 @@ function ForwardSidebar({
 								</div>
 								<div className="mt-1 flex items-center justify-between font-mono text-[10px] text-muted">
 									<span className="truncate">
-										:{rule.bindPort} → {rule.targetHost}:{rule.targetPort}
+										:{rule.bindPort} → {rule.type === "dynamic" ? "SOCKS5" : `${rule.targetHost}:${rule.targetPort}`}
+										{rule.state === "running" && ` · ${rule.connections} 连接`}
 									</span>
 									{ruleHost && scope === "all" && (
 										<span className="rounded bg-surface-raised px-1 py-0.2 text-[8.5px] text-faint shrink-0 max-w-[80px] truncate">
@@ -1776,17 +1788,22 @@ function ForwardSidebar({
 								<div className="mt-2 flex items-center justify-end">
 									<Button
 										size="sm"
-										variant={rule.state === "running" ? "danger" : "default"}
+										variant={rule.state === "running" || rule.state === "starting" ? "danger" : "default"}
 										className="h-5 px-2 text-[10px]"
-										onClick={() => {
-											setRuleState(rule.id, rule.state === "running" ? "stopped" : "running");
-											toast({
-												title: rule.state === "running" ? `已停止 ${rule.name}` : `已启动 ${rule.name}`,
-												tone: "default",
-											});
+										title={rule.state === "error" ? rule.error : undefined}
+										onClick={async () => {
+											if (rule.state === "running" || rule.state === "starting") {
+												await stopForward(rule.id);
+												toast({ title: `已停止 ${rule.name}`, tone: "default" });
+												return;
+											}
+											const result = await startForward(rule.id);
+											if (result.ok) toast({ title: `已启动 ${rule.name}`, tone: "success" });
+											else if (result.error)
+												toast({ title: `${rule.name} 启动失败`, description: result.error, tone: "danger" });
 										}}
 									>
-										{rule.state === "running" ? "停止" : "启动"}
+										{rule.state === "running" ? "停止" : rule.state === "starting" ? "取消" : "启动"}
 									</Button>
 								</div>
 							</div>

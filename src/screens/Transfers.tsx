@@ -1,10 +1,21 @@
 import { WindowChrome } from "@/components/chrome/WindowChrome";
 import { Button, IconButton } from "@/components/ui/Button";
 import { Badge, EmptyState, ProgressBar, Segmented } from "@/components/ui/Display";
-import { Checkbox } from "@/components/ui/Toggle";
+import { ConflictBody } from "@/components/transfer/ConflictBody";
 import type { Transfer, TransferState } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { formatBytes, formatDuration, formatSpeed } from "@/lib/format";
+import {
+	cancelTransfer,
+	pauseAllTransfers,
+	pauseTransfer,
+	resolveConflict,
+	resumeTransfer,
+	revealLocal,
+	setTransferLimit,
+	type ConflictChoice,
+} from "@/lib/transferManager";
+import { useHostsStore } from "@/store/hosts";
 import { toast } from "@/store/toast";
 import { transferSummary, useTransfersStore } from "@/store/transfers";
 import { useState } from "react";
@@ -12,7 +23,8 @@ import { Link } from "react-router";
 
 /* =============================================================================
  * 传输队列 —— 设计帧 termx.vetd/frames/transfers.tsx 的交互版。
- * 状态：进行中 / 已暂停 / 失败 / 已完成 / 空（需求书 06-传输队列），数据来自 useTransfersStore。
+ * 状态：进行中 / 已暂停 / 失败 / 已完成 / 空（需求书 06-传输队列），数据来自 useTransfersStore，
+ * 运行与控制在 lib/transferManager.ts（真实的暂停 / 续传 / 取消 / 冲突处理 / SHA-256 复算 / 限速）。
  * ========================================================================== */
 
 type Scope = "all" | "running" | "paused" | "failed" | "done" | "empty";
@@ -66,19 +78,25 @@ const CARD_BORDER: Record<TransferState, string> = {
 	done: "border-success/40",
 };
 
-/** 界面内演示数据：mock 里没有速度/耗时的项补一个「上次速度」与「耗时」 */
-const DEMO_TIMING: Record<string, { speed: number; elapsed: number }> = {
-	"tr-app-log": { speed: 2_200_000, elapsed: 5.6 },
-	"tr-config": { speed: 5_120, elapsed: 0.4 },
-	"tr-release": { speed: 3_400_000, elapsed: 6.4 },
-	"tr-dump": { speed: 5_600_000, elapsed: 71.8 },
-};
+/** 耗时（秒）：只算真正在传的时间，不含排队与暂停 */
+function elapsedOf(item: Transfer): number {
+	const running = item.state === "running" && item.runStartedAt ? Date.now() - item.runStartedAt : 0;
+	return ((item.activeMs ?? 0) + running) / 1000;
+}
 
-/** 进行中任务的吞吐采样（演示用，单位 MB/s） */
-const SAMPLES = [1.6, 1.9, 2.4, 2.1, 2.6, 2.2, 1.8, 2.3, 2.7, 2.4, 2.0, 2.2, 2.5, 2.1, 2.3, 2.2];
+/** 平均速度：传输字节 / 实际耗时；没有数据时为 0 */
+function averageSpeed(item: Transfer): number {
+	const elapsed = elapsedOf(item);
+	return elapsed > 0 ? item.transferred / elapsed : 0;
+}
 
-function timingOf(item: Transfer) {
-	return DEMO_TIMING[item.id] ?? { speed: item.speedBps || 1_048_576, elapsed: 4 };
+function speedText(bps: number): string {
+	return bps > 0 ? formatSpeed(bps) : "—";
+}
+
+function remainText(item: Transfer, bps: number): string {
+	if (bps <= 0) return "—";
+	return formatDuration(item.etaSec ?? (item.size - item.transferred) / bps);
 }
 
 function percentOf(item: Transfer): number {
@@ -88,21 +106,22 @@ function percentOf(item: Transfer): number {
 
 /** 每条任务的「进度 · 速度 · 剩余时间」摘要 */
 function metaOf(item: Transfer): string {
-	const { speed, elapsed } = timingOf(item);
 	const progress = `${formatBytes(item.transferred)} / ${formatBytes(item.size)}`;
-	const remain = item.size - item.transferred;
+	const avg = averageSpeed(item);
 
 	switch (item.state) {
 		case "running":
-			return `${progress} · ${formatSpeed(item.speedBps || speed)} · 剩余 ${formatDuration(item.etaSec ?? remain / speed)}`;
+			if (item.verifying) return `${progress} · 正在远端复算 SHA-256`;
+			return `${progress} · ${speedText(item.speedBps)} · 剩余 ${remainText(item, item.speedBps)}`;
 		case "paused":
-			return `${progress} · ${formatSpeed(speed)}（暂停前） · 剩余 ${formatDuration(remain / speed)}`;
+			return `${progress} · ${speedText(avg)}（暂停前平均） · 可从断点继续`;
 		case "failed":
-			return `${progress} · ${formatSpeed(speed)}（断流前） · 剩余 ${formatDuration(remain / speed)}`;
+			return `${progress} · ${speedText(avg)}（断流前平均）`;
 		case "done":
-			return `${formatBytes(item.size)} · 平均 ${formatSpeed(item.size / elapsed)} · 耗时 ${formatDuration(elapsed)}`;
+			return `${formatBytes(item.size)} · 平均 ${speedText(avg)} · 耗时 ${formatDuration(elapsedOf(item))}`;
 		default:
-			return `${formatBytes(item.size)} 待传输 · 等待空闲通道`;
+			if (item.pendingConflict) return `${formatBytes(item.size)} · 等待确认同名冲突`;
+			return `${formatBytes(item.size)} 待传输 · 等待前面的任务完成`;
 	}
 }
 
@@ -112,17 +131,22 @@ function targetOf(item: Transfer): string {
 
 export default function Transfers() {
 	const items = useTransfersStore((s) => s.items);
-	const setState = useTransfersStore((s) => s.setState);
-	const retry = useTransfersStore((s) => s.retry);
-	const remove = useTransfersStore((s) => s.remove);
 	const clearDone = useTransfersStore((s) => s.clearDone);
+	const limitMb = useTransfersStore((s) => s.limitMb);
+	const hosts = useHostsStore((s) => s.hosts);
+	const hostName = (id: string) => hosts.find((h) => h.id === id)?.name ?? id;
 
 	const [scope, setScope] = useState<Scope>("all");
-	const [pickedId, setPickedId] = useState<string | null>("tr-release");
-	const [limitMb, setLimitMb] = useState(8);
+	const [pickedId, setPickedId] = useState<string | null>(null);
 	const [limitOpen, setLimitOpen] = useState(false);
 	const [applyAll, setApplyAll] = useState(true);
 	const [rule, setRule] = useState<"overwrite" | "skip" | "rename" | null>(null);
+
+	const setLimitMb = (mb: number) => {
+		setTransferLimit(mb).catch((error) =>
+			toast({ title: "限速设置失败", description: String(error), tone: "danger" }),
+		);
+	};
 
 	const summary = transferSummary(items);
 	const visible = scope === "empty" ? [] : scope === "all" ? items : items.filter((t) => t.state === scope);
@@ -131,29 +155,51 @@ export default function Transfers() {
 	const doneCount = items.filter((t) => t.state === "done").length;
 
 	const cancel = (item: Transfer) => {
-		remove(item.id);
-		toast({ title: `已取消 ${item.name}`, description: "任务已从传输队列移除", tone: "default" });
+		const wasDone = item.state === "done";
+		void cancelTransfer(item.id).then(() => {
+			if (wasDone) toast({ title: `已移除 ${item.name}`, tone: "default" });
+			else toast({ title: `已取消 ${item.name}`, description: "任务已从传输队列移除，未完成的部分文件已清理", tone: "default" });
+		});
 	};
 
 	const pauseAll = () => {
-		items.forEach((t) => {
-			if (t.state === "running") setState(t.id, "paused");
-		});
-		toast({ title: "已暂停全部传输", tone: "warning" });
+		void pauseAllTransfers().then((count) =>
+			toast({ title: count > 0 ? `已暂停 ${count} 个传输` : "没有进行中的传输", tone: count > 0 ? "warning" : "default" }),
+		);
 	};
 
-	const chooseRule = (item: Transfer, next: "overwrite" | "skip" | "rename") => {
-		setRule(next);
-		if (next === "skip") {
-			remove(item.id);
-			toast({ title: `已跳过 ${item.name}`, description: "远端已存在的文件保持不变", tone: "warning" });
-			return;
-		}
-		retry(item.id);
+	const pause = (item: Transfer) => void pauseTransfer(item.id);
+
+	const resume = (item: Transfer, verb: "继续" | "重试") => {
+		toast({ title: verb === "重试" ? `正在重试 ${item.name}` : `继续传输 ${item.name}`, description: "从断点续传", tone: "default" });
+		void resumeTransfer(item.id, {
+			onItemDone: (done) => toast({ title: `${done.direction === "upload" ? "已上传" : "已下载"} ${done.name}`, tone: "success" }),
+			onItemFailed: (failed, error) => toast({ title: `传输失败: ${failed.name}`, description: error, tone: "danger" }),
+		});
+	};
+
+	const reveal = (item: Transfer) => {
+		revealLocal(item.localPath).catch((error) =>
+			toast({ title: "无法打开所在目录", description: String(error), tone: "danger" }),
+		);
+	};
+
+	const chooseRule = (item: Transfer, next: ConflictChoice) => {
+		if (next !== "resume") setRule(next);
+		resolveConflict(item.id, next, applyAll);
+		const sideText = item.direction === "upload" ? "远端" : "本地";
 		toast({
-			title: next === "overwrite" ? `已覆盖远端 ${item.name}` : `已重命名为 ${item.name}.local`,
-			description: applyAll ? "后续同名文件均按此规则处理" : "仅对本次冲突生效",
-			tone: "success",
+			title:
+				next === "skip"
+					? `已跳过 ${item.name}`
+					: next === "overwrite"
+						? `将覆盖${sideText} ${item.name}`
+						: next === "resume"
+							? `将从断点续传 ${item.name}`
+							: `将重命名保留两份`,
+			description:
+				next === "skip" ? `${sideText}已存在的文件保持不变` : applyAll ? "本批后续同名文件均按此规则处理" : "仅对本次冲突生效",
+			tone: next === "skip" ? "warning" : "success",
 		});
 	};
 
@@ -241,7 +287,7 @@ export default function Transfers() {
 													className="size-5"
 													onClick={(e) => {
 														e.stopPropagation();
-														setState(item.id, "paused");
+														pause(item);
 													}}
 												/>
 											)}
@@ -252,7 +298,7 @@ export default function Transfers() {
 													className="size-5"
 													onClick={(e) => {
 														e.stopPropagation();
-														setState(item.id, "running");
+														resume(item, "继续");
 													}}
 												/>
 											)}
@@ -263,8 +309,7 @@ export default function Transfers() {
 													className="size-5"
 													onClick={(e) => {
 														e.stopPropagation();
-														retry(item.id);
-														toast({ title: `正在重试 ${item.name}`, tone: "default" });
+														resume(item, "重试");
 													}}
 												/>
 											)}
@@ -275,7 +320,7 @@ export default function Transfers() {
 													className="size-5"
 													onClick={(e) => {
 														e.stopPropagation();
-														toast({ title: "已打开目录", description: item.localPath });
+														reveal(item);
 													}}
 												/>
 											)}
@@ -290,7 +335,7 @@ export default function Transfers() {
 											/>
 											<span className="ml-auto flex items-center gap-1 font-mono text-[9.5px] text-faint">
 												<span className="icon-[lucide--server] size-2.5" />
-												{item.hostId}
+												{hostName(item.hostId)}
 											</span>
 										</div>
 									</div>
@@ -385,16 +430,16 @@ export default function Transfers() {
 						{picked ? (
 							<DetailCard
 								item={picked}
+								hostName={hostName(picked.hostId)}
+								limitMb={limitMb}
 								applyAll={applyAll}
 								rule={rule}
 								onApplyAll={setApplyAll}
 								onRule={chooseRule}
-								onPause={() => setState(picked.id, "paused")}
-								onResume={() => setState(picked.id, "running")}
-								onRetry={() => {
-									retry(picked.id);
-									toast({ title: `正在重试 ${picked.name}`, tone: "default" });
-								}}
+								onPause={() => pause(picked)}
+								onResume={() => resume(picked, "继续")}
+								onRetry={() => resume(picked, "重试")}
+								onReveal={() => reveal(picked)}
 								onCancel={() => cancel(picked)}
 							/>
 						) : (
@@ -423,6 +468,8 @@ export default function Transfers() {
 
 function DetailCard({
 	item,
+	hostName,
+	limitMb,
 	applyAll,
 	rule,
 	onApplyAll,
@@ -430,20 +477,27 @@ function DetailCard({
 	onPause,
 	onResume,
 	onRetry,
+	onReveal,
 	onCancel,
 }: {
 	item: Transfer;
+	hostName: string;
+	limitMb: number;
 	applyAll: boolean;
 	rule: "overwrite" | "skip" | "rename" | null;
 	onApplyAll: (value: boolean) => void;
-	onRule: (item: Transfer, rule: "overwrite" | "skip" | "rename") => void;
+	onRule: (item: Transfer, rule: ConflictChoice) => void;
 	onPause: () => void;
 	onResume: () => void;
 	onRetry: () => void;
+	onReveal: () => void;
 	onCancel: () => void;
 }) {
 	const percent = percentOf(item);
-	const { speed, elapsed } = timingOf(item);
+	const avg = averageSpeed(item);
+	const elapsed = elapsedOf(item);
+	const samples = item.samples ?? [];
+	const peak = Math.max(1, ...samples);
 
 	return (
 		<div className="w-[520px] max-w-full rounded-card border border-border bg-surface-raised shadow-lg">
@@ -473,14 +527,14 @@ function DetailCard({
 						<h2 className="truncate font-mono text-[13px] font-semibold text-surface-foreground">{item.name}</h2>
 					</div>
 					<p className="truncate font-mono text-[10.5px] text-faint">
-						{item.hostId} · {targetOf(item)}
+						{hostName} · {targetOf(item)}
 					</p>
 				</div>
 				<Badge className={cn("shrink-0", STATE_TONE[item.state])}>{STATE_LABEL[item.state]}</Badge>
 			</div>
 
 			{/* 状态相关内容 */}
-			{item.state === "paused" ? (
+			{item.pendingConflict ? (
 				<ConflictBody
 					item={item}
 					applyAll={applyAll}
@@ -499,35 +553,41 @@ function DetailCard({
 					<ProgressBar className="mt-2" value={percent} tone={BAR_TONE[item.state]} />
 
 					<div className="mt-3 grid grid-cols-3 gap-2">
-						<Stat label="速度" value={item.state === "running" ? formatSpeed(item.speedBps) : formatSpeed(speed)} />
+						<Stat label="速度" value={item.state === "running" ? speedText(item.speedBps) : speedText(avg)} />
 						<Stat
 							label={item.state === "done" ? "耗时" : "剩余时间"}
 							value={
 								item.state === "done"
 									? formatDuration(elapsed)
-									: formatDuration(item.etaSec ?? (item.size - item.transferred) / speed)
+									: item.state === "running"
+										? remainText(item, item.speedBps)
+										: "—"
 							}
 						/>
 						<Stat
 							label={item.state === "done" ? "平均速度" : "已传输"}
-							value={item.state === "done" ? formatSpeed(item.size / elapsed) : formatBytes(item.transferred)}
+							value={item.state === "done" ? speedText(avg) : formatBytes(item.transferred)}
 						/>
 					</div>
 
 					{item.state === "running" && (
 						<div className="mt-3.5">
 							<div className="mb-1 flex items-center justify-between text-[10.5px] text-faint">
-								<span>吞吐趋势（近 16 秒）</span>
-								<span className="font-mono tabular-nums">{formatSpeed(item.speedBps)}</span>
+								<span>{item.verifying ? "数据已传完，正在远端复算 SHA-256…" : "吞吐趋势（近 16 秒）"}</span>
+								<span className="font-mono tabular-nums">{speedText(item.speedBps)}</span>
 							</div>
 							<div className="flex h-9 items-end gap-0.5">
-								{SAMPLES.map((value, index) => (
-									<span
-										key={index}
-										style={{ height: `${Math.round((value / 3) * 100)}%` }}
-										className={cn("flex-1 rounded-sm", index === SAMPLES.length - 1 ? "bg-primary" : "bg-primary/50")}
-									/>
-								))}
+								{samples.length === 0 ? (
+									<span className="self-center text-[10.5px] text-faint">采样中…</span>
+								) : (
+									samples.map((value, index) => (
+										<span
+											key={index}
+											style={{ height: `${Math.max(4, Math.round((value / peak) * 100))}%` }}
+											className={cn("flex-1 rounded-sm", index === samples.length - 1 ? "bg-primary" : "bg-primary/50")}
+										/>
+									))
+								)}
 							</div>
 						</div>
 					)}
@@ -539,26 +599,44 @@ function DetailCard({
 								<span>{item.error ?? "传输失败"}</span>
 							</div>
 							<div className="mt-1 font-mono text-[10.5px] text-muted">
-								已传输 {formatBytes(item.transferred)} · 断流前速度 {formatSpeed(speed)} · 可重试，续传会从断点继续
+								已传输 {formatBytes(item.transferred)} · 断流前平均 {speedText(avg)} · 可重试，续传会从断点继续
 							</div>
 						</div>
 					)}
 
 					{item.state === "done" && (
-						<div className="mt-3.5 rounded-control border border-success/40 bg-success/10 px-3 py-2">
-							<div className="flex items-center gap-1.5 text-[11.5px] font-medium text-success">
-								<span className="icon-[lucide--check-check] size-3.5" />
-								<span>传输完成，已校验 SHA-256</span>
+						<div
+							className={cn(
+								"mt-3.5 rounded-control border px-3 py-2",
+								item.verified === false ? "border-danger/40 bg-danger/10" : "border-success/40 bg-success/10",
+							)}
+						>
+							<div
+								className={cn(
+									"flex items-center gap-1.5 text-[11.5px] font-medium",
+									item.verified === false ? "text-danger" : "text-success",
+								)}
+							>
+								<span className={cn("size-3.5", item.verified === false ? "icon-[lucide--circle-alert]" : "icon-[lucide--check-check]")} />
+								<span>
+									{item.verified === true
+										? "传输完成，已校验 SHA-256"
+										: item.verified === false
+											? "传输完成，但 SHA-256 校验不一致"
+											: "传输完成（SHA-256 未比对）"}
+								</span>
 							</div>
 							<div className="mt-1 font-mono text-[10.5px] text-muted">
-								{item.localPath} → {item.remotePath}
+								{item.direction === "upload" ? `${item.localPath} → ${item.remotePath}` : `${item.remotePath} → ${item.localPath}`}
 							</div>
+							{item.verifyNote && <div className="mt-1 text-[10.5px] text-muted">{item.verifyNote}</div>}
+							{item.sha256 && <div className="mt-0.5 break-all font-mono text-[10px] text-faint">SHA-256 {item.sha256}</div>}
 						</div>
 					)}
 
 					<div className="mt-3.5 space-y-1.5 border-t border-border pt-3 font-mono text-[10.5px]">
-						<PathRow label="来源" value={item.localPath} />
-						<PathRow label="目标" value={item.remotePath} />
+						<PathRow label="来源" value={item.direction === "upload" ? item.localPath : item.remotePath} />
+						<PathRow label="目标" value={item.direction === "upload" ? item.remotePath : item.localPath} />
 						<PathRow label="任务 ID" value={item.id} />
 					</div>
 				</div>
@@ -568,7 +646,8 @@ function DetailCard({
 			<div className="flex items-center justify-between gap-2 border-t border-border px-4 py-2.5">
 				<span className="flex items-center gap-1.5 font-mono text-[10.5px] text-faint">
 					<span className="icon-[lucide--gauge] size-3" />
-					限速 {limitTextFromContext(item)}
+					限速 {limitMb === 0 ? "不限速" : formatSpeed(limitMb * 1024 * 1024)}
+					{item.pendingConflict ? "（等待冲突确认）" : ""}
 				</span>
 				<div className="flex items-center gap-2">
 					{item.state === "running" && (
@@ -587,7 +666,7 @@ function DetailCard({
 						</Button>
 					)}
 					{item.state === "done" && (
-						<Button size="sm" icon="icon-[lucide--folder-open]" onClick={() => toast({ title: "已打开目录", description: item.localPath })}>
+						<Button size="sm" icon="icon-[lucide--folder-open]" onClick={onReveal}>
 							打开所在目录
 						</Button>
 					)}
@@ -598,10 +677,6 @@ function DetailCard({
 			</div>
 		</div>
 	);
-}
-
-function limitTextFromContext(item: Transfer): string {
-	return item.state === "paused" ? "8.0 MB/s（等待冲突确认）" : "8.0 MB/s";
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -622,98 +697,3 @@ function PathRow({ label, value }: { label: string; value: string }) {
 	);
 }
 
-/* --------------------------- 同名文件冲突确认 --------------------------- */
-
-function ConflictBody({
-	item,
-	applyAll,
-	rule,
-	onApplyAll,
-	onRule,
-}: {
-	item: Transfer;
-	applyAll: boolean;
-	rule: "overwrite" | "skip" | "rename" | null;
-	onApplyAll: (value: boolean) => void;
-	onRule: (item: Transfer, rule: "overwrite" | "skip" | "rename") => void;
-}) {
-	const localSize = item.size;
-	const remoteSize = Math.max(1, localSize - 60);
-
-	const rows = [
-		{ label: "文件名称", local: item.name, remote: item.name, newer: false },
-		{
-			label: "文件大小",
-			local: `${localSize.toLocaleString("en-US")} 字节 (${formatBytes(localSize)})`,
-			remote: `${remoteSize.toLocaleString("en-US")} 字节 (${formatBytes(remoteSize)})`,
-			newer: false,
-		},
-		{ label: "修改时间", local: "今天 09:40 (较新)", remote: "昨天 18:41", newer: true },
-	];
-
-	const ruleLabel =
-		rule === "overwrite" ? "覆盖远端文件" : rule === "skip" ? "跳过本次传输" : rule === "rename" ? "重命名保留两份" : null;
-
-	return (
-		<div className="px-4 py-3.5">
-			<div className="flex items-start gap-2.5">
-				<span className="flex size-6 shrink-0 items-center justify-center rounded bg-warning/15 text-warning">
-					<span className="icon-[lucide--triangle-alert] size-3.5" />
-				</span>
-				<div className="min-w-0">
-					<h3 className="text-[12.5px] font-semibold text-surface-foreground">同名文件覆盖冲突</h3>
-					<p className="mt-0.5 text-[11px] text-muted">
-						目标路径 <span className="font-mono">{item.remotePath}</span> 已有同名文件，请确认处理方式
-					</p>
-				</div>
-			</div>
-
-			<div className="mt-3 overflow-hidden rounded-control border border-border bg-surface">
-				<div className="grid grid-cols-[92px_1fr_1fr] border-b border-border bg-surface-sunk/60 px-3 py-1.5 font-mono text-[10.5px] tracking-wider text-faint uppercase">
-					<span>属性</span>
-					<span>本地待上传文件</span>
-					<span>远程已有文件</span>
-				</div>
-				<div className="divide-y divide-border/40 font-mono text-[11.5px]">
-					{rows.map((row) => (
-						<div key={row.label} className="grid grid-cols-[92px_1fr_1fr] items-center px-3 py-1.5">
-							<span className="font-sans text-muted">{row.label}</span>
-							<span className={cn("truncate tabular-nums", row.newer ? "text-success" : "text-surface-foreground")}>
-								{row.local}
-							</span>
-							<span className="truncate tabular-nums text-faint">{row.remote}</span>
-						</div>
-					))}
-				</div>
-			</div>
-
-			<div className="mt-4 flex items-center gap-2">
-				<Button
-					size="sm"
-					variant="primary"
-					icon="icon-[lucide--check]"
-					className="h-7.5 flex-1 justify-center"
-					onClick={() => onRule(item, "overwrite")}
-				>
-					覆盖远端文件
-				</Button>
-				<Button size="sm" className="h-7.5 flex-1 justify-center" onClick={() => onRule(item, "skip")}>
-					跳过本次传输
-				</Button>
-				<Button size="sm" className="h-7.5 flex-1 justify-center" onClick={() => onRule(item, "rename")}>
-					重命名保留两份
-				</Button>
-			</div>
-
-			<div className="mt-3.5 flex items-center justify-between gap-3 border-t border-border pt-3">
-				<Checkbox checked={applyAll} onChange={onApplyAll} label="对本次传输队列中的后续所有冲突文件均应用此规则" />
-				{ruleLabel && (
-					<span className="flex shrink-0 items-center gap-1 font-mono text-[10.5px] text-success">
-						<span className="icon-[lucide--check] size-3" />
-						已选择：{ruleLabel}
-					</span>
-				)}
-			</div>
-		</div>
-	);
-}

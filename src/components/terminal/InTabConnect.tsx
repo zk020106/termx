@@ -48,9 +48,9 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 
 	// 表单状态：支持在此直接切换认证方式，与主机配置无缝同步
 	const [authMethod, setAuthMethod] = useState<AuthMethod>(host?.auth.method ?? "password");
-	const [password, setPassword] = useState(host?.auth.password ?? "");
+	const [password, setPassword] = useState("");
 	const [showPassword, setShowPassword] = useState(false);
-	const [rememberPassword, setRememberPassword] = useState(host?.auth.rememberPassword ?? Boolean(host?.auth.password));
+	const [rememberPassword, setRememberPassword] = useState(host?.auth.rememberPassword ?? false);
 	const [selectedKeyId, setSelectedKeyId] = useState(host?.auth.keyId ?? (keys[0]?.id || ""));
 	const [keyPath, setKeyPath] = useState(host?.auth.keyPath ?? "");
 	const [passphrase, setPassphrase] = useState("");
@@ -62,6 +62,8 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 		kind: "host_unknown" | "host_changed";
 		fingerprint: string | null;
 		detail: string;
+		/** 出问题的那一跳（跳板机时与目标不同） */
+		target?: { host: string; port: number };
 	} | null>(null);
 
 	// 键盘交互状态
@@ -146,6 +148,8 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 						password: cred.method === "password" ? cred.password : "",
 						cols: 80,
 						rows: 24,
+						// 跳板链、代理、TERM / 环境变量 / 登录脚本 / 编码都按主机配置展开
+						hostId: host.id,
 					},
 					(phase: SshPhase) => {
 						setPhaseText(phase.detail || phase.phase);
@@ -161,7 +165,7 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 						void secretDelete(host.id).catch(() => undefined);
 					}
 
-					// 同步更新主机实体（认证方式、密码、私钥路径、最近连接时间）
+					// 同步更新主机实体（认证方式、私钥路径、最近连接时间；密码只进钥匙串）
 					const updatedHost: Host = {
 						...host,
 						lastConnectedAt: new Date().toISOString(),
@@ -169,7 +173,6 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 							...host.auth,
 							method: updateDefaultAuth ? activeMethod : host.auth.method,
 							rememberPassword: activeMethod === "password" ? rememberPassword : host.auth.rememberPassword,
-							password: shouldSavePwd ? effectivePassword : (activeMethod === "password" && !rememberPassword ? undefined : host.auth.password),
 							keyPath: (activeMethod === "key" || activeMethod === "key-passphrase") ? (activeKeyPath.trim() || host.auth.keyPath) : host.auth.keyPath,
 							keyId: (activeMethod === "key" || activeMethod === "key-passphrase") && selectedKeyId ? selectedKeyId : host.auth.keyId,
 						},
@@ -195,6 +198,7 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 							kind: result.kind,
 							fingerprint: result.fingerprint ?? null,
 							detail: result.error ?? (result.kind === "host_unknown" ? "首次连接此主机，请核对指纹" : "主机指纹发生变动！"),
+							target: result.host && result.port ? { host: result.host, port: result.port } : undefined,
 						});
 					} else {
 						setError(result.error ?? "连接失败，请检查网络或凭据");
@@ -214,14 +218,7 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 		autoConnectAttempted.current = true;
 
 		if (host.auth.method === "password") {
-			// 1. 如果已记住密码且已有密码，直接自动连接
-			if (host.auth.rememberPassword && host.auth.password) {
-				setPassword(host.auth.password);
-				setRememberPassword(true);
-				void doConnect(host.auth.password, "password");
-				return;
-			}
-			// 2. 兜底尝试从系统钥匙串载入
+			// 已记住密码：从系统钥匙串（或本次运行的内存）载入后自动连接
 			if (host.auth.rememberPassword) {
 				void secretLoad(host.id).then((savedPassword) => {
 					if (savedPassword) {
@@ -249,10 +246,19 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 
 	const handleTrustAndConnect = async () => {
 		if (!host || !fingerprintAlert) return;
-		if (fingerprintAlert.kind === "host_unknown") {
-			await sshTrustHost(host.hostname, host.port);
-		} else {
-			await sshReplaceHostKey(host.hostname, host.port);
+		// 经跳板机时，出问题的可能是跳板机：信任 / 替换作用在 Rust 报回来的那一跳上
+		const at = fingerprintAlert.target ?? { host: host.hostname, port: host.port };
+		try {
+			if (fingerprintAlert.kind === "host_unknown") {
+				await sshTrustHost(at.host, at.port, fingerprintAlert.fingerprint);
+			} else {
+				await sshReplaceHostKey(at.host, at.port, fingerprintAlert.fingerprint);
+			}
+		} catch (err) {
+			// 例如核对期间对端换了钥匙：如实显示，不假装记下了
+			setFingerprintAlert(null);
+			setError(err instanceof Error ? err.message : String(err));
+			return;
 		}
 		setFingerprintAlert(null);
 		void doConnect();

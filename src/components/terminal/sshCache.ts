@@ -1,3 +1,6 @@
+import type { ConnectProfile } from "@/lib/connectPlan";
+import { resolveConnectProfile } from "@/lib/connectProfile";
+import { ReplayBuffer } from "@/lib/replayBuffer";
 import { listenSsh, sshConnect, sshDisconnect, sshResize, sshWrite, type SshPhase } from "@/lib/ssh";
 
 /* =============================================================================
@@ -46,7 +49,7 @@ export function newSshSessionKey(hostId: string): string {
 
 interface Entry {
 	/** 整段会话输出（只留末尾 MAX_BUFFER 字符）：终端重挂载时靠它回放 */
-	replay: string;
+	replay: ReplayBuffer;
 	subs: Set<(chunk: string) => void>;
 	exitSubs: Set<(code: number | null) => void>;
 	phase: SshPhase | null;
@@ -67,7 +70,7 @@ function ensureEntry(key: string): Entry {
 	let entry = sessions.get(key);
 	if (!entry) {
 		entry = {
-			replay: "",
+			replay: new ReplayBuffer(MAX_BUFFER),
 			subs: new Set(),
 			exitSubs: new Set(),
 			phase: null,
@@ -146,6 +149,9 @@ export interface SshOpenResult {
 	kind?: string;
 	/** 服务器返回的指纹，界面直接展示 */
 	fingerprint?: string;
+	/** 指纹问题出在哪一跳（跳板机时与目标主机不同） */
+	host?: string;
+	port?: number;
 }
 
 const mockSshBuffers = new Map<string, { buffer: string; host: string; user: string }>();
@@ -156,7 +162,16 @@ const mockSshBuffers = new Map<string, { buffer: string; host: string; user: str
  */
 export async function openSshSession(
 	key: string,
-	options: { host: string; port: number; username: string; password: string; cols: number; rows: number },
+	options: {
+		host: string;
+		port: number;
+		username: string;
+		password: string;
+		cols: number;
+		rows: number;
+		/** 主机库里的主机：据此展开跳板链、代理与会话选项（TERM / 环境变量 / 登录脚本 / 编码） */
+		hostId?: string;
+	},
 	onPhase?: (phase: SshPhase) => void,
 ): Promise<SshOpenResult> {
 	const entry = ensureEntry(key);
@@ -182,11 +197,12 @@ export async function openSshSession(
 		const user = options.username || "root";
 		mockSshBuffers.set(key, { buffer: "", host, user });
 
-		entry.replay =
+		entry.replay.set(
 			`\r\n\x1b[38;2;0;100;224m[TermX SSH]\x1b[0m 已成功连接到 ${host} (Web 模拟会话)\r\n` +
 			`Linux ${host} 6.1.0-22-amd64 #1 SMP PREEMPT_DYNAMIC Debian\r\n` +
 			`Last login: ${new Date().toLocaleString()} from 192.168.1.100\r\n\r\n` +
-			`\x1b[32m${user}@${host}\x1b[0m:\x1b[34m~\x1b[0m$ `;
+			`\x1b[32m${user}@${host}\x1b[0m:\x1b[34m~\x1b[0m$ `,
+		);
 
 		emitLifecycle(key, "connected");
 		return { ok: true };
@@ -208,7 +224,7 @@ export async function openSshSession(
 				else if (phase.phase === "shell" && phase.ok) emitLifecycle(key, "connected");
 			},
 			onData: (chunk) => {
-				entry.replay = (entry.replay + chunk).slice(-MAX_BUFFER);
+				entry.replay.push(chunk);
 				for (const sub of entry.subs) sub(chunk);
 			},
 			onExit: (code) => {
@@ -221,7 +237,7 @@ export async function openSshSession(
 	}
 
 	// 先建好「终局」监听，再发起连接：否则首个阶段事件可能在监听就绪前发出
-	const outcome = new Promise<{ ok: boolean; detail?: string; kind?: string; fingerprint?: string }>((resolve) => {
+	const outcome = new Promise<{ ok: boolean; detail?: string; kind?: string; fingerprint?: string; host?: string; port?: number }>((resolve) => {
 		const watch = (phase: SshPhase) => {
 			if (phase.phase === "shell" && phase.ok) {
 				entry.phaseSubs.delete(watch);
@@ -235,14 +251,27 @@ export async function openSshSession(
 					detail: phase.detail,
 					kind: phase.kind ?? undefined,
 					fingerprint: phase.fingerprint ?? undefined,
+					host: phase.host ?? undefined,
+					port: phase.port ?? undefined,
 				});
 			}
 		};
 		entry.phaseSubs.add(watch);
 	});
 
+	let profile: ConnectProfile | undefined;
+	if (options.hostId) {
+		const plan = await resolveConnectProfile(options.hostId);
+		if (!plan.ok) {
+			entry.failed = plan.error;
+			return { ok: false, error: plan.error };
+		}
+		profile = plan.profile;
+	}
+
 	try {
-		await sshConnect({ key, ...options });
+		const { hostId: _hostId, ...connect } = options;
+		await sshConnect({ key, ...connect, profile });
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		entry.failed = message;
@@ -252,7 +281,7 @@ export async function openSshSession(
 	// 认证失败、指纹未确认等都会以 failed 阶段回来
 	const result = await outcome;
 	if (result.ok) return { ok: true };
-	return { ok: false, error: result.detail, kind: result.kind, fingerprint: result.fingerprint };
+	return { ok: false, error: result.detail, kind: result.kind, fingerprint: result.fingerprint, host: result.host, port: result.port };
 }
 
 export interface SshAttachment {
@@ -274,7 +303,7 @@ export function attachSsh(
 	entry.exitSubs.add(onExit);
 
 	return {
-		replay: entry.replay,
+		replay: entry.replay.text(),
 		detach: () => {
 			entry.subs.delete(onData);
 			entry.exitSubs.delete(onExit);
@@ -291,7 +320,7 @@ export function writeSsh(key: string, data: string): boolean {
 		// Web 模拟交互
 		const prompt = `\x1b[32m${mock.user}@${mock.host}\x1b[0m:\x1b[34m~\x1b[0m$ `;
 		const emit = (chunk: string) => {
-			entry.replay = (entry.replay + chunk).slice(-MAX_BUFFER);
+			entry.replay.push(chunk);
 			for (const sub of entry.subs) sub(chunk);
 		};
 

@@ -1,5 +1,6 @@
 ﻿import type { ForwardRule, Host, HostGroup, Snippet, SshKey } from "@/data/types";
 import { normalizePreferences, type Preferences } from "@/data/preferences";
+import { stripHostSecrets } from "./configSecrets";
 import { isTauri } from "./tauri";
 
 /* =============================================================================
@@ -38,6 +39,39 @@ export function emptyConfig(): PersistedConfig {
 
 const LS_KEY = "termx.config";
 
+/** 已知的顶层字段；其余字段（更新版本写入的新字段）原样保留，写回时不丢 */
+const KNOWN_FIELDS = new Set(["version", "hosts", "groups", "keys", "snippets", "forwards", "preferences"]);
+let unknownFields: Record<string, unknown> = {};
+
+/** 后端在「配置文件解析失败但已备份」时返回的错误前缀（见 src-tauri/src/config.rs） */
+export const CORRUPT_PREFIX = "CORRUPT_BACKED_UP:";
+
+export type ConfigLoadIssue =
+	| { kind: "corrupt"; backupPath: string; message: string }
+	| { kind: "failed"; message: string }
+	| { kind: "newer"; version: number };
+
+/** 解析 config_load 的错误：区分「已备份的损坏文件」与其他读失败 */
+export function classifyLoadError(error: unknown): ConfigLoadIssue {
+	const text = error instanceof Error ? error.message : String(error);
+	if (text.startsWith(CORRUPT_PREFIX)) {
+		const rest = text.slice(CORRUPT_PREFIX.length);
+		const newline = rest.indexOf("\n");
+		return {
+			kind: "corrupt",
+			backupPath: newline < 0 ? rest : rest.slice(0, newline),
+			message: newline < 0 ? "配置文件解析失败" : rest.slice(newline + 1),
+		};
+	}
+	return { kind: "failed", message: text };
+}
+
+/** 运行期状态不落盘：转发规则重启后一律从「已停止」开始，计数清零 */
+export function persistableForward(rule: ForwardRule): ForwardRule {
+	const state = rule.state === "running" || rule.state === "starting" ? "stopped" : rule.state;
+	return { ...rule, state, connections: 0, trafficIn: 0, trafficOut: 0 };
+}
+
 /** 把读到的对象补齐成完整结构，旧文件缺字段也不至于炸（导入配置时也用它） */
 export function normalizeConfig(raw: Partial<PersistedConfig> | null): PersistedConfig {
 	const base = emptyConfig();
@@ -48,36 +82,67 @@ export function normalizeConfig(raw: Partial<PersistedConfig> | null): Persisted
 		groups: Array.isArray(raw.groups) ? raw.groups : [],
 		keys: Array.isArray(raw.keys) ? raw.keys : [],
 		snippets: Array.isArray(raw.snippets) ? raw.snippets : [],
-		forwards: Array.isArray(raw.forwards) ? raw.forwards : [],
+		forwards: Array.isArray(raw.forwards) ? raw.forwards.map(persistableForward) : [],
 		// 偏好逐项校验：老配置文件只有 accent，也能补齐成完整结构
 		preferences: normalizePreferences(raw.preferences),
 	};
 }
 
-export async function loadConfig(): Promise<PersistedConfig> {
-	if (isTauri()) {
-		const { invoke } = await import("@tauri-apps/api/core");
-		const raw = await invoke<Partial<PersistedConfig> | null>("config_load");
-		return normalizeConfig(raw);
-	}
-
-	try {
-		const text = localStorage.getItem(LS_KEY);
-		return normalizeConfig(text ? (JSON.parse(text) as Partial<PersistedConfig>) : null);
-	} catch {
-		return emptyConfig();
+/** 记下读到的未知顶层字段，saveConfig 时合并回去 */
+export function rememberUnknownFields(raw: unknown): void {
+	unknownFields = {};
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+	for (const [key, value] of Object.entries(raw)) {
+		if (!KNOWN_FIELDS.has(key)) unknownFields[key] = value;
 	}
 }
 
-export async function saveConfig(config: PersistedConfig): Promise<void> {
+/** 原始配置里的版本号（更高版本写的文件，本版本不应覆盖） */
+export function rawVersion(raw: unknown): number | null {
+	if (!raw || typeof raw !== "object") return null;
+	const v = (raw as { version?: unknown }).version;
+	return typeof v === "number" ? v : null;
+}
+
+export async function loadRawConfig(): Promise<unknown> {
 	if (isTauri()) {
 		const { invoke } = await import("@tauri-apps/api/core");
-		await invoke("config_save", { data: config });
+		return invoke<unknown>("config_load");
+	}
+	const text = localStorage.getItem(LS_KEY);
+	if (!text) return null;
+	try {
+		return JSON.parse(text);
+	} catch (error) {
+		// 浏览器预览：同样不覆盖坏数据，先挪到旁边
+		const backup = `${LS_KEY}.corrupt-${Date.now()}`;
+		localStorage.setItem(backup, text);
+		throw new Error(`${CORRUPT_PREFIX}localStorage:${backup}\n配置解析失败：${String(error)}`);
+	}
+}
+
+export async function loadConfig(): Promise<PersistedConfig> {
+	const raw = await loadRawConfig();
+	rememberUnknownFields(raw);
+	return normalizeConfig(raw as Partial<PersistedConfig> | null);
+}
+
+export async function saveConfig(config: PersistedConfig): Promise<void> {
+	// 兜底：无论调用方传进来什么，落盘的配置里都不带密码（Rust 侧 config_save 还会再剥一次）
+	const data = {
+		...unknownFields,
+		...config,
+		hosts: stripHostSecrets(config.hosts).hosts,
+		forwards: config.forwards.map(persistableForward),
+	};
+	if (isTauri()) {
+		const { invoke } = await import("@tauri-apps/api/core");
+		await invoke("config_save", { data });
 		return;
 	}
 
 	try {
-		localStorage.setItem(LS_KEY, JSON.stringify(config));
+		localStorage.setItem(LS_KEY, JSON.stringify(data));
 	} catch {
 		/* 隐私模式下写不了就只在内存里存活 */
 	}

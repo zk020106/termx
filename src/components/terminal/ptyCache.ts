@@ -1,3 +1,4 @@
+import { ReplayBuffer } from "@/lib/replayBuffer";
 import { isTauri, spawnLocalShell, type PtyHandle } from "@/lib/tauri";
 
 /* =============================================================================
@@ -101,7 +102,7 @@ class MockPtyHandle implements PtyHandle {
 
 interface Entry {
 	handle: PtyHandle | null;
-	replay: string;
+	replay: ReplayBuffer;
 	subs: Set<(chunk: string) => void>;
 	exitSubs: Set<(code: number | null) => void>;
 	ready: Promise<boolean>;
@@ -133,7 +134,7 @@ export function attachPty(
 		const exitSubs = new Set<(code: number | null) => void>();
 		const created: Entry = {
 			handle: null,
-			replay: "",
+			replay: new ReplayBuffer(MAX_BUFFER),
 			subs,
 			exitSubs,
 			ready: Promise.resolve(false),
@@ -145,7 +146,7 @@ export function attachPty(
 				cols,
 				rows,
 				(chunk) => {
-					created.replay = (created.replay + chunk).slice(-MAX_BUFFER);
+					created.replay.push(chunk);
 					for (const sub of subs) sub(chunk);
 				},
 				(code) => {
@@ -153,6 +154,12 @@ export function attachPty(
 				},
 			)
 				.then((handle) => {
+					// 启动期间格子已经被关掉（关标签 / 关分屏）：这个 shell 没人要了，立刻收掉，
+					// 否则它会变成没人能再关的孤儿进程
+					if (entries.get(paneId) !== created) {
+						void handle?.kill();
+						return false;
+					}
 					created.handle = handle;
 					return handle !== null;
 				})
@@ -160,7 +167,7 @@ export function attachPty(
 		} else {
 			// Web 预览环境：自动挂载交互式 Mock PTY
 			const mock = new MockPtyHandle((chunk) => {
-				created.replay = (created.replay + chunk).slice(-MAX_BUFFER);
+				created.replay.push(chunk);
 				for (const sub of subs) sub(chunk);
 			});
 			created.handle = mock;
@@ -174,7 +181,7 @@ export function attachPty(
 	entry.exitSubs.add(onExit);
 
 	const current = entry;
-	const replay = current.replay;
+	const replay = current.replay.text();
 
 	return {
 		replay,

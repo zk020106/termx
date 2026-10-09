@@ -19,6 +19,9 @@ import { fg, noteColor, readPalette, xtermThemeFor } from "./terminalTheme";
 import { CommandCompletionPopup } from "./CommandCompletionPopup";
 import { useCommandsStore, type CommandSuggestion } from "@/store/commands";
 import { cn } from "@/lib/cn";
+import { isLikelySecretEntry } from "@/lib/sensitive";
+import { effectiveLook } from "@/lib/hostTerminal";
+import { broadcastPeers, writeToPane } from "@/store/sessions";
 
 /* =============================================================================
  * 终端分屏格 —— xterm 6 的 React 封装。
@@ -88,13 +91,25 @@ export function Terminal({
 	const resolvedTheme = useThemeStore((s) => s.resolved);
 	const accent = useThemeStore((s) => s.accent);
 
-	/* 终端环境偏好：全部来自设置页的 store，改动会立刻作用到已打开的终端 */
-	const fontFamily = useSettingsStore((s) => s.fontFamily);
-	const fontSize = useSettingsStore((s) => s.fontSize);
-	const lineHeight = useSettingsStore((s) => s.lineHeight);
+	/* 终端环境偏好：来自设置页的 store，改动会立刻作用到已打开的终端；
+	   主机在「终端外观」里自定义过时，以主机的外观为准 */
+	const globalFontFamily = useSettingsStore((s) => s.fontFamily);
+	const globalFontSize = useSettingsStore((s) => s.fontSize);
+	const globalLineHeight = useSettingsStore((s) => s.lineHeight);
 	const scrollback = useSettingsStore((s) => s.scrollback);
-	const cursorStyle = useSettingsStore((s) => s.cursorStyle);
-	const scheme = useSettingsStore((s) => s.scheme);
+	const globalCursorStyle = useSettingsStore((s) => s.cursorStyle);
+	const globalScheme = useSettingsStore((s) => s.scheme);
+	const hostLook = useHostsStore((s) => (hostId ? s.hosts.find((h) => h.id === hostId)?.terminal : undefined));
+	const { fontFamily, fontSize, lineHeight, cursorStyle, scheme } = effectiveLook(
+		{
+			scheme: globalScheme,
+			fontFamily: globalFontFamily,
+			fontSize: globalFontSize,
+			lineHeight: globalLineHeight,
+			cursorStyle: globalCursorStyle,
+		},
+		hostLook,
+	);
 	const bell = useSettingsStore((s) => s.bell);
 	const commandSuggestions = useSettingsStore((s) => s.commandSuggestions);
 	const ghostText = useSettingsStore((s) => s.ghostText);
@@ -111,6 +126,8 @@ export function Terminal({
 		suggestions: [] as CommandSuggestion[],
 		selectedIndex: 0,
 		showPopup: false,
+		/** 用户用方向键在气泡里挑过（此时 Enter 才代表选中候选） */
+		navigated: false,
 		commandSuggestions,
 		ghostText,
 	});
@@ -233,11 +250,23 @@ export function Terminal({
 			setShowPopup(shouldShowPopup);
 			completionStateRef.current.suggestions = list;
 			completionStateRef.current.selectedIndex = 0;
+			completionStateRef.current.navigated = false;
 			completionStateRef.current.showPopup = shouldShowPopup;
 			updateCursorPosition();
 		};
 
-		const cursorSub = term.onCursorMove(updateCursorPosition);
+		// 光标坐标只在补全 / 幽灵文本可见时才需要；每次光标移动都 setState 会让
+		// 大量输出时整格反复重渲染。这里按帧合并，并且没人用时直接跳过
+		let cursorRaf = 0;
+		const cursorSub = term.onCursorMove(() => {
+			const st = completionStateRef.current;
+			if (!st.showPopup && st.suggestions.length === 0) return;
+			if (cursorRaf) return;
+			cursorRaf = window.requestAnimationFrame(() => {
+				cursorRaf = 0;
+				if (!disposed) updateCursorPosition();
+			});
+		});
 
 		// 键盘拦截：处理 Tab / 方向键 / Enter / Esc (Warp / VS Code 风格体验)
 		term.attachCustomKeyEventHandler((event) => {
@@ -251,6 +280,7 @@ export function Terminal({
 						event.preventDefault();
 						const next = (state.selectedIndex + 1) % state.suggestions.length;
 						state.selectedIndex = next;
+						state.navigated = true;
 						setSelectedIndex(next);
 						return false;
 					}
@@ -258,6 +288,7 @@ export function Terminal({
 						event.preventDefault();
 						const next = (state.selectedIndex - 1 + state.suggestions.length) % state.suggestions.length;
 						state.selectedIndex = next;
+						state.navigated = true;
 						setSelectedIndex(next);
 						return false;
 					}
@@ -267,7 +298,9 @@ export function Terminal({
 						setShowPopup(false);
 						return false;
 					}
-					if (event.key === "Tab" || event.key === "Enter") {
+					// Enter 只在用户用方向键挑过候选之后才代表「选这一项」；
+					// 否则就是执行自己敲的命令（不能被补全劫持成另一条命令）
+					if (event.key === "Tab" || (event.key === "Enter" && state.navigated)) {
 						event.preventDefault();
 						const chosen = state.suggestions[state.selectedIndex];
 						if (chosen) {
@@ -296,19 +329,26 @@ export function Terminal({
 			return true;
 		});
 
+		/** 写入本格会话；标签开着广播时同步写入同标签的其它格 */
+		const send = (data: string) => {
+			if (usingSsh && sshKey) writeSsh(sshKey, data);
+			else writePty(paneId, data);
+			for (const peer of broadcastPeers(paneId)) writeToPane(peer, data);
+		};
+
 		const dataSub = term.onData((data) => {
 			if (term.buffer.active.type === "alternate") {
 				inputBufferRef.current = "";
 				setInputBuffer("");
 				setShowPopup(false);
-				if (usingSsh && sshKey) writeSsh(sshKey, data);
-				else writePty(paneId, data);
+				send(data);
 				return;
 			}
 
 			if (data === "\r") {
 				const cmd = inputBufferRef.current.trim();
-				if (cmd) {
+				// 在密码 / 口令提示符下（或远端关了回显时）敲的是秘密，不是命令：绝不记进历史
+				if (cmd && !isLikelySecretEntry(currentLogicalLine(term), cmd)) {
 					useCommandsStore.getState().recordCommand(cmd, hostId);
 				}
 				inputBufferRef.current = "";
@@ -343,11 +383,7 @@ export function Terminal({
 
 			// 只有真实会话才接收按键：SSH 会话优先，其次本地 PTY；
 			// 两者都没有时既不回显也不伪造输出。
-			if (usingSsh && sshKey) {
-				writeSsh(sshKey, data);
-				return;
-			}
-			writePty(paneId, data);
+			send(data);
 		});
 		const resizeSub = term.onResize(({ cols, rows }) => {
 			if (usingSsh && sshKey) resizeSsh(sshKey, cols, rows);
@@ -377,7 +413,7 @@ export function Terminal({
 				term.cols,
 				term.rows,
 				(chunk) => term.write(chunk),
-				(code) => writeLine(fg(note, `会话已结束（退出码 ${code ?? 0}）`)),
+				(code) => writeLine(fg(note, code === null ? "会话已结束" : `会话已结束（退出码 ${code}）`)),
 			);
 			attachRef.current = attached;
 			sshRef.current = null;
@@ -412,6 +448,7 @@ export function Terminal({
 			disposed = true;
 			observer.disconnect();
 			window.cancelAnimationFrame(raf);
+			window.cancelAnimationFrame(cursorRaf);
 			dataSub.dispose();
 			resizeSub.dispose();
 			cursorSub.dispose();
@@ -446,7 +483,7 @@ export function Terminal({
 				/* 容器不可见时跳过 */
 			}
 		});
-	}, [fontFamily, fontSize, lineHeight, scrollback, cursorStyle]);
+	}, [fontFamily, fontSize, lineHeight, scrollback, cursorStyle, paneId, hostId, sessionKey]);
 
 	/* 响铃：xterm 只上报 BEL 事件、自己不出声，这里合成一声短促提示音 */
 	useEffect(() => {
@@ -456,7 +493,8 @@ export function Terminal({
 			if (bell) playBell();
 		});
 		return () => sub.dispose();
-	}, [bell]);
+		// 终端实例随格子/会话重建，订阅要跟着重新挂
+	}, [bell, paneId, hostId, sessionKey]);
 
 	// 主题 / 强调色切换时重取 token；终端配色方案则决定用哪一套色板。
 	// 设计 token 挂在 <html data-theme data-accent> 上，必须重新解析才能拿到新颜色。
@@ -467,7 +505,7 @@ export function Terminal({
 			const palette = readPalette();
 			term.options.theme = xtermThemeFor(scheme, palette, resolvedTheme);
 		});
-	}, [resolvedTheme, accent, scheme]);
+	}, [resolvedTheme, accent, scheme, paneId, hostId, sessionKey]);
 
 	useImperativeHandle(
 		ref,
@@ -518,10 +556,13 @@ export function Terminal({
 					return false;
 				}
 				if (!text) return false;
-				// 有真实会话才谈得上粘贴：这一格自己的 SSH 会话优先，其次本地 PTY。
-				// 会话键对一个分屏格是稳定的（格子不换会话），与上面 hostId 的取法一致
-				if (sessionKey && writeSsh(sessionKey, text)) return true;
-				return writePty(paneId, text);
+				const term = termRef.current;
+				// 没有真实会话（说明页）时不往终端里塞内容
+				if (!term || noPtyRef.current) return false;
+				// 走 xterm 的粘贴通道：远端开了 bracketed paste（?2004h）时自动包上
+				// \e[200~ … \e[201~，多行粘贴不会被逐行执行；随后经 onData 写入会话（含广播）
+				term.paste(text);
+				return true;
 			},
 			saveScreen: () => {
 				const term = termRef.current;
@@ -624,6 +665,20 @@ export function Terminal({
 			)}
 		</div>
 	);
+}
+
+/** 光标所在的逻辑行（把软折行拼回一行）在屏幕上的文本：用来判断当前是不是密码提示符 */
+function currentLogicalLine(term: XTerm): string {
+	const buffer = term.buffer.active;
+	let y = buffer.baseY + buffer.cursorY;
+	const parts: string[] = [];
+	for (let guard = 0; guard < 50 && y >= 0; guard += 1, y -= 1) {
+		const line = buffer.getLine(y);
+		if (!line) break;
+		parts.unshift(line.translateToString(true));
+		if (!line.isWrapped) break;
+	}
+	return parts.join("");
 }
 
 /** 响铃发声：WebAudio 合成，不引入音频文件（xterm 自身只上报 BEL 事件） */

@@ -9,7 +9,7 @@ import { AUTH_LABEL, type AuthMethod, type ConnectionStatus } from "@/data/types
 import { cn } from "@/lib/cn";
 import { copySensitive } from "@/lib/clipboard";
 import { describeProbe, formatMs, probeSupported, type ProbeReport } from "@/lib/probe";
-import { secretAvailable, secretDelete, secretLoad, secretSave } from "@/lib/secret";
+import { secretAvailable, secretDelete, secretLoad, secretRememberForSession, secretSave } from "@/lib/secret";
 import {
 	listenAuthPrompts,
 	sshAgentIdentities,
@@ -137,6 +137,8 @@ interface HostAlert {
 	detail: string;
 	/** 确认弹窗 / 告警操作区是否还开着；用户取消后置 false，但告警本身留在页面上 */
 	open: boolean;
+	/** 出问题的那一跳（经跳板机时可能是跳板机）；缺省就是目标主机 */
+	target?: { host: string; port: number };
 }
 
 export default function Connect() {
@@ -221,11 +223,6 @@ export default function Connect() {
 	// 从主机配置与系统钥匙串预填凭据
 	const storedHostId = host?.id ?? null;
 	useEffect(() => {
-		if (host?.auth.password) {
-			setPassword(host.auth.password);
-			setRemember(true);
-			setHasSavedSecret(true);
-		}
 		if (host?.auth.keyPath) {
 			setKeyPath(host.auth.keyPath);
 		}
@@ -236,13 +233,13 @@ export default function Connect() {
 			const available = await secretAvailable();
 			if (!alive) return;
 			setSecretUsable(available);
-			if (!available) return;
+			// 钥匙串不可用时仍可能有本次运行里「记住」在内存中的密码
 			const saved = await secretLoad(storedHostId);
 			if (!alive || !saved) return;
 			setPassword(saved);
 			setRemember(true);
 			setHasSavedSecret(true);
-			setLoadedFromKeychain(true);
+			setLoadedFromKeychain(available);
 		})();
 		return () => {
 			alive = false;
@@ -477,6 +474,7 @@ export default function Connect() {
 	 */
 	const persistSecret = async () => {
 		if (remember && secretUsable === false) {
+			secretRememberForSession(host.id, password);
 			toast({
 				title: "系统钥匙串不可用，密码没有保存",
 				description: "密码仍只在本次会话的内存里，连接不受影响",
@@ -562,6 +560,8 @@ export default function Connect() {
 					password: authMethod === "password" ? password : "",
 					cols: 80,
 					rows: 24,
+					// 跳板链、代理、TERM / 环境变量 / 登录脚本 / 编码都按主机配置展开
+					hostId: host.id,
 				},
 				(phase: SshPhase) => setProgress((prev) => applyPhase(prev, phase)),
 			);
@@ -590,6 +590,7 @@ export default function Connect() {
 							? "首次连接这台主机，需要你确认服务器指纹"
 							: "主机指纹与已保存的记录不一致，已拒绝连接"),
 					open: true,
+					target: result.host && result.port ? { host: result.host, port: result.port } : undefined,
 				});
 				return;
 			}
@@ -606,7 +607,6 @@ export default function Connect() {
 				...host.auth,
 				method: authMethod,
 				rememberPassword: authMethod === "password" ? remember : host.auth.rememberPassword,
-				password: authMethod === "password" && remember ? password : (authMethod === "password" && !remember ? undefined : host.auth.password),
 				keyPath: (authMethod === "key" || authMethod === "key-passphrase") ? (keyPath || host.auth.keyPath) : host.auth.keyPath,
 			},
 		});
@@ -671,7 +671,8 @@ export default function Connect() {
 		setTrusting(true);
 		setTrustError(null);
 		try {
-			const written = await sshTrustHost(host.hostname, host.port);
+			const at = alert?.target ?? { host: host.hostname, port: host.port };
+			const written = await sshTrustHost(at.host, at.port, alert?.fingerprint ?? null);
 			setTrusting(false);
 			setAlert(null);
 			toast({ title: "已信任这台主机的指纹，正在重新连接", description: written, tone: "success" });
@@ -689,7 +690,8 @@ export default function Connect() {
 		setTrusting(true);
 		setTrustError(null);
 		try {
-			const note = await sshReplaceHostKey(host.hostname, host.port);
+			const at = alert?.target ?? { host: host.hostname, port: host.port };
+			const note = await sshReplaceHostKey(at.host, at.port, alert?.fingerprint ?? null);
 			setTrusting(false);
 			setAlert(null);
 			toast({ title: "已替换保存的主机指纹，正在重新连接", description: note, tone: "warning" });
@@ -1341,8 +1343,9 @@ export default function Connect() {
 				>
 					<p>
 						<span className="font-mono text-surface-foreground">
-							{host.hostname}:{host.port}
+							{alert?.target ? `${alert.target.host}:${alert.target.port}` : `${host.hostname}:${host.port}`}
 						</span>{" "}
+						{alert?.target && (alert.target.host !== host.hostname || alert.target.port !== host.port) ? "（跳板机）" : ""}
 						的主机密钥还不在本机 known_hosts 里；确认后才会写入并继续连接。
 					</p>
 					<FingerprintBlock

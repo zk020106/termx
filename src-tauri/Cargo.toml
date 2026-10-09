@@ -24,9 +24,15 @@ portable-pty = "0.9"
 russh = { version = "0.63", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp = "3.0.1"
 dirs = "6"
-tokio = { version = "1", features = ["sync", "time", "io-util", "net"] }
+tokio = { version = "1", features = ["sync", "time", "io-util", "net", "rt", "macros"] }
 keyring = "4"
 tauri-plugin-single-instance = "2"
+encoding_rs = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+# known_hosts 里哈希过的主机名（|1|salt|hash，HMAC-SHA1）需要自己匹配；与 russh 用的版本一致
+hmac = "0.13"
+sha1 = "0.11"
 
 [dev-dependencies]
 # 仅测试用：给 #[tokio::test] 提供运行时

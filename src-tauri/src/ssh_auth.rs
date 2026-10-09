@@ -39,6 +39,8 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// - `{"method":"private_key","path":"C:/Users/x/.ssh/id_ed25519","passphrase":null}`
 /// - `{"method":"agent"}`
 /// - `{"method":"keyboard_interactive"}`
+/// - `{"method":"ask_password"}`：跳板机等没有现成密码的一跳，连接时再弹框问
+/// - `{"method":"ask_passphrase","path":"..."}`：带口令的私钥，口令连接时再问
 #[derive(Clone, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Credential {
@@ -53,6 +55,12 @@ pub enum Credential {
     },
     Agent,
     KeyboardInteractive,
+    /// 连接到这一跳时再向用户要密码（经 `ssh://auth-prompt/{key}`，与键盘交互同一个输入框）
+    AskPassword,
+    /// 连接到这一跳时再向用户要私钥口令
+    AskPassphrase {
+        path: String,
+    },
 }
 
 /// 手写 `Debug`：凭据有可能被顺手打进日志，密码与口令绝不能在日志里出现。
@@ -67,6 +75,8 @@ impl std::fmt::Debug for Credential {
                 .finish(),
             Credential::Agent => f.write_str("Agent"),
             Credential::KeyboardInteractive => f.write_str("KeyboardInteractive"),
+            Credential::AskPassword => f.write_str("AskPassword"),
+            Credential::AskPassphrase { path } => f.debug_struct("AskPassphrase").field("path", path).finish(),
         }
     }
 }
@@ -153,6 +163,44 @@ pub async fn authenticate<H: russh::client::Handler>(
     credential: &Credential,
     prompts: &AuthPromptRegistry,
 ) -> Result<(), String> {
+    authenticate_as(app, key, "auth", None, session, username, credential, prompts).await
+}
+
+/// 与 [`authenticate`] 相同，但阶段名与说明前缀可定制：
+/// 跳板机的认证记在 `tcp` 阶段并带上「跳板机 1/2 xxx：」前缀，
+/// 免得界面上「认证」这一步在目标主机握手之前就被标成完成。
+#[allow(clippy::too_many_arguments)]
+pub async fn authenticate_as<H: russh::client::Handler>(
+    app: &AppHandle,
+    key: &str,
+    phase: &str,
+    prefix: Option<&str>,
+    session: &mut Handle<H>,
+    username: &str,
+    credential: &Credential,
+    prompts: &AuthPromptRegistry,
+) -> Result<(), String> {
+    let label = |detail: &str| match prefix {
+        Some(p) => format!("{p}：{detail}"),
+        None => detail.to_string(),
+    };
+    // 「连接时再问」的凭据：先问到具体的密码 / 口令（正常流程里调用方已经换好了）
+    let resolved;
+    let credential = match credential {
+        Credential::AskPassword | Credential::AskPassphrase { .. } => {
+            match resolve_credential(app, key, prompts, credential.clone(), username, username, phase).await {
+                Ok(c) => {
+                    resolved = c;
+                    &resolved
+                }
+                Err(detail) => {
+                    emit_phase(app, key, phase, false, label(&detail));
+                    return Err(detail);
+                }
+            }
+        }
+        other => other,
+    };
     let result = match credential {
         Credential::Password { password } => password_auth(session, username, password).await,
         Credential::PrivateKey { path, passphrase } => {
@@ -162,13 +210,55 @@ pub async fn authenticate<H: russh::client::Handler>(
         Credential::KeyboardInteractive => {
             keyboard_interactive_auth(Some(app), key, session, username, prompts).await
         }
+        Credential::AskPassword | Credential::AskPassphrase { .. } => {
+            unreachable!("上面已经换成具体凭据")
+        }
     };
 
     match &result {
-        Ok(detail) => emit_phase(app, key, "auth", true, detail.clone()),
-        Err(detail) => emit_phase(app, key, "auth", false, detail.clone()),
+        Ok(detail) => emit_phase(app, key, phase, true, label(detail)),
+        // 跳板机认证失败的那一条由调用方作为 failed 阶段报出，这里不再提前把 tcp 标红
+        Err(detail) if prefix.is_none() => emit_phase(app, key, phase, false, detail.clone()),
+        Err(_) => {}
     }
     result.map(|_| ())
+}
+
+/// 把「连接时再问」的凭据换成具体凭据：经认证输入框向用户要密码 / 口令。
+/// `who` 是给人看的这一跳的名字（例如「跳板机 1/2 bastion:22」）。
+pub async fn resolve_credential(
+    app: &AppHandle,
+    key: &str,
+    prompts: &AuthPromptRegistry,
+    credential: Credential,
+    who: &str,
+    username: &str,
+    phase: &str,
+) -> Result<Credential, String> {
+    match credential {
+        Credential::AskPassword => {
+            emit_phase(app, key, phase, true, format!("{who}：等待输入 {username} 的密码"));
+            let items = [Prompt {
+                prompt: format!("{username} 的密码："),
+                echo: false,
+            }];
+            let mut answers = ask_user(Some(app), key, prompts, who, "这一跳没有保存密码，请输入后继续连接。", &items).await?;
+            Ok(Credential::Password {
+                password: answers.pop().unwrap_or_default(),
+            })
+        }
+        Credential::AskPassphrase { path } => {
+            emit_phase(app, key, phase, true, format!("{who}：等待输入私钥口令"));
+            let items = [Prompt {
+                prompt: format!("私钥 {} 的口令：", display_path(&path)),
+                echo: false,
+            }];
+            let mut answers = ask_user(Some(app), key, prompts, who, "这把私钥有口令保护，请输入后继续连接。", &items).await?;
+            let passphrase = answers.pop().filter(|p| !p.is_empty());
+            Ok(Credential::PrivateKey { path, passphrase })
+        }
+        other => Ok(other),
+    }
 }
 
 /// 密码认证

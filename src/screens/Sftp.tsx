@@ -12,7 +12,7 @@ import {
 	fsLocalMkdir,
 	fsLocalRemove,
 	fsLocalRename,
-	fsLocalWriteFile,
+	fsLocalCreateEmptyFile,
 	formatUnixTime,
 	getFileIcon,
 	localDirname,
@@ -20,19 +20,20 @@ import {
 	posixDirname,
 	posixJoin,
 	sftpChmod,
-	sftpDownload,
 	sftpList,
 	sftpMkdir,
 	sftpRealPath,
 	sftpRemove,
 	sftpRename,
-	sftpUpload,
-	sftpWriteFile,
+	sftpCreateEmptyFile,
 	type SftpFileEntry,
 } from "@/lib/sftp";
 import { useHostsStore } from "@/store/hosts";
 import { useSessionsStore } from "@/store/sessions";
+import { enqueueTransfers, type TransferRequest } from "@/lib/transferManager";
 import { toast } from "@/store/toast";
+import { unsafeLocalNameReason } from "@/lib/pathSafety";
+import { detectPlatform } from "@/lib/platform";
 import { transferSummary, useTransfersStore } from "@/store/transfers";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
@@ -244,46 +245,30 @@ export default function Sftp() {
 			toast({ title: "无法上传", description: "未连接到远程 SFTP 会话", tone: "warning" });
 			return;
 		}
+		const key = selectedSessionKey;
+		const dir = remotePath;
+		const requests: TransferRequest[] = [];
 		for (const entry of entries) {
 			if (entry.is_dir) {
 				toast({ title: "目录上传", description: `暂请单选文件上传（${entry.name}）`, tone: "warning" });
 				continue;
 			}
-			const targetRemotePath = posixJoin(remotePath, entry.name);
-			const transferId = `trans-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-			useTransfersStore.getState().upsert({
-				id: transferId,
+			requests.push({
 				name: entry.name,
 				direction: "upload",
 				hostId: currentTab?.hostId ?? "",
+				sessionKey: key,
 				localPath: entry.path,
-				remotePath: targetRemotePath,
+				remotePath: posixJoin(dir, entry.name),
 				size: entry.size,
-				transferred: 0,
-				speedBps: 0,
-				state: "running",
 			});
-			try {
-				const size = await sftpUpload(selectedSessionKey, entry.path, targetRemotePath);
-				useTransfersStore.getState().upsert({
-					id: transferId,
-					name: entry.name,
-					direction: "upload",
-					hostId: currentTab?.hostId ?? "",
-					localPath: entry.path,
-					remotePath: targetRemotePath,
-					size,
-					transferred: size,
-					speedBps: 0,
-					state: "done",
-				});
-				toast({ title: `已上传 ${entry.name}`, tone: "success" });
-			} catch (e) {
-				useTransfersStore.getState().setState(transferId, "failed");
-				toast({ title: `上传失败: ${entry.name}`, description: String(e), tone: "danger" });
-			}
 		}
-		loadRemoteDir(selectedSessionKey, remotePath);
+		if (requests.length === 0) return;
+		await enqueueTransfers(requests, {
+			onItemDone: (item) => toast({ title: `已上传 ${item.name}`, tone: "success" }),
+			onItemFailed: (item, error) => toast({ title: `上传失败: ${item.name}`, description: error, tone: "danger" }),
+			onFinished: () => loadRemoteDir(key, dir),
+		});
 	};
 
 	const handleDownloadEntries = async (entries: SftpFileEntry[]) => {
@@ -291,97 +276,72 @@ export default function Sftp() {
 			toast({ title: "无法下载", description: "未选择本地下载目标目录", tone: "warning" });
 			return;
 		}
+		const key = selectedSessionKey;
+		const dir = localPath;
+		const requests: TransferRequest[] = [];
 		for (const entry of entries) {
 			if (entry.is_dir) {
 				toast({ title: "目录下载", description: `暂请单选文件下载（${entry.name}）`, tone: "warning" });
 				continue;
 			}
-			const targetLocalPath = localJoin(localPath, entry.name);
-			const transferId = `trans-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-			useTransfersStore.getState().upsert({
-				id: transferId,
+			// 远程文件名由服务器决定、不可信：含路径分隔符 / `..` 等就拒绝，绝不拼出目录之外的路径
+			const unsafe = unsafeLocalNameReason(entry.name, detectPlatform() === "windows");
+			if (unsafe) {
+				toast({ title: "已跳过不安全的文件名", description: `「${entry.name}」：${unsafe}`, tone: "danger" });
+				continue;
+			}
+			requests.push({
 				name: entry.name,
 				direction: "download",
 				hostId: currentTab?.hostId ?? "",
-				localPath: targetLocalPath,
+				sessionKey: key,
+				localPath: localJoin(dir, entry.name),
 				remotePath: entry.path,
 				size: entry.size,
-				transferred: 0,
-				speedBps: 0,
-				state: "running",
 			});
-			try {
-				const size = await sftpDownload(selectedSessionKey, entry.path, targetLocalPath);
-				useTransfersStore.getState().upsert({
-					id: transferId,
-					name: entry.name,
-					direction: "download",
-					hostId: currentTab?.hostId ?? "",
-					localPath: targetLocalPath,
-					remotePath: entry.path,
-					size,
-					transferred: size,
-					speedBps: 0,
-					state: "done",
-				});
-				toast({ title: `已下载 ${entry.name}`, tone: "success" });
-			} catch (e) {
-				useTransfersStore.getState().setState(transferId, "failed");
-				toast({ title: `下载失败: ${entry.name}`, description: String(e), tone: "danger" });
-			}
 		}
-		loadLocalDir(localPath);
+		if (requests.length === 0) return;
+		await enqueueTransfers(requests, {
+			onItemDone: (item) => toast({ title: `已下载 ${item.name}`, tone: "success" }),
+			onItemFailed: (item, error) => toast({ title: `下载失败: ${item.name}`, description: error, tone: "danger" }),
+			onFinished: () => loadLocalDir(dir),
+		});
 	};
 
 	const handlePickUpload = async () => {
 		if (!selectedSessionKey || !remotePath) return;
+		const key = selectedSessionKey;
+		const dir = remotePath;
+		let paths: string[];
 		try {
 			const selected = await openFileDialog({
 				multiple: true,
 				directory: false,
 			});
 			if (!selected) return;
-			const paths = Array.isArray(selected) ? selected : [selected];
-			for (const p of paths) {
-				const fileName = p.replace(/\\/g, "/").split("/").pop() || "file";
-				const targetRemotePath = posixJoin(remotePath, fileName);
-				const transferId = `trans-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-				useTransfersStore.getState().upsert({
-					id: transferId,
-					name: fileName,
-					direction: "upload",
-					hostId: currentTab?.hostId ?? "",
-					localPath: p,
-					remotePath: targetRemotePath,
-					size: 0,
-					transferred: 0,
-					speedBps: 0,
-					state: "running",
-				});
-				try {
-					const size = await sftpUpload(selectedSessionKey, p, targetRemotePath);
-					useTransfersStore.getState().upsert({
-						id: transferId,
-						name: fileName,
-						direction: "upload",
-						hostId: currentTab?.hostId ?? "",
-						localPath: p,
-						remotePath: targetRemotePath,
-						size,
-						transferred: size,
-						speedBps: 0,
-						state: "done",
-					});
-					toast({ title: `已上传 ${fileName}`, tone: "success" });
-				} catch (e) {
-					useTransfersStore.getState().setState(transferId, "failed");
-					toast({ title: `上传失败: ${fileName}`, description: String(e), tone: "danger" });
-				}
-			}
-			loadRemoteDir(selectedSessionKey, remotePath);
+			paths = Array.isArray(selected) ? selected : [selected];
 		} catch (e) {
 			toast({ title: "选择文件失败", description: String(e), tone: "danger" });
+			return;
 		}
+		await enqueueTransfers(
+			paths.map((p) => {
+				const fileName = p.replace(/\\/g, "/").split("/").pop() || "file";
+				return {
+					name: fileName,
+					direction: "upload" as const,
+					hostId: currentTab?.hostId ?? "",
+					sessionKey: key,
+					localPath: p,
+					remotePath: posixJoin(dir, fileName),
+				};
+			}),
+			{
+				onItemDone: (item) => toast({ title: `已上传 ${item.name}`, tone: "success" }),
+				onItemFailed: (item, error) => toast({ title: `上传失败: ${item.name}`, description: error, tone: "danger" }),
+				onFinished: () => loadRemoteDir(key, dir),
+			},
+		);
 	};
 
 	/* ------------------------------ 弹窗提交 ------------------------------ */
@@ -406,13 +366,13 @@ export default function Sftp() {
 				if (!inputName.trim()) return;
 				if (modalSide === "local") {
 					const newP = localJoin(localPath, inputName.trim());
-					await fsLocalWriteFile(newP, "");
+					await fsLocalCreateEmptyFile(newP);
 					toast({ title: `已创建本地文本文件: ${inputName}`, tone: "success" });
 					loadLocalDir(localPath);
 				} else {
 					if (!selectedSessionKey) return;
 					const newP = posixJoin(remotePath, inputName.trim());
-					await sftpWriteFile(selectedSessionKey, newP, "");
+					await sftpCreateEmptyFile(selectedSessionKey, newP);
 					toast({ title: `已创建远程文本文件: ${inputName}`, tone: "success" });
 					loadRemoteDir(selectedSessionKey, remotePath);
 				}

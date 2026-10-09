@@ -9,8 +9,8 @@
 //! 读取时**同时**查 `~/.ssh/known_hosts`，这样你在命令行里已经信任过的主机不必再确认一遍；
 //! 但写入只写自己的文件，绝不改动 OpenSSH 的 known_hosts。
 
-use russh::keys::known_hosts::{check_known_hosts_path, learn_known_hosts_path};
-use russh::keys::{Error as KeysError, HashAlg, PublicKey};
+use russh::keys::known_hosts::learn_known_hosts_path;
+use russh::keys::{HashAlg, PublicKey};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
@@ -42,6 +42,9 @@ pub enum Verdict {
     Unknown { fingerprint: String },
     /// 指纹与记录不一致，必须拒绝
     Changed { fingerprint: String },
+    /// 无法完成校验：known_hosts 读不了、这台主机的记录解析不了、或这把钥匙被标记为 @revoked。
+    /// 既不能当「已信任」放行，也**不能**降级成「首次连接」让用户一键信任 —— 那等于绕过已有记录。
+    CheckFailed { fingerprint: String, reason: String },
 }
 
 impl Verdict {
@@ -51,31 +54,179 @@ impl Verdict {
             Verdict::Trusted => None,
             Verdict::Unknown { .. } => Some("host_unknown"),
             Verdict::Changed { .. } => Some("host_changed"),
+            Verdict::CheckFailed { .. } => Some("host_check_failed"),
         }
     }
 
     pub fn fingerprint(&self) -> Option<&str> {
         match self {
             Verdict::Trusted => None,
-            Verdict::Unknown { fingerprint } | Verdict::Changed { fingerprint } => Some(fingerprint),
+            Verdict::Unknown { fingerprint }
+            | Verdict::Changed { fingerprint }
+            | Verdict::CheckFailed { fingerprint, .. } => Some(fingerprint),
+        }
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Verdict::CheckFailed { reason, .. } => Some(reason),
+            _ => None,
         }
     }
 }
 
+/// OpenSSH 的主机字段：默认端口写 `host`，其他端口写 `[host]:port`
+fn host_field(host: &str, port: u16) -> String {
+    if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    }
+}
+
+/// `*` / `?` 通配（OpenSSH 的主机模式），不区分大小写
+fn glob_match(pattern: &str, text: &str) -> bool {
+    fn go(p: &[char], t: &[char]) -> bool {
+        match (p.first(), t.first()) {
+            (None, None) => true,
+            (Some('*'), _) => go(&p[1..], t) || (!t.is_empty() && go(p, &t[1..])),
+            (Some('?'), Some(_)) => go(&p[1..], &t[1..]),
+            (Some(a), Some(b)) => a == b && go(&p[1..], &t[1..]),
+            _ => false,
+        }
+    }
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    go(&p, &t)
+}
+
+/// `|1|<salt>|<hash>`：HMAC-SHA1(salt, 主机字段) 比对
+fn hashed_match(entry: &str, field: &str) -> bool {
+    use base64::Engine;
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut parts = entry.trim_start_matches("|1|").split('|');
+    let (Some(salt), Some(hash)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let (Ok(salt), Ok(hash)) = (b64.decode(salt), b64.decode(hash)) else {
+        return false;
+    };
+    let Ok(mac) = <Hmac<sha1::Sha1> as KeyInit>::new_from_slice(&salt) else {
+        return false;
+    };
+    mac.chain_update(field.as_bytes()).verify_slice(&hash).is_ok()
+}
+
+/// 一行的主机列表（逗号分隔，可带 `!` 否定、通配、哈希）是否命中
+fn hosts_match(patterns: &str, field: &str) -> bool {
+    let mut hit = false;
+    for entry in patterns.split(',') {
+        let (negated, pat) = match entry.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, entry),
+        };
+        let matched = if pat.starts_with("|1|") { hashed_match(pat, field) } else { glob_match(pat, field) };
+        if matched {
+            if negated {
+                return false;
+            }
+            hit = true;
+        }
+    }
+    hit
+}
+
+/// 解析 known_hosts 文本，给出对这把钥匙的判定；没有这台主机的任何记录时返回 None。
+///
+/// 自己解析而不是用 russh 的 `check_known_hosts_path`：后者遇到任何一行解析不了的记录就整体报错
+/// （以前这种错误被当成「没有记录」→ 首次连接 → 用户一键信任，等于绕过了已有记录），
+/// 也不认识 `@revoked` / `@cert-authority` 标记、否定模式和通配。
+fn judge(text: &str, field: &str, key: &PublicKey, source: &Path) -> Option<Verdict> {
+    let fingerprint = || fingerprint_of(key);
+    let mut trusted = false;
+    let mut other = false;
+    let mut unparsable: Option<usize> = None;
+    for (index, line) in text.lines().enumerate() {
+        let line_no = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let Some(mut first) = parts.next() else { continue };
+        let marker = if first.starts_with('@') {
+            let m = first;
+            match parts.next() {
+                Some(next) => first = next,
+                None => continue,
+            }
+            Some(m)
+        } else {
+            None
+        };
+        if !hosts_match(first, field) {
+            continue;
+        }
+        // CA 记录用于证书校验，不是这台主机自己的钥匙
+        if marker == Some("@cert-authority") {
+            continue;
+        }
+        let (Some(_key_type), Some(b64)) = (parts.next(), parts.next()) else {
+            unparsable.get_or_insert(line_no);
+            continue;
+        };
+        match russh::keys::parse_public_key_base64(b64) {
+            Ok(recorded) => {
+                let same = recorded.key_data() == key.key_data();
+                if marker == Some("@revoked") {
+                    if same {
+                        return Some(Verdict::CheckFailed {
+                            fingerprint: fingerprint(),
+                            reason: format!("{} 第 {line_no} 行把这把主机密钥标记为已吊销（@revoked）", source.display()),
+                        });
+                    }
+                    continue;
+                }
+                if same {
+                    trusted = true;
+                } else {
+                    other = true;
+                }
+            }
+            Err(_) => {
+                unparsable.get_or_insert(line_no);
+            }
+        }
+    }
+    if trusted {
+        Some(Verdict::Trusted)
+    } else if other {
+        Some(Verdict::Changed { fingerprint: fingerprint() })
+    } else {
+        unparsable.map(|line_no| Verdict::CheckFailed {
+            fingerprint: fingerprint(),
+            reason: format!(
+                "{} 第 {line_no} 行是这台主机的记录，但无法解析，无法确认指纹。请检查或删除该行后重试",
+                source.display()
+            ),
+        })
+    }
+}
+
 fn check_in(path: &Path, host: &str, port: u16, key: &PublicKey) -> Option<Verdict> {
-    if !path.exists() {
-        return None;
-    }
-    match check_known_hosts_path(host, port, key, path) {
-        Ok(true) => Some(Verdict::Trusted),
-        Ok(false) => None,
-        // 记录里是另一把钥匙 —— 这是必须拦住的情况
-        Err(KeysError::KeyChanged { .. }) => Some(Verdict::Changed {
-            fingerprint: fingerprint_of(key),
-        }),
-        // 文件读不动就当没记录，走首次确认流程（宁可多问一次，也不静默放行）
-        Err(_) => None,
-    }
+    let text = match std::fs::read(path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        // 读不了（权限、IO 错误）≠ 没有记录：拒绝并说明，绝不降级成首次连接
+        Err(e) => {
+            return Some(Verdict::CheckFailed {
+                fingerprint: fingerprint_of(key),
+                reason: format!("无法读取 {}：{e}", path.display()),
+            })
+        }
+    };
+    judge(&text, &host_field(host, port), key, path)
 }
 
 /// 校验主机密钥：先查 TermX 自己的记录，再查 OpenSSH 的
@@ -161,6 +312,7 @@ fn remove_entries(path: &Path, host: &str, port: u16) -> Result<usize, String> {
 mod tests {
     use super::*;
     use russh::keys::known_hosts::{check_known_hosts_path, learn_known_hosts_path};
+    use russh::keys::Error as KeysError;
 
     /// 两把真实生成的 ed25519 公钥，仅作测试夹具。
     ///
@@ -279,5 +431,79 @@ mod tests {
         trust_in(&path, "other.example", 22, &key_a()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().filter(|l| !l.trim().is_empty()).count(), 2);
+    }
+
+    fn b64_of(key: &str) -> &str {
+        key.split_whitespace().nth(1).unwrap()
+    }
+
+    fn judge_text(text: &str, field: &str, key: &PublicKey) -> Option<Verdict> {
+        judge(text, field, key, Path::new("/kh"))
+    }
+
+    /// M9：哈希主机名（ssh-keygen -H / HashKnownHosts yes）必须能认出来，否则已信任的主机会被当成首次连接
+    #[test]
+    fn hashed_hostnames_match() {
+        let text = format!(
+            "|1|AAECAwQFBgcICQoLDA0ODxAREhM=|IZ1zV0swCfFUvwvqRtiJbYJ0/LA= ssh-ed25519 {}\n\
+             |1|AAECAwQFBgcICQoLDA0ODxAREhM=|DnpHtKjaC+vTmgwkAZCf9SqxJN8= ssh-ed25519 {}\n",
+            b64_of(KEY_A),
+            b64_of(KEY_B)
+        );
+        assert_eq!(judge_text(&text, "host.example", &key_a()), Some(Verdict::Trusted));
+        assert!(matches!(judge_text(&text, "host.example", &key_b()), Some(Verdict::Changed { .. })));
+        assert_eq!(judge_text(&text, &host_field("host.example", 2222), &key_b()), Some(Verdict::Trusted));
+        assert_eq!(judge_text(&text, "other.example", &key_a()), None);
+    }
+
+    /// M9：这台主机的记录解析不了 → 拒绝（CheckFailed），不能降级成「首次连接」
+    #[test]
+    fn unparsable_record_for_this_host_is_not_unknown() {
+        let text = "host.example ssh-ed25519 !!!not-base64!!!\nother.example ssh-ed25519 AAAA\n";
+        match judge_text(text, "host.example", &key_a()) {
+            Some(Verdict::CheckFailed { reason, .. }) => assert!(reason.contains("第 1 行"), "{reason}"),
+            other => panic!("应判定为 CheckFailed，实际 {other:?}"),
+        }
+        // 别的主机的坏行不影响这台主机
+        let text = format!("broken.example ssh-ed25519 ???\nhost.example ssh-ed25519 {}\n", b64_of(KEY_A));
+        assert_eq!(judge_text(&text, "host.example", &key_a()), Some(Verdict::Trusted));
+        // 有一条好记录是另一把钥匙 + 一条坏记录：按「变了」处理
+        let text = format!("host.example ssh-ed25519 {}\nhost.example ssh-ed25519 ???\n", b64_of(KEY_B));
+        assert!(matches!(judge_text(&text, "host.example", &key_a()), Some(Verdict::Changed { .. })));
+    }
+
+    /// M9：文件存在但读不了 → CheckFailed（以前被当成「没有记录」）
+    #[test]
+    fn unreadable_file_is_check_failed() {
+        let dir = temp_file("unreadable-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 目录当文件读一定失败（且不依赖权限，root 下也成立）
+        match check_in(&dir, "host.example", 22, &key_a()) {
+            Some(Verdict::CheckFailed { reason, .. }) => assert!(reason.contains("无法读取"), "{reason}"),
+            other => panic!("应判定为 CheckFailed，实际 {other:?}"),
+        }
+        assert_eq!(check_in(&fresh_path("nope"), "host.example", 22, &key_a()), None, "文件不存在 = 没有记录");
+    }
+
+    #[test]
+    fn markers_wildcards_negation_and_whitespace() {
+        let a = b64_of(KEY_A);
+        let b = b64_of(KEY_B);
+        // @revoked 命中这把钥匙：拒绝；@cert-authority 行忽略
+        let text = format!("@revoked * ssh-ed25519 {a}\nhost.example ssh-ed25519 {a}\n");
+        assert!(matches!(judge_text(&text, "host.example", &key_a()), Some(Verdict::CheckFailed { .. })));
+        let text = format!("@cert-authority *.example ssh-ed25519 {b}\n");
+        assert_eq!(judge_text(&text, "host.example", &key_a()), None);
+        // 通配与否定
+        let text = format!("*.example,!bad.example ssh-ed25519 {a}\n");
+        assert_eq!(judge_text(&text, "host.example", &key_a()), Some(Verdict::Trusted));
+        assert_eq!(judge_text(&text, "bad.example", &key_a()), None);
+        assert_eq!(judge_text(&text, "HOST.EXAMPLE", &key_a()), Some(Verdict::Trusted), "主机名不区分大小写");
+        // 制表符 / 多个空格 / 行尾注释
+        let text = format!("host.example\tssh-ed25519   {a}  user@box\n");
+        assert_eq!(judge_text(&text, "host.example", &key_a()), Some(Verdict::Trusted));
+        // 带注释的记录与无注释的服务器公钥也能对上（只比密钥数据）
+        let text = format!("[host.example]:2222 ssh-ed25519 {a} comment\n");
+        assert_eq!(judge_text(&text, "[host.example]:2222", &key_a()), Some(Verdict::Trusted));
     }
 }

@@ -22,7 +22,12 @@ interface SessionsState {
 	 * 这里只负责把它随标签与分屏格一起记下来。
 	 */
 	openSession: (hostId: string | null, sessionKey?: string | null, customTitle?: string) => string;
+	/**
+	 * 关闭标签。会话不立刻销毁：先挂起 UNDO_WINDOW_MS，期间「撤销」能把标签连同
+	 * 真实会话原样找回（终端从回放缓冲接上，输出一点不丢）；过了窗口才真正断开。
+	 */
 	closeTab: (tabId: string) => void;
+	/** 撤销关闭：会话还挂着就原样找回；已经销毁则按原主机重新连接 */
 	reopenTab: (tab: SessionTab) => void;
 	reconnectTab: (tabId: string) => void;
 	setActiveTab: (tabId: string) => void;
@@ -38,6 +43,34 @@ interface SessionsState {
 }
 
 let seq = 0;
+
+/** 关闭标签后会话还保留多久（比撤销提示 6 秒略长，避免点撤销的瞬间会话刚好被销毁） */
+export const UNDO_WINDOW_MS = 8000;
+
+interface ClosedTab {
+	tab: SessionTab;
+	panes: TerminalPane[];
+	timer: ReturnType<typeof setTimeout>;
+}
+
+/** 刚关闭、还能撤销的标签：tabId → 原标签、原分屏格与销毁计时器 */
+const recentlyClosed = new Map<string, ClosedTab>();
+
+function destroyPaneSessions(panes: TerminalPane[]): void {
+	for (const p of panes) {
+		if (p.sessionKey) void closeSshSession(p.sessionKey);
+		else closePty(p.id);
+	}
+}
+
+/** 立刻销毁所有挂起的已关闭标签（应用退出、测试用） */
+export function flushClosedTabs(): void {
+	for (const [id, closed] of recentlyClosed) {
+		clearTimeout(closed.timer);
+		destroyPaneSessions(closed.panes);
+		recentlyClosed.delete(id);
+	}
+}
 
 export const useSessionsStore = create<SessionsState>((set, get) => ({
 	tabs: [],
@@ -87,12 +120,18 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 		const tab = s.tabs.find((t) => t.id === tabId);
 		if (!tab) return;
 
-		// 销毁属于该标签的全部 PTY 与 SSH 会话
+		// 属于该标签的 PTY 与 SSH 会话先挂起，撤销窗口过后才销毁
 		const tabPanes = s.panes.filter((p) => p.tabId === tabId);
-		for (const p of tabPanes) {
-			if (p.sessionKey) void closeSshSession(p.sessionKey);
-			else closePty(p.id);
-		}
+		const previous = recentlyClosed.get(tabId);
+		if (previous) clearTimeout(previous.timer);
+		recentlyClosed.set(tabId, {
+			tab,
+			panes: tabPanes,
+			timer: setTimeout(() => {
+				recentlyClosed.delete(tabId);
+				destroyPaneSessions(tabPanes);
+			}, UNDO_WINDOW_MS),
+		});
 
 		const tabs = s.tabs.filter((t) => t.id !== tabId);
 		const panes = s.panes.filter((p) => p.tabId !== tabId);
@@ -102,21 +141,45 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 		set({ tabs, panes, activeTabId, focusedPaneId });
 	},
 
-	reopenTab: (tab) => set((s) => ({ tabs: [...s.tabs, tab] })),
+	reopenTab: (tab) => {
+		if (get().tabs.some((t) => t.id === tab.id)) return;
+		const closed = recentlyClosed.get(tab.id);
+		if (closed) {
+			// 会话还活着：原样放回，终端重新挂载时从回放缓冲接上
+			clearTimeout(closed.timer);
+			recentlyClosed.delete(tab.id);
+			set((s) => ({
+				tabs: [...s.tabs, closed.tab],
+				panes: [...s.panes, ...closed.panes],
+				activeTabId: closed.tab.id,
+				focusedPaneId: closed.panes[0]?.id ?? s.focusedPaneId,
+			}));
+			return;
+		}
+		// 已经销毁：按原主机重新开一个标签并重连（本地终端则起新 shell）
+		const id = get().openSession(tab.hostId, null, tab.title);
+		set((s) => ({ tabs: s.tabs.map((t) => (t.id === id ? { ...t, layout: "single" } : t)) }));
+	},
 
 	reconnectTab: (tabId) => {
 		const s = get();
 		const tab = s.tabs.find((t) => t.id === tabId);
 		if (!tab) return;
 
-		// 销毁旧会话，派发新 sessionKey，状态重置为 connecting
+		// 销毁旧会话，派发新 sessionKey，状态重置为 connecting。
+		// 本地格换一个新的格子 id：PTY 以格子 id 为键，终端组件也以它为 key，
+		// 不换的话组件不会重建，留下一个已经没有 shell 的死格子
+		const renamed = new Map<string, string>();
 		const updatedPanes = s.panes.map((p) => {
 			if (p.tabId !== tabId) return p;
 			if (p.sessionKey) void closeSshSession(p.sessionKey);
 			else closePty(p.id);
 			const newKey = p.hostId ? newSshSessionKey(p.hostId) : null;
+			const id = p.hostId ? p.id : `pane-${++seq}`;
+			if (id !== p.id) renamed.set(p.id, id);
 			return {
 				...p,
+				id,
 				sessionKey: newKey,
 				status: (p.hostId ? "connecting" : "connected") as ConnectionStatus,
 				lines: [],
@@ -135,7 +198,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 			};
 		});
 
-		set({ tabs: updatedTabs, panes: updatedPanes });
+		set({
+			tabs: updatedTabs,
+			panes: updatedPanes,
+			focusedPaneId: renamed.get(s.focusedPaneId) ?? s.focusedPaneId,
+		});
 	},
 
 	setActiveTab: (activeTabId) => {
@@ -318,9 +385,28 @@ export function writeToActiveTerminal(data: string): boolean {
 	if (!s.focusedPaneId) return false;
 	const pane = s.panes.find((p) => p.id === s.focusedPaneId);
 	if (!pane) return false;
-	if (pane.sessionKey) {
-		return writeSsh(pane.sessionKey, data);
-	}
+	const ok = writeToPane(pane, data);
+	// 广播中：同一标签里的其它格子也收到
+	for (const other of broadcastPeers(pane.id)) writeToPane(other, data);
+	return ok;
+}
+
+/** 写入某一格：有 SSH 会话写 SSH，否则写本地 PTY */
+export function writeToPane(pane: Pick<TerminalPane, "id" | "sessionKey">, data: string): boolean {
+	if (pane.sessionKey) return writeSsh(pane.sessionKey, data);
 	return writePty(pane.id, data);
+}
+
+/**
+ * 广播输入的对象：这一格所在标签开着广播时，返回同标签里的**其它**格子。
+ * 设置页的说明是「同屏所有格同步输入」，所以范围就是当前标签的分屏格。
+ */
+export function broadcastPeers(paneId: string): TerminalPane[] {
+	const s = useSessionsStore.getState();
+	const pane = s.panes.find((p) => p.id === paneId);
+	if (!pane) return [];
+	const tab = s.tabs.find((t) => t.id === pane.tabId);
+	if (!tab?.broadcasting) return [];
+	return s.panes.filter((p) => p.tabId === pane.tabId && p.id !== paneId);
 }
 

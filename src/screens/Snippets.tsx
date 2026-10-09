@@ -6,7 +6,7 @@ import { Drawer, Modal } from "@/components/ui/Overlay";
 import { SNIPPET_TARGET_LABEL, type Host, type Snippet, type SnippetTarget } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
-import { useSessionsStore, writeToActiveTerminal } from "@/store/sessions";
+import { useSessionsStore, writeToPane } from "@/store/sessions";
 import { draftSnippet, extractVariables, useSnippetsStore } from "@/store/snippets";
 import { toast } from "@/store/toast";
 import { useEffect, useMemo, useState } from "react";
@@ -18,7 +18,8 @@ import { useEffect, useMemo, useState } from "react";
  * 覆盖状态：列表（按分组）/ 分组筛选 / 编辑抽屉 / 发送前填变量 + 实时预览 /
  *          发送目标选择 / 空状态 / 搜索无结果。
  *
- * 诚实边界：终端注入要等 SSH 会话层接入，目前「发送」会把最终命令复制到剪贴板并如实说明。
+ * 发送：按发送目标（焦点格 / 选中的分屏格 / 全部终端）逐格写入真实会话（SSH 或本地 PTY），
+ * 末尾补回车执行；写不进去的格子（会话已断开）如实报出，不会假装成功。
  * ========================================================================== */
 
 const ALL_GROUPS = "全部分组";
@@ -90,7 +91,7 @@ export default function Snippets() {
 	const affectedHosts = useMemo(() => {
 		const ids =
 			target === "all"
-				? tabs.map((tab) => tab.hostId)
+				? panes.map((pane) => pane.hostId)
 				: (target === "current" ? (currentPane ? [currentPane] : []) : panes.filter((pane) => pickedPanes.includes(pane.id))).map(
 						(pane) => pane.hostId,
 					);
@@ -118,7 +119,7 @@ export default function Snippets() {
 	const targetHint: Record<SnippetTarget, string> = {
 		current: hasSessions ? `焦点格 ${currentHost?.name ?? "本地终端"}` : "无会话",
 		selected: `已选 ${pickedPanes.length} 个分屏格`,
-		all: `已连接 ${tabs.length} 个`,
+		all: `已连接 ${panes.length} 个`,
 	};
 
 	const targetInfo = useMemo(() => {
@@ -144,7 +145,7 @@ export default function Snippets() {
 			};
 		}
 		return {
-			label: `全部已连接终端（${tabs.length} 个）`,
+			label: `全部已连接终端（${panes.length} 个）`,
 			detail: undefined,
 		};
 	}, [target, pickedPanes, currentHost, tabs, panes, hasSessions, hostById]);
@@ -220,18 +221,39 @@ export default function Snippets() {
 
 	const handleSend = () => {
 		if (!selected || !canSend) return;
-		const ok = writeToActiveTerminal(resolvedCommand + "\n");
-		if (ok) {
+		const targets =
+			target === "all"
+				? panes
+				: target === "current"
+					? currentPane
+						? [currentPane]
+						: []
+					: panes.filter((pane) => pickedPanes.includes(pane.id));
+		// 与键盘一致用回车（\r）提交；多行片段逐行回车
+		const payload = `${resolvedCommand.replace(/\r?\n/g, "\r")}\r`;
+		let sent = 0;
+		const failed: string[] = [];
+		for (const pane of targets) {
+			if (writeToPane(pane, payload)) sent += 1;
+			else failed.push(pane.hostId ? (hostById(pane.hostId)?.name ?? "未知主机") : "本地终端");
+		}
+		if (sent > 0 && failed.length === 0) {
 			toast({
-				title: `已注入终端执行：${selected.name}`,
+				title: sent > 1 ? `已发送到 ${sent} 个终端：${selected.name}` : `已注入终端执行：${selected.name}`,
 				description: resolvedCommand,
 				tone: "success",
+			});
+		} else if (sent > 0) {
+			toast({
+				title: `已发送到 ${sent} 个终端，${failed.length} 个未送达`,
+				description: `未送达（会话未连接）：${[...new Set(failed)].join("、")}`,
+				tone: "warning",
 			});
 		} else {
 			void navigator.clipboard?.writeText(resolvedCommand).catch(() => undefined);
 			toast({
 				title: "终端未就绪，命令已复制到剪贴板",
-				description: "当前没有活跃的终端会话，请先切换到工作区。",
+				description: "目标终端的会话还没连上或已断开，请先切换到工作区确认。",
 				tone: "warning",
 			});
 		}
@@ -516,7 +538,7 @@ export default function Snippets() {
 						</div>
 						<p className="mt-2 flex items-center gap-1.5 text-[10.5px] text-faint">
 							<span className="icon-[lucide--info] size-3" />
-							终端注入通道尚未接入 SSH 会话层：现在点「发送到终端」只会把最终命令复制到剪贴板。
+							「发送到终端」会把最终命令写入所选终端并回车执行；会话未连接的终端不会收到。
 						</p>
 					</div>
 				</div>

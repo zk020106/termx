@@ -47,13 +47,19 @@ export interface HostAuth {
 	keyId?: string;
 	keyPath?: string;
 	identityId?: string;
-	/** 密码是否记住 */
+	/**
+	 * 密码是否记住。记住的密码**只存系统钥匙串**（lib/secret.ts，账户名为主机 id），
+	 * 绝不写进 termx.json / 导出文件；旧版本留在配置里的明文会在启动时迁走（lib/configSecrets.ts）。
+	 */
 	rememberPassword?: boolean;
-	/** 记住的密码 */
-	password?: string;
 }
 
 export interface HostTerminalPrefs {
+	/**
+	 * 用户确实在「终端外观」里改过这台主机的外观：只有这时才覆盖全局终端设置。
+	 * （主机编辑会给每台主机都写一份默认外观，没有这个标记就分不清是默认值还是用户选的）
+	 */
+	custom?: boolean;
 	colorScheme?: string;
 	fontFamily?: string;
 	fontSize?: number;
@@ -65,6 +71,11 @@ export interface ProxyConfig {
 	type: "socks5" | "http";
 	host: string;
 	port: number;
+	/**
+	 * 代理认证（可选）：SOCKS5 用户名/口令（RFC 1929）或 HTTP Basic。
+	 * 口令存系统钥匙串（账户名 `proxy:<主机 id>`），不进配置文件。
+	 */
+	username?: string;
 }
 
 export interface Host {
@@ -143,7 +154,8 @@ export const FORWARD_LABEL: Record<ForwardType, string> = {
 	dynamic: "动态 SOCKS5 -D",
 };
 
-export type ForwardState = "running" | "stopped" | "error";
+/** starting 只存在于运行期（落盘时归为 stopped） */
+export type ForwardState = "starting" | "running" | "stopped" | "error";
 
 export interface ForwardRule {
 	id: string;
@@ -182,6 +194,41 @@ export interface Transfer {
 	error?: string;
 	/** 同名冲突处理策略 */
 	conflict?: "overwrite" | "skip" | "rename";
+	/* ---- 以下为运行期字段（不落盘） ---- */
+	/** 发起传输所用的会话键（重试 / 续传要用） */
+	sessionKey?: string;
+	/** 等用户决定的同名冲突（两侧文件的真实信息） */
+	pendingConflict?: TransferConflict;
+	/** 已传完、正在远端复算 SHA-256 */
+	verifying?: boolean;
+	/** 本地计算的 SHA-256（传完后） */
+	sha256?: string;
+	/** true 远端复算一致；false 不一致；null 未能比对 */
+	verified?: boolean | null;
+	verifyNote?: string;
+	/** 累计实际传输耗时（毫秒，不含暂停与排队） */
+	activeMs?: number;
+	/** 本次运行开始的时间戳（毫秒） */
+	runStartedAt?: number;
+	/** 本次运行开始时已有的字节数（续传起点），用于算平均速度 */
+	runStartBytes?: number;
+	/** 最近的吞吐采样（字节/秒，约每秒一个，最多 16 个） */
+	samples?: number[];
+}
+
+export interface TransferSideInfo {
+	exists: boolean;
+	isDir: boolean;
+	size: number;
+	/** 秒 */
+	mtime: number;
+}
+
+export interface TransferConflict {
+	source: TransferSideInfo;
+	target: TransferSideInfo;
+	/** 目标旁边上次未完成的部分文件大小（0 = 没有） */
+	partial: number;
 }
 
 /* ------------------------------- SFTP ------------------------------- */

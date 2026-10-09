@@ -338,13 +338,32 @@ fn clamp_params(attempts: u32, timeout_ms: u64) -> (u32, Duration) {
     )
 }
 
-/// 批量测速：分批并发，返回顺序与入参一致
+/// 批量测速：分批并发，返回顺序与入参一致。
+///
+/// 必须是 async 命令、并把阻塞的解析与建连挪到阻塞线程池：Tauri 的同步命令跑在主线程上，
+/// 几十台不通的主机会把整个窗口冻住几十秒。
 #[tauri::command]
-pub fn probe_hosts(
-    targets: Vec<ProbeTarget>,
-    attempts: u32,
-    timeout_ms: u64,
-) -> Vec<ProbeReport> {
+pub async fn probe_hosts(targets: Vec<ProbeTarget>, attempts: u32, timeout_ms: u64) -> Vec<ProbeReport> {
+    let fallback: Vec<(String, String, u16)> = targets
+        .iter()
+        .map(|t| (t.id.clone(), t.host.clone(), t.port))
+        .collect();
+    match tauri::async_runtime::spawn_blocking(move || probe_hosts_blocking(targets, attempts, timeout_ms)).await {
+        Ok(reports) => reports,
+        Err(_) => {
+            let (attempts, _) = clamp_params(attempts, timeout_ms);
+            fallback
+                .into_iter()
+                .map(|(id, host, port)| {
+                    empty_report(&ProbeTarget { id, host, port }, attempts, "error", "探测线程异常退出".to_string())
+                })
+                .collect()
+        }
+    }
+}
+
+/// 批量测速的阻塞实现（在阻塞线程池里跑；单测也直接调它）
+fn probe_hosts_blocking(targets: Vec<ProbeTarget>, attempts: u32, timeout_ms: u64) -> Vec<ProbeReport> {
     let (attempts, timeout) = clamp_params(attempts, timeout_ms);
     let mut reports: Vec<ProbeReport> = Vec::with_capacity(targets.len());
 
@@ -370,17 +389,19 @@ pub fn probe_hosts(
     reports
 }
 
-/// 单个目标测速
+/// 单个目标测速（同样不能占用主线程）
 #[tauri::command]
-pub fn probe_host(
-    id: String,
-    host: String,
-    port: u16,
-    attempts: u32,
-    timeout_ms: u64,
-) -> ProbeReport {
+pub async fn probe_host(id: String, host: String, port: u16, attempts: u32, timeout_ms: u64) -> ProbeReport {
     let (attempts, timeout) = clamp_params(attempts, timeout_ms);
-    probe_one(&ProbeTarget { id, host, port }, attempts, timeout)
+    let target = ProbeTarget { id, host, port };
+    let fallback = ProbeTarget {
+        id: target.id.clone(),
+        host: target.host.clone(),
+        port: target.port,
+    };
+    tauri::async_runtime::spawn_blocking(move || probe_one(&target, attempts, timeout))
+        .await
+        .unwrap_or_else(|_| empty_report(&fallback, attempts, "error", "探测线程异常退出".to_string()))
 }
 
 #[cfg(test)]
@@ -561,7 +582,7 @@ mod tests {
         let timed_out = std::io::Error::new(ErrorKind::TimedOut, "timeout");
         assert_eq!(describe(&timed_out), "连接超时");
 
-        let other = std::io::Error::new(ErrorKind::Other, "boom");
+        let other = std::io::Error::other("boom");
         assert!(describe(&other).starts_with("连接失败"));
     }
 
@@ -581,7 +602,7 @@ mod tests {
             Attempt::NoReply
         );
         assert!(matches!(
-            classify(&std::io::Error::new(ErrorKind::Other, "boom")),
+            classify(&std::io::Error::other("boom")),
             Attempt::Failed(_)
         ));
 
@@ -641,7 +662,7 @@ mod tests {
             },
         ];
 
-        let reports = probe_hosts(targets, 1, 400);
+        let reports = probe_hosts_blocking(targets, 1, 400);
 
         assert_eq!(reports.len(), 2);
         assert_eq!(reports[0].id, "a");

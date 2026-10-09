@@ -9,19 +9,19 @@ import {
 	getFileIcon,
 	posixDirname,
 	posixJoin,
-	sftpDownload,
 	sftpList,
 	sftpMkdir,
 	sftpRealPath,
 	sftpRemove,
 	sftpRename,
-	sftpUpload,
-	sftpWriteFile,
+	sftpCreateEmptyFile,
 	type SftpFileEntry,
 } from "@/lib/sftp";
 import type { ConnectionStatus } from "@/data/types";
+import { enqueueTransfers } from "@/lib/transferManager";
 import { toast } from "@/store/toast";
-import { useTransfersStore } from "@/store/transfers";
+import { toSafeLocalName } from "@/lib/pathSafety";
+import { detectPlatform } from "@/lib/platform";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
@@ -150,93 +150,68 @@ export function EmbeddedSftpDrawer({
 	// 上传文件
 	const handleUpload = async () => {
 		if (!sessionKey || !remotePath) return;
+		const key = sessionKey;
+		const dir = remotePath;
+		let paths: string[];
 		try {
 			const res = await openFileDialog({ multiple: true });
 			if (!res) return;
-			const paths = Array.isArray(res) ? res : [res];
-			for (const p of paths) {
-				const fileName = p.replace(/\\/g, "/").split("/").pop() || "file";
-				const targetPath = posixJoin(remotePath, fileName);
-				const transferId = `trans-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-				useTransfersStore.getState().upsert({
-					id: transferId,
-					name: fileName,
-					direction: "upload",
-					hostId: hostId ?? "",
-					localPath: p,
-					remotePath: targetPath,
-					size: 0,
-					transferred: 0,
-					speedBps: 0,
-					state: "running",
-				});
-				try {
-					const size = await sftpUpload(sessionKey, p, targetPath);
-					useTransfersStore.getState().upsert({
-						id: transferId,
-						name: fileName,
-						direction: "upload",
-						hostId: hostId ?? "",
-						localPath: p,
-						remotePath: targetPath,
-						size,
-						transferred: size,
-						speedBps: 0,
-						state: "done",
-					});
-					toast({ title: `上传完成: ${fileName}`, tone: "success" });
-				} catch (e) {
-					useTransfersStore.getState().setState(transferId, "failed");
-					toast({ title: `上传失败: ${fileName}`, description: String(e), tone: "danger" });
-				}
-			}
-			loadDir(remotePath);
+			paths = Array.isArray(res) ? res : [res];
 		} catch (e) {
 			toast({ title: "选择文件失败", description: String(e), tone: "danger" });
+			return;
 		}
+		await enqueueTransfers(
+			paths.map((p) => {
+				const fileName = p.replace(/\\/g, "/").split("/").pop() || "file";
+				return {
+					name: fileName,
+					direction: "upload" as const,
+					hostId: hostId ?? "",
+					sessionKey: key,
+					localPath: p,
+					remotePath: posixJoin(dir, fileName),
+				};
+			}),
+			{
+				onItemDone: (item) => toast({ title: `上传完成: ${item.name}`, tone: "success" }),
+				onItemFailed: (item, error) => toast({ title: `上传失败: ${item.name}`, description: error, tone: "danger" }),
+				onFinished: () => loadDir(dir),
+			},
+		);
 	};
 
 	// 下载文件
 	const handleDownload = async (entry: SftpFileEntry) => {
 		if (!sessionKey || entry.is_dir) return;
+		let dest: string | null;
 		try {
-			const dest = await saveFileDialog({ defaultPath: entry.name });
-			if (!dest) return;
-			const transferId = `trans-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-			useTransfersStore.getState().upsert({
-				id: transferId,
-				name: entry.name,
-				direction: "download",
-				hostId: hostId ?? "",
-				localPath: dest,
-				remotePath: entry.path,
-				size: entry.size,
-				transferred: 0,
-				speedBps: 0,
-				state: "running",
-			});
-			try {
-				const size = await sftpDownload(sessionKey, entry.path, dest);
-				useTransfersStore.getState().upsert({
-					id: transferId,
+			// 远程文件名不可信：预填前先消毒，避免 `../` 之类把默认位置带出用户选的目录
+			dest = await saveFileDialog({ defaultPath: toSafeLocalName(entry.name, detectPlatform() === "windows") });
+		} catch (e) {
+			toast({ title: "保存文件失败", description: String(e), tone: "danger" });
+			return;
+		}
+		if (!dest) return;
+		await enqueueTransfers(
+			[
+				{
 					name: entry.name,
 					direction: "download",
 					hostId: hostId ?? "",
+					sessionKey,
 					localPath: dest,
 					remotePath: entry.path,
-					size,
-					transferred: size,
-					speedBps: 0,
-					state: "done",
-				});
-				toast({ title: `下载完成: ${entry.name}`, tone: "success" });
-			} catch (e) {
-				useTransfersStore.getState().setState(transferId, "failed");
-				toast({ title: `下载失败: ${entry.name}`, description: String(e), tone: "danger" });
-			}
-		} catch (e) {
-			toast({ title: "保存文件失败", description: String(e), tone: "danger" });
-		}
+					size: entry.size,
+					// 系统「另存为」对话框已经问过是否覆盖
+					overwriteConfirmed: true,
+				},
+			],
+			{
+				onItemDone: (item) => toast({ title: `下载完成: ${item.name}`, tone: "success" }),
+				onItemFailed: (item, error) => toast({ title: `下载失败: ${item.name}`, description: error, tone: "danger" }),
+			},
+		);
 	};
 
 	// 弹窗提交（新建目录、新建文件、重命名、删除）
@@ -252,7 +227,7 @@ export function EmbeddedSftpDrawer({
 			} else if (modalMode === "touch") {
 				if (!inputName.trim()) return;
 				const newP = posixJoin(remotePath, inputName.trim());
-				await sftpWriteFile(sessionKey, newP, "");
+				await sftpCreateEmptyFile(sessionKey, newP);
 				toast({ title: `已创建空文件: ${inputName}`, tone: "success" });
 				loadDir(remotePath);
 			} else if (modalMode === "rename" && targetEntry) {

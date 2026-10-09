@@ -2,7 +2,10 @@ import { ActivityBar } from "@/components/chrome/ActivityBar";
 import { CommandPalette } from "@/components/chrome/CommandPalette";
 import { StatusBar } from "@/components/chrome/StatusBar";
 import { TitleBar } from "@/components/chrome/TitleBar";
+import { AuthPromptHost } from "@/components/ssh/AuthPromptHost";
+import { TransferConflictHost } from "@/components/transfer/TransferConflictHost";
 import { Toaster } from "@/components/ui/Overlay";
+import { useScreenActive } from "@/lib/screenActive";
 import { useUiStore } from "@/store/ui";
 import { useEffect, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router";
@@ -11,7 +14,9 @@ import { useLocation, useNavigate } from "react-router";
  * 抽屉与模态框用 absolute 定位，所以根节点必须是定位上下文（relative）。 */
 
 export function WindowChrome({ children }: { children: ReactNode }) {
-	useGlobalShortcuts();
+	// 常驻但当前隐藏的工作区不响应全局快捷键、不叠第二份面板与通知
+	const active = useScreenActive();
+	useGlobalShortcuts(active);
 	// /palette 路由自带一个打开状态的命令面板，这里不能再叠一个全局浮层
 	const onPaletteRoute = useLocation().pathname.startsWith("/palette");
 
@@ -23,18 +28,21 @@ export function WindowChrome({ children }: { children: ReactNode }) {
 				<div className="flex min-w-0 flex-1 flex-col">{children}</div>
 			</div>
 			<StatusBar />
-			{!onPaletteRoute && <CommandPalette />}
-			<Toaster />
+			{active && !onPaletteRoute && <CommandPalette />}
+			{active && <AuthPromptHost />}
+			{active && <TransferConflictHost />}
+			{active && <Toaster />}
 		</div>
 	);
 }
 
 /** 全局快捷键：Ctrl+K 命令面板、Ctrl+B 侧栏、Ctrl+Shift+S SFTP 面板、Ctrl+, 设置 */
-function useGlobalShortcuts() {
+function useGlobalShortcuts(active: boolean) {
 	const navigate = useNavigate();
 	const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
 
 	useEffect(() => {
+		if (!active) return;
 		const onKey = (e: KeyboardEvent) => {
 			const mod = e.ctrlKey || e.metaKey;
 			if (!mod) return;
@@ -62,5 +70,5 @@ function useGlobalShortcuts() {
 
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, [navigate, setPaletteOpen]);
+	}, [navigate, setPaletteOpen, active]);
 }

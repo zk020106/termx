@@ -5,6 +5,7 @@ import { type AuthMethod, type Host } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { getHostVisual } from "@/lib/hostVisual";
 import { secretDelete, secretLoad, secretSave } from "@/lib/secret";
+import { proxySecretAccount } from "@/lib/configSecrets";
 import { useHostsStore } from "@/store/hosts";
 import { useKeysStore } from "@/store/keys";
 import { toast } from "@/store/toast";
@@ -71,6 +72,9 @@ const COLOR_SCHEMES = [
 	{ id: "Monokai", bg: "#272822", fg: "#f8f8f2" },
 ];
 
+/** 「终端外观」页的字段：改过任意一项，这台主机就用自己的外观覆盖全局设置 */
+const APPEARANCE_FIELDS = ["colorScheme", "fontFamily", "fontSize", "lineHeight", "cursorStyle"] as const;
+
 const CURSOR_OPTIONS: { value: "block" | "bar" | "underline"; label: string }[] = [
 	{ value: "block", label: "方块 █" },
 	{ value: "bar", label: "竖线 ｜" },
@@ -99,6 +103,9 @@ interface FormState {
 	proxyType: "socks5" | "http";
 	proxyHost: string;
 	proxyPort: string;
+	/** 代理认证（可选） */
+	proxyUsername: string;
+	proxyPassword: string;
 	envVars: { key: string; value: string }[];
 	loginScript: string;
 	colorScheme: string;
@@ -126,6 +133,10 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 	const [tab, setTab] = useState<TabKey>("basic");
 	const [form, setForm] = useState<FormState>(() => toForm(targetHost, keys[0]?.id, initialGroupId));
 	const [initial, setInitial] = useState<FormState>(() => toForm(targetHost, keys[0]?.id, initialGroupId));
+	/** 本次编辑里动过「终端外观」 */
+	const [appearanceTouched, setAppearanceTouched] = useState(false);
+	/** 已经是自定义外观，或者这次改了外观：保存后这台主机的终端用它自己的外观 */
+	const appearanceCustom = Boolean(targetHost?.terminal?.custom) || appearanceTouched;
 	const [errors, setErrors] = useState<Record<string, string>>({});
 	const [showPassword, setShowPassword] = useState(false);
 	const [showPassphrase, setShowPassphrase] = useState(false);
@@ -147,6 +158,7 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 		const initialValues = toForm(targetHost, keys[0]?.id, initialGroupId);
 		setForm(initialValues);
 		setInitial(initialValues);
+		setAppearanceTouched(false);
 		setErrors({});
 		setTab("basic");
 		setShowPassword(false);
@@ -157,6 +169,15 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 				if (saved) {
 					setForm((f) => ({ ...f, password: saved }));
 					setInitial((f) => ({ ...f, password: saved }));
+				}
+			});
+		}
+		// 代理口令同样只在钥匙串里
+		if (targetHost?.proxy?.username) {
+			void secretLoad(proxySecretAccount(targetHost.id)).then((saved) => {
+				if (saved) {
+					setForm((f) => ({ ...f, proxyPassword: saved }));
+					setInitial((f) => ({ ...f, proxyPassword: saved }));
 				}
 			});
 		}
@@ -183,6 +204,7 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 	}, [open, isDirty, form]);
 
 	const update = <K extends keyof FormState>(key: K, value: FormState[K]) => {
+		if ((APPEARANCE_FIELDS as readonly string[]).includes(key)) setAppearanceTouched(true);
 		setForm((prev) => ({ ...prev, [key]: value }));
 		if (errors[key]) {
 			setErrors((prev) => {
@@ -273,12 +295,6 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 						? form.keyPath.trim() || undefined
 						: undefined,
 				rememberPassword: form.authMethod === "password" ? form.rememberPassword : targetHost?.auth.rememberPassword,
-				password:
-					form.authMethod === "password"
-						? form.rememberPassword && form.password
-							? form.password
-							: undefined
-						: targetHost?.auth.password,
 			},
 			jumpHostIds: form.jumpHostIds,
 			proxy: form.proxyEnabled
@@ -286,6 +302,8 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 						type: form.proxyType,
 						host: form.proxyHost.trim() || "127.0.0.1",
 						port: Number(form.proxyPort) || 1080,
+						// 代理口令进钥匙串（见下方），配置里只留用户名
+						...(form.proxyUsername.trim() ? { username: form.proxyUsername.trim() } : {}),
 				  }
 				: null,
 			encoding: form.encoding,
@@ -293,6 +311,7 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 			envVars: form.envVars.filter((v) => v.key.trim() !== ""),
 			loginScript: form.loginScript,
 			terminal: {
+				custom: appearanceCustom,
 				colorScheme: form.colorScheme,
 				fontFamily: form.fontFamily,
 				fontSize: Number(form.fontSize) || 13,
@@ -306,13 +325,36 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 
 		upsertHost(record);
 
-		// 密码安全凭据存储
+		// 密码安全凭据存储：只进系统钥匙串；存不进去时如实告知（本次运行内仍可用）
+		const keychainFailures: string[] = [];
 		if (form.authMethod === "password") {
 			if (form.rememberPassword && form.password) {
-				await secretSave(record.id, form.password).catch(() => undefined);
+				await secretSave(record.id, form.password).catch((error: unknown) => {
+					keychainFailures.push(`登录密码：${error instanceof Error ? error.message : String(error)}`);
+				});
 			} else if (!form.rememberPassword) {
 				await secretDelete(record.id).catch(() => undefined);
 			}
+		}
+		// 代理口令：只在用户改动过时写入 / 清除（钥匙串读不到时不至于把旧口令误删）
+		const proxyAccount = proxySecretAccount(record.id);
+		if (!record.proxy?.username) {
+			await secretDelete(proxyAccount).catch(() => undefined);
+		} else if (form.proxyPassword !== initial.proxyPassword) {
+			if (form.proxyPassword) {
+				await secretSave(proxyAccount, form.proxyPassword).catch((error: unknown) => {
+					keychainFailures.push(`代理口令：${error instanceof Error ? error.message : String(error)}`);
+				});
+			} else {
+				await secretDelete(proxyAccount).catch(() => undefined);
+			}
+		}
+		if (keychainFailures.length > 0) {
+			toast({
+				title: "凭据没能存入系统钥匙串",
+				description: `${keychainFailures.join(" · ")} · 本次运行内仍可使用，重启后需重新输入`,
+				tone: "warning",
+			});
 		}
 
 		toast({
@@ -330,6 +372,7 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 		if (!targetHost) return;
 		removeHost(targetHost.id);
 		void secretDelete(targetHost.id).catch(() => undefined);
+		void secretDelete(proxySecretAccount(targetHost.id)).catch(() => undefined);
 		toast({ title: `已删除主机「${targetHost.name}」`, tone: "default" });
 		setConfirmDelete(false);
 		onClose();
@@ -926,6 +969,28 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 													className="h-8 font-mono text-xs text-center"
 												/>
 											</Field>
+
+											<div className="col-span-3 grid grid-cols-2 gap-2">
+												<Field label="代理用户名（可选）">
+													<Input
+														value={form.proxyUsername}
+														onChange={(e) => update("proxyUsername", e.target.value)}
+														placeholder="不需要认证就留空"
+														autoComplete="off"
+														className="h-8 font-mono text-xs"
+													/>
+												</Field>
+												<Field label="代理口令（可选）">
+													<Input
+														type="password"
+														value={form.proxyPassword}
+														onChange={(e) => update("proxyPassword", e.target.value)}
+														disabled={!form.proxyUsername.trim()}
+														autoComplete="new-password"
+														className="h-8 font-mono text-xs"
+													/>
+												</Field>
+											</div>
 										</div>
 									)}
 								</div>
@@ -1042,6 +1107,11 @@ export function HostEditModal({ open, hostId, initialGroupId, onClose, onSaved }
 						{/* -------------------- 标签 5: 终端外观 -------------------- */}
 						{tab === "appearance" && (
 							<div className="space-y-4">
+								<p className="text-[10.5px] text-muted">
+									{appearanceCustom
+										? "这台主机的终端使用这里的外观（覆盖设置页的全局终端外观）。"
+										: "修改任意一项后，这台主机的终端将使用这里的外观；不改则沿用设置页的全局终端外观。"}
+								</p>
 								<div className="grid grid-cols-2 gap-3">
 									<Field label="终端配色方案">
 										<Select
@@ -1267,8 +1337,8 @@ function toForm(host?: Host | null, defaultKeyId?: string, fallbackGroupId?: str
 		favorite: host?.favorite ?? false,
 		osPreset: host?.os?.name ?? "auto",
 		authMethod: host?.auth?.method ?? "password",
-		password: host?.auth?.password ?? "",
-		rememberPassword: host?.auth?.rememberPassword ?? Boolean(host?.auth?.password),
+		password: "",
+		rememberPassword: host?.auth?.rememberPassword ?? false,
 		keyId: host?.auth?.keyId ?? defaultKeyId ?? "",
 		keyPath: host?.auth?.keyPath ?? "",
 		passphrase: "",
@@ -1279,6 +1349,8 @@ function toForm(host?: Host | null, defaultKeyId?: string, fallbackGroupId?: str
 		proxyType: host?.proxy?.type ?? "socks5",
 		proxyHost: host?.proxy?.host ?? "127.0.0.1",
 		proxyPort: String(host?.proxy?.port ?? 1080),
+		proxyUsername: host?.proxy?.username ?? "",
+		proxyPassword: "",
 		envVars: host?.envVars ?? [],
 		loginScript: host?.loginScript ?? "",
 		colorScheme: host?.terminal?.colorScheme ?? "One Dark",

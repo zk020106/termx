@@ -1,3 +1,4 @@
+import type { ConnectProfile } from "./connectPlan";
 import { isTauri } from "./tauri";
 
 /* SSH（原生壳内的 russh 实现）前端入口。
@@ -15,6 +16,9 @@ export interface SshPhase {
 	kind: string | null;
 	/** 服务器返回的主机指纹（SHA256:…）；有则直接用，不必从 detail 里解析 */
 	fingerprint: string | null;
+	/** 指纹问题出在哪一跳（经跳板机时可能是跳板机而不是目标主机）；信任 / 替换要作用在它上面 */
+	host?: string | null;
+	port?: number | null;
 }
 
 /** 认证凭据：与 Rust 侧 ssh_connect 的 credential 参数一一对应 */
@@ -23,7 +27,10 @@ export type Credential =
 	/** 私钥文件路径 + 口令；没有口令时传 null（口令只存在于本次调用的内存里） */
 	| { method: "private_key"; path: string; passphrase: string | null }
 	| { method: "agent" }
-	| { method: "keyboard_interactive" };
+	| { method: "keyboard_interactive" }
+	/** 连接到这一跳时再弹框问密码 / 私钥口令（跳板机没有保存凭据时用） */
+	| { method: "ask_password" }
+	| { method: "ask_passphrase"; path: string };
 
 /** SSH Agent 里的一个身份：只有公钥信息，私钥始终留在 agent 自己的进程里 */
 export interface AgentIdentity {
@@ -60,6 +67,8 @@ export interface SshConnectOptions {
 	password?: string;
 	cols: number;
 	rows: number;
+	/** 跳板链 / 代理 / TERM / 环境变量 / 登录脚本 / 编码（见 lib/connectPlan.ts） */
+	profile?: ConnectProfile;
 }
 
 /*
@@ -163,7 +172,23 @@ export async function sshConnect(options: SshConnectOptions): Promise<void> {
 		credential,
 		cols: options.cols,
 		rows: options.rows,
+		profile: options.profile ?? null,
 	});
+}
+
+/** 远端命令的执行结果 */
+export interface ExecOutput {
+	code: number | null;
+	stdout: string;
+	stderr: string;
+	truncated: boolean;
+}
+
+/** 在已连接会话所在主机上跑一条非交互命令（另开 exec 通道，不占用终端） */
+export async function sshExec(key: string, command: string, timeoutMs = 15000): Promise<ExecOutput> {
+	if (!isTauri()) throw new Error("SSH 需要在桌面端运行");
+	const { invoke } = await import("@tauri-apps/api/core");
+	return invoke<ExecOutput>("ssh_exec", { key, command, timeoutMs });
 }
 
 /** 回答服务器当前这一轮的键盘交互提问；顺序必须与事件里的 prompts 一致 */
@@ -205,16 +230,22 @@ export async function sshDisconnect(key: string): Promise<void> {
 	await invoke("ssh_disconnect", { key });
 }
 
-/** 首次连接确认后记录信任（密钥材料留在 Rust 侧，不经过前端）。返回写入后的指纹。 */
-export async function sshTrustHost(host: string, port: number): Promise<string> {
+/**
+ * 首次连接确认后记录信任（密钥材料留在 Rust 侧，不经过前端）。返回写入后的指纹。
+ * 必须带上界面上展示给用户核对的那个指纹：Rust 只信任指纹一致的那把钥匙，
+ * 核对期间对端换了钥匙会被拒绝，而不是把另一把钥匙写进 known_hosts。
+ */
+export async function sshTrustHost(host: string, port: number, fingerprint: string | null): Promise<string> {
+	if (!fingerprint) throw new Error("没有拿到可供核对的主机指纹，请重新发起连接");
 	const { invoke } = await import("@tauri-apps/api/core");
-	return invoke<string>("ssh_trust_host", { host, port });
+	return invoke<string>("ssh_trust_host", { host, port, fingerprint });
 }
 
-/** 服务器确实重装过、人工核对之后替换旧记录；返回结果说明 */
-export async function sshReplaceHostKey(host: string, port: number): Promise<string> {
+/** 服务器确实重装过、人工核对之后替换旧记录；同样按用户核对过的指纹；返回结果说明 */
+export async function sshReplaceHostKey(host: string, port: number, fingerprint: string | null): Promise<string> {
+	if (!fingerprint) throw new Error("没有拿到可供核对的主机指纹，请重新发起连接");
 	const { invoke } = await import("@tauri-apps/api/core");
-	return invoke<string>("ssh_replace_host_key", { host, port });
+	return invoke<string>("ssh_replace_host_key", { host, port, fingerprint });
 }
 
 /**

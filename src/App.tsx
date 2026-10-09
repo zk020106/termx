@@ -1,6 +1,7 @@
-import { Component, lazy, Suspense, type ErrorInfo, type ReactNode } from "react";
-import { HashRouter, Navigate, Route, Routes } from "react-router";
+import { Component, lazy, Suspense, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
+import { HashRouter, Navigate, Route, Routes, useLocation } from "react-router";
 import { LockGate } from "@/components/chrome/LockGate";
+import { ScreenActiveContext } from "@/lib/screenActive";
 
 /* 路由与 termx-design-brief「06 设计交付清单」的 16 个界面一一对应。
  * 其中 /welcome、/palette、/updater 是整页或浮层，不套应用外壳；
@@ -42,7 +43,8 @@ export default function App() {
 
 							{/* 默认首页 = 终端工作区 */}
 							<Route path="/" element={<Navigate to="/workspace" replace />} />
-							<Route path="/workspace" element={<Workspace />} />
+							{/* 工作区常驻在下面的 KeepAliveWorkspace 里，这条路由只负责「当前在工作区」 */}
+							<Route path="/workspace" element={null} />
 							<Route path="/hosts" element={<Navigate to="/workspace" replace />} />
 							<Route path="/hosts/new" element={<HostEdit />} />
 							<Route path="/hosts/:hostId/edit" element={<HostEdit />} />
@@ -62,9 +64,32 @@ export default function App() {
 							<Route path="*" element={<Navigate to="/workspace" replace />} />
 						</Routes>
 					</Suspense>
+					<KeepAliveWorkspace />
 				</ScreenBoundary>
 			</LockGate>
 		</HashRouter>
+	);
+}
+
+/**
+ * 工作区第一次打开后就常驻：切到 SFTP / 设置等界面时只是隐藏，回来时终端、分屏、
+ * 滚动位置、搜索状态都原样还在（不再每次重建 xterm、重放缓冲）。
+ */
+function KeepAliveWorkspace() {
+	const active = useLocation().pathname === "/workspace";
+	const [mounted, setMounted] = useState(active);
+	useEffect(() => {
+		if (active) setMounted(true);
+	}, [active]);
+	if (!mounted) return null;
+	return (
+		<ScreenActiveContext.Provider value={active}>
+			<div className={active ? "contents" : "hidden"} aria-hidden={!active}>
+				<Suspense fallback={active ? <ScreenLoading /> : null}>
+					<Workspace />
+				</Suspense>
+			</div>
+		</ScreenActiveContext.Provider>
 	);
 }
 

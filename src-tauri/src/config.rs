@@ -38,12 +38,62 @@ fn read_at(path: &Path) -> Result<Option<Value>, String> {
         return Ok(None);
     }
 
-    serde_json::from_str(&text)
-        .map(Some)
-        .map_err(|e| format!("配置解析失败（{}）：{e}", path.display()))
+    match serde_json::from_str(&text) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) => {
+            // 解析失败时先把原文件备份一份：之后的自动保存会写入新内容，
+            // 不能让一次解析失败把用户原来的配置整个冲掉
+            let backup = backup_corrupt(path);
+            Err(match backup {
+                Ok(b) => format!(
+                    "{CORRUPT_PREFIX}{}\n配置解析失败（{}）：{e}。原文件已备份到 {}",
+                    b.display(),
+                    path.display(),
+                    b.display()
+                ),
+                Err(be) => format!("配置解析失败（{}）：{e}。备份原文件也失败了：{be}", path.display()),
+            })
+        }
+    }
 }
 
-/// 原子写：先落临时文件，再 rename 覆盖，避免半个文件
+/// 前端据此判断「已备份、可以继续使用」
+pub const CORRUPT_PREFIX: &str = "CORRUPT_BACKED_UP:";
+
+fn backup_corrupt(path: &Path) -> Result<PathBuf, String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| CONFIG_FILE.to_string());
+    let backup = path.with_file_name(format!("{name}.corrupt-{ts}"));
+    fs::copy(path, &backup).map_err(|e| e.to_string())?;
+    Ok(backup)
+}
+
+/// 兜底：落盘前剥掉主机里的明文密码与代理口令（它们只能在系统钥匙串里）。
+/// 前端已经剥过一次；这里再做一次，保证任何调用方（含被注入的脚本）都没法让明文落盘。
+fn strip_secrets(data: &mut Value) -> usize {
+    let mut removed = 0;
+    if let Some(hosts) = data.get_mut("hosts").and_then(Value::as_array_mut) {
+        for host in hosts {
+            for field in ["auth", "proxy"] {
+                if let Some(obj) = host.get_mut(field).and_then(Value::as_object_mut) {
+                    if obj.remove("password").is_some() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+    }
+    removed
+}
+
+/// 原子写：先落临时文件，再 rename 覆盖，避免半个文件。
+/// Unix 上文件权限收紧为 0600（只有本人可读写）：里面虽然没有密码，但有主机地址与用户名。
 fn write_at(path: &Path, data: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("无法创建目录：{e}"))?;
@@ -52,21 +102,50 @@ fn write_at(path: &Path, data: &Value) -> Result<(), String> {
     let text = serde_json::to_string_pretty(data).map_err(|e| format!("序列化失败：{e}"))?;
     let tmp = path.with_extension("json.tmp");
 
-    fs::write(&tmp, text.as_bytes()).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    write_private(&tmp, text.as_bytes()).map_err(|e| format!("写入临时文件失败：{e}"))?;
     fs::rename(&tmp, path).map_err(|e| format!("替换配置文件失败：{e}"))?;
     Ok(())
 }
 
-/// 读取配置；文件不存在或为空时返回 null（首次启动就是这种状态）
-#[tauri::command]
-pub fn config_load(app: AppHandle) -> Result<Option<Value>, String> {
-    read_at(&config_file(&app)?)
+#[cfg(unix)]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    // 已存在的临时文件不受 mode 影响，显式收紧一次
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
-/// 写入配置
+#[cfg(not(unix))]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fs::write(path, bytes)
+}
+
+/// 读取配置；文件不存在或为空时返回 null（首次启动就是这种状态）。
+/// 文件 IO 放到阻塞线程池：同步命令跑在主线程上，慢盘 / 网络盘会冻住界面。
 #[tauri::command]
-pub fn config_save(app: AppHandle, data: Value) -> Result<(), String> {
-    write_at(&config_file(&app)?, &data)
+pub async fn config_load(app: AppHandle) -> Result<Option<Value>, String> {
+    let path = config_file(&app)?;
+    tauri::async_runtime::spawn_blocking(move || read_at(&path))
+        .await
+        .map_err(|e| format!("读取配置失败：{e}"))?
+}
+
+/// 写入配置（明文密码一律剥掉）
+#[tauri::command]
+pub async fn config_save(app: AppHandle, mut data: Value) -> Result<(), String> {
+    let path = config_file(&app)?;
+    strip_secrets(&mut data);
+    tauri::async_runtime::spawn_blocking(move || write_at(&path, &data))
+        .await
+        .map_err(|e| format!("写入配置失败：{e}"))?
 }
 
 /// 配置文件在磁盘上的真实路径，供设置页展示（不再写死的示例路径）
@@ -133,6 +212,34 @@ mod tests {
     }
 
     #[test]
+    fn secrets_are_stripped_before_write() {
+        let mut data = json!({
+            "version": 1,
+            "hosts": [
+                { "id": "a", "auth": { "method": "password", "rememberPassword": true, "password": "hunter2" },
+                  "proxy": { "type": "socks5", "host": "p", "port": 1080, "username": "pu", "password": "pp" } },
+                { "id": "b", "auth": { "method": "key" }, "proxy": null }
+            ]
+        });
+        assert_eq!(strip_secrets(&mut data), 2);
+        let text = data.to_string();
+        assert!(!text.contains("hunter2") && !text.contains("\"pp\""), "{text}");
+        assert_eq!(data["hosts"][0]["auth"]["rememberPassword"], true);
+        assert_eq!(data["hosts"][0]["proxy"]["username"], "pu");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_path("private.json");
+        let _ = fs::remove_file(&path);
+        write_at(&path, &json!({ "version": 1 })).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
     fn empty_file_reads_as_none() {
         let path = temp_path("empty.json");
         fs::write(&path, b"   \n").unwrap();
@@ -145,5 +252,11 @@ mod tests {
         fs::write(&path, b"{ not json").unwrap();
         let error = read_at(&path).unwrap_err();
         assert!(error.contains("配置解析失败"));
+        // 原文件被备份，内容原样保留
+        assert!(error.starts_with(CORRUPT_PREFIX), "{error}");
+        let backup = error[CORRUPT_PREFIX.len()..].lines().next().unwrap().to_string();
+        assert_eq!(fs::read(&backup).unwrap(), b"{ not json");
+        assert!(path.exists(), "原文件不动");
+        let _ = fs::remove_file(backup);
     }
 }

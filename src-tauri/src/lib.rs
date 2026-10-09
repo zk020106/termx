@@ -1,4 +1,8 @@
+mod chain;
+mod codec;
 mod config;
+mod fs_guard;
+mod forward;
 mod known_hosts;
 mod probe;
 mod pty;
@@ -6,6 +10,10 @@ mod secret;
 mod sftp;
 mod ssh;
 mod ssh_auth;
+mod transfer;
+mod transport;
+#[cfg(test)]
+mod live_tests;
 
 use pty::PtyState;
 use sftp::SftpState;
@@ -28,6 +36,8 @@ pub fn run() {
         .manage(PtyState::default())
         .manage(SshState::default())
         .manage(SftpState::default())
+        .manage(forward::ForwardState::default())
+        .manage(transfer::TransferState::default())
         .invoke_handler(tauri::generate_handler![
             pty::pty_spawn,
             pty::pty_write,
@@ -43,6 +53,10 @@ pub fn run() {
             ssh::ssh_resize,
             ssh::ssh_ping_rtt,
             ssh::ssh_disconnect,
+            ssh::ssh_exec,
+            forward::forward_start,
+            forward::forward_stop,
+            forward::forward_list,
             ssh::ssh_trust_host,
             ssh::ssh_replace_host_key,
             ssh_auth::ssh_auth_respond,
@@ -61,6 +75,14 @@ pub fn run() {
             sftp::sftp_write_file,
             sftp::sftp_upload,
             sftp::sftp_download,
+            sftp::sftp_stat,
+            sftp::fs_local_stat,
+            transfer::transfer_check,
+            transfer::transfer_start,
+            transfer::transfer_control,
+            transfer::transfer_set_limits,
+            transfer::transfer_discard_partial,
+            transfer::fs_reveal,
             sftp::fs_local_list,
             sftp::fs_local_home,
             sftp::fs_local_drives,

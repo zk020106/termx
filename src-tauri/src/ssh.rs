@@ -2,21 +2,24 @@
 //!
 //! 设计要点：
 //! - 连接过程分阶段回报给前端（`ssh://state/{key}`），正好对应「连接过程」界面的步骤条，
-//!   失败时能指出是哪一步出错，而不是笼统的一句「连接失败」。
+//!   失败时能指出是哪一步、哪一跳出错，而不是笼统的一句「连接失败」。
 //! - 会话数据走事件流（`ssh://data/{key}`），与本地终端 PTY 的形态保持一致。
-//! - 凭据只存在于内存：认证方式与凭据由 `ssh_auth` 处理，用完即弃、**不写进任何配置文件**
-//!   （配置文件只存主机地址、用户名这类非敏感信息）。系统钥匙串持久化尚未接入。
-//!   五种认证方式（密码 / 私钥 / 私钥加口令 / SSH Agent / 键盘交互）都在 `crate::ssh_auth`。
-//! - 主机指纹会被回报并在界面上展示，信任策略（known_hosts / 首次连接人工确认）由
-//!   `crate::known_hosts` 执行：未见过的指纹一律先拒绝，由用户确认后再写入自己的记录。
+//!   远端字节按主机设置的编码流式解码（见 `crate::codec`），键盘输入按同一编码编回去。
+//! - 链路（代理 / 跳板机 / 每一跳的指纹校验与认证）由 `crate::chain` 负责；
+//!   连接超时与 keepalive 也在那里统一配置。
+//! - 会话选项：TERM 类型、环境变量（`env` 请求）、登录脚本（shell 就绪后逐行键入）。
+//! - 往返测量在独立任务里跑，不会卡住终端数据的收发。
+//! - 主机指纹会被回报并在界面上展示，信任策略由 `crate::known_hosts` 执行。
 
+use crate::chain::{self, Chain, ChainRequest, HopSpec, PendingKeys, SshHandle};
+use crate::codec::TermCodec;
 use crate::known_hosts::{self, Verdict};
 use crate::probe::Stats;
-use crate::ssh_auth::{self, AuthPromptRegistry, Credential};
+use crate::ssh_auth::{AuthPromptRegistry, Credential};
+use crate::transport::ProxySpec;
 use russh::client;
-use russh::keys::{PublicKey, PublicKeyOrCertificate};
 use russh::ChannelMsg;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,9 +27,12 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
+pub use crate::chain::{emit_phase, emit_phase_full, SessionError};
+
 /// 发给会话任务的指令
 enum SshCommand {
-    Data(Vec<u8>),
+    /// 键盘输入（文本，发送前按会话编码编码）
+    Data(String),
     Resize { cols: u32, rows: u32 },
     /// 在这条连接上量一次往返；答复走 oneshot 回给发起测量的命令
     Ping {
@@ -37,35 +43,33 @@ enum SshCommand {
     Close,
 }
 
+type SessionTable = Arc<Mutex<HashMap<String, UnboundedSender<SshCommand>>>>;
+
 #[derive(Default)]
 pub struct SshState {
-    sessions: Arc<Mutex<HashMap<String, UnboundedSender<SshCommand>>>>,
+    sessions: SessionTable,
+    /// 已建立的会话连接句柄：exec（远端校验、监控采样）复用这条连接，不另开
+    handles: Arc<Mutex<HashMap<String, Arc<SshHandle>>>>,
     /// 各主机**最近一次握手看到的**服务器公钥：host:port -> 公钥。
     /// 存在这里而不是走 IPC 传递密钥材料，用户确认后由 Rust 自己写盘。
-    ///
-    /// 为什么是「最近看到」而不是「取走一份」：同一台主机可以有多条并发会话
-    /// （会话键每次连接都不同），几条会话撞上未知指纹时会写入同一把公钥。
-    /// 若确认时把它取走，第二条会话点确认就会撞上「没有待确认的主机密钥」，
-    /// 而其实它看到的正是同一把。留着不动，谁先确认都能拿到同一份材料。
-    pending_keys: Arc<Mutex<HashMap<String, PublicKey>>>,
-    /// 正在等界面回答的键盘交互请求（二次验证要来回问用户）
+    /// 跳板机与目标主机都记在这里，界面信任的是出问题的那一跳。
+    pub(crate) pending_keys: PendingKeys,
+    /// 正在等界面回答的认证输入（键盘交互、跳板机密码等）
     pub auth_prompts: AuthPromptRegistry,
 }
 
-fn host_port_key(host: &str, port: u16) -> String {
-    format!("{host}:{port}")
+impl SshState {
+    pub fn handle(&self, key: &str) -> Option<Arc<SshHandle>> {
+        self.handles.lock().ok()?.get(key).cloned()
+    }
 }
 
 /// 登记一条会话。
 ///
 /// 键必须唯一：同键重复登记会让两条会话抢同一格事件通道。前端给**每次连接**
-/// 生成一个新的键（`ssh:<hostId>#<序号>-<随机段>`），所以同一台主机的第二条
+/// 生成一个新的键（`ssh:<hostId>:<序号>-<随机段>`），所以同一台主机的第二条
 /// 连接不会被这里挡住 —— 挡住的只是同一个键的重复登记。
-fn insert_session(
-    sessions: &Arc<Mutex<HashMap<String, UnboundedSender<SshCommand>>>>,
-    key: &str,
-    tx: UnboundedSender<SshCommand>,
-) -> Result<(), String> {
+fn insert_session(sessions: &SessionTable, key: &str, tx: UnboundedSender<SshCommand>) -> Result<(), String> {
     let mut map = sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
     if map.contains_key(key) {
         return Err(format!("会话 {key} 已存在"));
@@ -74,102 +78,10 @@ fn insert_session(
     Ok(())
 }
 
-/// 连接阶段事件：phase 取 resolve / tcp / handshake / auth / shell / failed
-#[derive(Serialize, Clone)]
-pub struct SshPhase {
-    phase: String,
-    ok: bool,
-    detail: String,
-    /// 供界面判断该引导什么动作：host_unknown（首次连接，需确认指纹）/
-    /// host_changed（指纹变了，默认拒绝）；普通阶段为 null
-    kind: Option<String>,
-    /// 主机指纹：有就带上，界面直接展示，不用从 detail 里猜
-    fingerprint: Option<String>,
-}
-
-pub(crate) fn emit_phase(app: &AppHandle, key: &str, phase: &str, ok: bool, detail: impl Into<String>) {
-    emit_phase_full(app, key, phase, ok, detail, None, None);
-}
-
-/// 与 emit_phase 相同，但没有 AppHandle 时静默跳过。
-/// 只给测试用：这样认证循环可以在没有界面的情况下被完整驱动。
-pub(crate) fn emit_phase_opt(
-    app: Option<&AppHandle>,
-    key: &str,
-    phase: &str,
-    ok: bool,
-    detail: impl Into<String>,
-) {
+/// 与 emit_phase 相同，但没有 AppHandle 时静默跳过（测试用）
+pub(crate) fn emit_phase_opt(app: Option<&AppHandle>, key: &str, phase: &str, ok: bool, detail: impl Into<String>) {
     if let Some(app) = app {
         emit_phase(app, key, phase, ok, detail);
-    }
-}
-
-fn emit_phase_full(
-    app: &AppHandle,
-    key: &str,
-    phase: &str,
-    ok: bool,
-    detail: impl Into<String>,
-    kind: Option<&str>,
-    fingerprint: Option<&str>,
-) {
-    let _ = app.emit(
-        &format!("ssh://state/{key}"),
-        SshPhase {
-            phase: phase.to_string(),
-            ok,
-            detail: detail.into(),
-            kind: kind.map(str::to_string),
-            fingerprint: fingerprint.map(str::to_string),
-        },
-    );
-}
-
-#[derive(Debug)]
-struct SessionError {
-    detail: String,
-    kind: Option<String>,
-    fingerprint: Option<String>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ClientHandler {
-    app: AppHandle,
-    _key: String,
-    host: String,
-    port: u16,
-    fingerprint: Arc<Mutex<Option<String>>>,
-    /// 信任判定的结果（放行以外的两种情况要回报给用户）
-    verdict: Arc<Mutex<Option<(String, String)>>>,
-    pending: Arc<Mutex<HashMap<String, PublicKey>>>,
-}
-
-impl client::Handler for ClientHandler {
-    type Error = russh::Error;
-
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &PublicKeyOrCertificate,
-    ) -> Result<bool, Self::Error> {
-        // 对公钥与证书都取底层公钥算指纹，形状统一
-        let key = server_public_key.public_key();
-        *self.fingerprint.lock().unwrap() = Some(known_hosts::fingerprint_of(&key));
-
-        let verdict = known_hosts::verify(&self.app, &self.host, self.port, &key);
-        if matches!(verdict, Verdict::Trusted) {
-            return Ok(true);
-        }
-
-        // 首次连接或指纹变化：拒绝这次握手，把待确认的密钥留给用户决策
-        let kind = verdict.kind().unwrap_or("host_unknown").to_string();
-        let fingerprint = verdict.fingerprint().unwrap_or_default().to_string();
-        self.pending
-            .lock()
-            .unwrap()
-            .insert(host_port_key(&self.host, self.port), key);
-        *self.verdict.lock().unwrap() = Some((kind, fingerprint));
-        Ok(false)
     }
 }
 
@@ -177,7 +89,7 @@ impl client::Handler for ClientHandler {
 ///
 /// 口径：一次 SSH 全局请求（keepalive）从发出到收到对端答复，
 /// 也就是**端到端的真实往返**（含两端 SSH 协议栈的处理时间）。
-/// 与 probe.rs 的 TCP 建连耗时是两码事：后者可能被本机代理就地握完，与远端无关。
+/// 经跳板机时量的是到目标主机的整条链路。
 #[derive(Debug, Serialize, Clone)]
 pub struct SshRttReport {
     pub key: String,
@@ -269,12 +181,6 @@ async fn measure_rtt<S: RttSource>(key: &str, samples: u32, source: &mut S) -> S
 }
 
 /// 在已有连接上量一次 SSH 往返（口径见 [`SshRttReport`]）。
-///
-/// 为什么不另开一条 TCP 连接去连服务端口：那会在服务端 sshd 日志里留下一条
-/// **没有用户名的预认证失败记录**（Netcatty 也正因此放弃了这种测法），
-/// 而且本机装了 TUN 类代理时，那条连接会被本机协议栈就地握完，
-/// 量出来的只是本机耗时 —— 保留域名 `.invalid` 都能"连上"，可见一斑。
-/// 已认证连接上的往返不受这两件事影响。
 async fn measure_ssh_rtt<H: client::Handler>(
     session: &client::Handle<H>,
     key: &str,
@@ -285,104 +191,138 @@ async fn measure_ssh_rtt<H: client::Handler>(
     measure_rtt(key, samples, &mut source).await
 }
 
+/// 主机级的连接选项（与前端 Host 的 jumpHostIds / proxy / termType / envVars /
+/// loginScript / encoding 对应；前端负责把 jumpHostIds 展开成每一跳的地址与凭据）
+#[derive(Deserialize, Default, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectProfile {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub jumps: Vec<HopSpec>,
+    #[serde(default)]
+    pub proxy: Option<ProxySpec>,
+    #[serde(default)]
+    pub term_type: Option<String>,
+    #[serde(default)]
+    pub env: Vec<EnvVar>,
+    #[serde(default)]
+    pub login_script: Option<String>,
+    #[serde(default)]
+    pub encoding: Option<String>,
+    /// 单跳连接超时（秒）；缺省 15 秒
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct EnvVar {
+    pub key: String,
+    pub value: String,
+}
+
+impl ConnectProfile {
+    pub fn timeout(&self) -> Duration {
+        self.connect_timeout_secs
+            .map(|s| Duration::from_secs(s.clamp(3, 120)))
+            .unwrap_or(chain::DEFAULT_CONNECT_TIMEOUT)
+    }
+}
+
+/// TERM 只允许常见的字符，防止奇怪的值被原样塞进协议
+fn sanitize_term(term: Option<&str>) -> String {
+    match term.map(str::trim) {
+        Some(t) if !t.is_empty() && t.len() <= 64 && t.chars().all(|c| c.is_ascii_alphanumeric() || "-_.+".contains(c)) => {
+            t.to_string()
+        }
+        _ => "xterm-256color".to_string(),
+    }
+}
+
+/// 登录脚本 → 要键入的文本：每行一条命令，空行跳过，每条以回车结束
+pub fn login_script_input(script: &str) -> Option<String> {
+    let lines: Vec<&str> = script
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(line);
+        out.push('\r');
+    }
+    Some(out)
+}
+
+/// 合法的环境变量名
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// 认证还没结束时用户点了「断开」：在等待连接的同时盯着指令通道
+async fn wait_for_close(rx: &mut UnboundedReceiver<SshCommand>) {
+    loop {
+        match rx.recv().await {
+            Some(SshCommand::Close) | None => return,
+            // 连接建立前的输入 / 尺寸 / 测量请求都没有意义，丢弃
+            Some(SshCommand::Ping { reply, .. }) => drop(reply),
+            Some(_) => {}
+        }
+    }
+}
+
+struct SessionDeps<'a> {
+    app: &'a AppHandle,
+    key: &'a str,
+    pending_keys: &'a PendingKeys,
+    auth_prompts: &'a AuthPromptRegistry,
+    sftp: &'a crate::sftp::SftpState,
+    handles: &'a Arc<Mutex<HashMap<String, Arc<SshHandle>>>>,
+}
+
 /// 建立连接并跑会话循环；返回 Err 时调用方会把失败阶段报给前端
-#[allow(clippy::too_many_arguments)]
 async fn run_session(
-    app: &AppHandle,
-    key: &str,
-    host: &str,
-    port: u16,
-    username: &str,
-    credential: Credential,
+    deps: SessionDeps<'_>,
+    target: HopSpec,
+    profile: ConnectProfile,
     cols: u32,
     rows: u32,
     rx: &mut UnboundedReceiver<SshCommand>,
-    pending_keys: &Arc<Mutex<HashMap<String, PublicKey>>>,
-    auth_prompts: &AuthPromptRegistry,
-    sftp: &crate::sftp::SftpState,
 ) -> Result<(), SessionError> {
-    emit_phase(app, key, "resolve", true, format!("{host}:{port}"));
+    let SessionDeps {
+        app,
+        key,
+        pending_keys,
+        auth_prompts,
+        sftp,
+        handles,
+    } = deps;
+    chain::validate_route(&profile.jumps, &target).map_err(SessionError::msg)?;
 
-    let fingerprint = Arc::new(Mutex::new(None));
-    let verdict: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
-    let handler = ClientHandler {
+    let request = ChainRequest {
         app: app.clone(),
-        _key: key.to_string(),
-        host: host.to_string(),
-        port,
-        fingerprint: fingerprint.clone(),
-        verdict: verdict.clone(),
+        key: key.to_string(),
         pending: pending_keys.clone(),
+        prompts: auth_prompts.clone(),
+        jumps: profile.jumps.clone(),
+        target,
+        proxy: profile.proxy.clone(),
+        timeout: profile.timeout(),
+        forward_sink: None,
     };
 
-    let mut session = match client::connect(
-        Arc::new(client::Config::default()),
-        (host, port),
-        handler,
-    )
-    .await
-    {
-        Ok(session) => session,
-        Err(error) => {
-            // 握手被我们自己拦下来时，要告诉用户该怎么办，而不是回一句笼统的失败
-            if let Some((kind, fingerprint)) = verdict.lock().unwrap().clone() {
-                let detail = match kind.as_str() {
-                    "host_unknown" => format!("首次连接这台主机，需要你确认服务器指纹 {fingerprint}"),
-                    "host_changed" => format!(
-                        "主机指纹与已保存的记录不一致（{fingerprint}）。可能是服务器重装，也可能是中间人攻击，已拒绝连接。"
-                    ),
-                    _ => format!("握手失败：{error}"),
-                };
-                return Err(SessionError {
-                    detail,
-                    kind: Some(kind),
-                    fingerprint: Some(fingerprint),
-                });
-            }
-            return Err(SessionError {
-                detail: format!("建立 TCP 连接失败：{error}"),
-                kind: None,
-                fingerprint: None,
-            });
+    let chain: Chain = tokio::select! {
+        result = chain::connect_chain(request) => result?,
+        _ = wait_for_close(rx) => {
+            return Err(SessionError::msg("已取消：连接过程中用户断开了连接"));
         }
     };
-    emit_phase(app, key, "tcp", true, format!("已连接到 {host}:{port}"));
-
-    let fp = fingerprint
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_else(|| "未能取得指纹".to_string());
-    emit_phase_full(
-        app,
-        key,
-        "handshake",
-        true,
-        format!("主机指纹 {fp}（已通过 known_hosts 校验）"),
-        None,
-        Some(&fp),
-    );
-
-    // 认证：密码 / 私钥 / 私钥加口令 / SSH Agent / 键盘交互，由 ssh_auth 分派。
-    // 详细过程（用了哪种方式、服务器提了什么问）由 ssh_auth 自己回报 auth 阶段。
-    let outcome = ssh_auth::authenticate(
-        app,
-        key,
-        &mut session,
-        username,
-        &credential,
-        auth_prompts,
-    )
-    .await;
-    // 凭据用完即弃，不跟着会话一直挂在内存里
-    drop(credential);
-    if let Err(detail) = outcome {
-        return Err(SessionError {
-            detail,
-            kind: None,
-            fingerprint: None,
-        });
-    }
+    let session = chain.target.clone();
 
     // 认证通过后，尝试为本会话开辟 SFTP 子系统通道并注册
     if let Ok(sftp_channel) = session.channel_open_session().await {
@@ -393,71 +333,115 @@ async fn run_session(
         }
     }
 
-    let mut channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| SessionError {
-            detail: format!("打开会话通道失败：{e}"),
-            kind: None,
-            fingerprint: None,
-        })?;
+    let mut channel = match session.channel_open_session().await {
+        Ok(channel) => channel,
+        Err(e) => {
+            chain.close().await;
+            return Err(SessionError::msg(format!("打开会话通道失败：{e}")));
+        }
+    };
 
-    channel
-        .request_pty(true, "xterm-256color", cols.max(1), rows.max(1), 0, 0, &[])
-        .await
-        .map_err(|e| SessionError {
-            detail: format!("申请 PTY 失败：{e}"),
-            kind: None,
-            fingerprint: None,
-        })?;
-    channel
-        .request_shell(true)
-        .await
-        .map_err(|e| SessionError {
-            detail: format!("启动远程 shell 失败：{e}"),
-            kind: None,
-            fingerprint: None,
-        })?;
+    let term = sanitize_term(profile.term_type.as_deref());
+    if let Err(e) = channel.request_pty(true, &term, cols.max(1), rows.max(1), 0, 0, &[]).await {
+        chain.close().await;
+        return Err(SessionError::msg(format!("申请 PTY 失败：{e}")));
+    }
 
-    emit_phase(app, key, "shell", true, format!("远程 shell 已就绪（{cols}x{rows}）"));
+    // 环境变量：服务器只接受 sshd_config 里 AcceptEnv 放行的变量，其余会被它静默忽略
+    let mut env_sent = 0usize;
+    let mut env_skipped: Vec<String> = Vec::new();
+    for var in &profile.env {
+        let name = var.key.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !valid_env_name(name) {
+            env_skipped.push(name.to_string());
+            continue;
+        }
+        if channel.set_env(false, name, var.value.clone()).await.is_ok() {
+            env_sent += 1;
+        }
+    }
+
+    if let Err(e) = channel.request_shell(true).await {
+        chain.close().await;
+        return Err(SessionError::msg(format!("启动远程 shell 失败：{e}")));
+    }
+
+    let mut codec = TermCodec::new(profile.encoding.as_deref().unwrap_or("UTF-8"));
+    let mut notes: Vec<String> = vec![format!("TERM={term}")];
+    if codec.name() != "UTF-8" {
+        notes.push(format!("编码 {}", codec.name()));
+    }
+    if env_sent > 0 {
+        notes.push(format!("已请求设置 {env_sent} 个环境变量（服务器 AcceptEnv 未放行的会被忽略）"));
+    }
+    if !env_skipped.is_empty() {
+        notes.push(format!("跳过非法变量名 {}", env_skipped.join("、")));
+    }
+    if !chain.jumps.is_empty() {
+        notes.push(format!("经 {} 个跳板机", chain.jumps.len()));
+    }
+    // 先登记句柄再报 shell 就绪：前端一收到就绪就可能发 exec / 测量
+    if let Ok(mut map) = handles.lock() {
+        map.insert(key.to_string(), session.clone());
+    }
+    emit_phase(app, key, "shell", true, format!("远程 shell 已就绪（{cols}x{rows}，{}）", notes.join("，")));
+
+    // 登录脚本：shell 已经起来，直接键入；shell 会把它们排在提示符之后执行
+    if let Some(script) = profile.login_script.as_deref().and_then(login_script_input) {
+        let _ = channel.data(&codec.encode(&script)[..]).await;
+    }
 
     let data_event = format!("ssh://data/{key}");
     let exit_event = format!("ssh://exit/{key}");
     let mut exit_code: Option<i32> = None;
+    // 同一条连接上的往返测量必须串行（russh 按 FIFO 配对答复）
+    let ping_lock = Arc::new(tokio::sync::Mutex::new(()));
 
     loop {
         tokio::select! {
             incoming = channel.wait() => {
                 match incoming {
-                    Some(ChannelMsg::Data { data }) => {
-                        let _ = app.emit(&data_event, String::from_utf8_lossy(&data).to_string());
-                    }
-                    Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        let _ = app.emit(&data_event, String::from_utf8_lossy(&data).to_string());
+                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        let text = codec.decode(&data);
+                        if !text.is_empty() {
+                            let _ = app.emit(&data_event, text);
+                        }
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
                         exit_code = Some(exit_status as i32);
                     }
-                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    Some(ChannelMsg::ExitSignal { signal_name, .. }) => {
+                        let _ = app.emit(&data_event, format!("\r\n[远端进程被信号 {signal_name:?} 终止]\r\n"));
+                    }
+                    // EOF 只是对端不再发数据，退出码可能还在路上：继续等到通道关闭
+                    Some(ChannelMsg::Eof) => {}
+                    Some(ChannelMsg::Close) | None => break,
                     _ => {}
                 }
             }
             command = rx.recv() => {
                 match command {
-                    Some(SshCommand::Data(bytes)) => {
-                        if channel.data_bytes(bytes).await.is_err() {
+                    Some(SshCommand::Data(text)) => {
+                        if channel.data(&codec.encode(&text)[..]).await.is_err() {
                             break;
                         }
                     }
                     Some(SshCommand::Resize { cols, rows }) => {
                         let _ = channel.window_change(cols.max(1), rows.max(1), 0, 0).await;
                     }
-                    // 测量期间不排空终端数据：正常往返只有几十毫秒，而一旦超时就立刻
-                    // 收工（见 measure_ssh_rtt），所以这里最多挡住一个超时时长
                     Some(SshCommand::Ping { samples, timeout, reply }) => {
-                        let report = measure_ssh_rtt(&session, key, samples, timeout).await;
-                        // 发起测量的命令可能已经整体超时走人了，发不出去就算了
-                        let _ = reply.send(report);
+                        // 放到独立任务里量：测量期间终端数据照常收发
+                        let handle = session.clone();
+                        let lock = ping_lock.clone();
+                        let task_key = key.to_string();
+                        tokio::spawn(async move {
+                            let _guard = lock.lock().await;
+                            let report = measure_ssh_rtt(&handle, &task_key, samples, timeout).await;
+                            let _ = reply.send(report);
+                        });
                     }
                     Some(SshCommand::Close) | None => break,
                 }
@@ -465,12 +449,22 @@ async fn run_session(
         }
     }
 
+    let tail = codec.finish();
+    if !tail.is_empty() {
+        let _ = app.emit(&data_event, tail);
+    }
     let _ = channel.close().await;
+    if let Ok(mut map) = handles.lock() {
+        map.remove(key);
+    }
+    chain.close().await;
     let _ = app.emit(&exit_event, exit_code);
     Ok(())
 }
 
 /// 发起连接。立即返回，进度与数据都通过事件推送。
+///
+/// `profile` 带上跳板机链路、代理与会话选项；缺省时就是直连、默认选项。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn ssh_connect(
@@ -484,38 +478,45 @@ pub async fn ssh_connect(
     credential: Credential,
     cols: u32,
     rows: u32,
+    profile: Option<ConnectProfile>,
 ) -> Result<(), String> {
     let (tx, mut rx) = unbounded_channel::<SshCommand>();
     insert_session(&state.sessions, &key, tx)?;
 
     let sessions = state.sessions.clone();
+    let handles = state.handles.clone();
     let pending = state.pending_keys.clone();
     let auth_prompts = state.auth_prompts.clone();
     let sftp = sftp_state.inner().clone();
     let task_key = key.clone();
+    let profile = profile.unwrap_or_default();
+    let target = HopSpec {
+        label: profile.label.clone(),
+        host,
+        port,
+        username,
+        credential,
+    };
 
     tauri::async_runtime::spawn(async move {
-        let result = run_session(
-            &app,
-            &task_key,
-            &host,
-            port,
-            &username,
-            credential,
-            cols,
-            rows,
-            &mut rx,
-            &pending,
-            &auth_prompts,
-            &sftp,
-        )
-        .await;
+        let deps = SessionDeps {
+            app: &app,
+            key: &task_key,
+            pending_keys: &pending,
+            auth_prompts: &auth_prompts,
+            sftp: &sftp,
+            handles: &handles,
+        };
+        let result = run_session(deps, target, profile, cols, rows, &mut rx).await;
 
         // 认证输入若还挂着（失败退出、超时），一并收掉，别留下永远等不到的通道
         auth_prompts.cancel(&task_key, "会话已结束");
 
-        // 会话退出时注销 SFTP 句柄
+        // 会话退出时注销 SFTP 句柄与连接句柄
         sftp.unregister_sftp(&task_key).await;
+        if let Ok(mut map) = handles.lock() {
+            map.remove(&task_key);
+        }
 
         // 先清掉会话条目再报失败：否则界面立刻重试（例如用户刚确认完指纹）会撞上「会话已存在」
         if let Ok(mut map) = sessions.lock() {
@@ -523,6 +524,7 @@ pub async fn ssh_connect(
         }
 
         if let Err(err) = result {
+            let at = err.host.as_deref().zip(err.port);
             emit_phase_full(
                 &app,
                 &task_key,
@@ -531,6 +533,7 @@ pub async fn ssh_connect(
                 err.detail,
                 err.kind.as_deref(),
                 err.fingerprint.as_deref(),
+                at,
             );
             let _ = app.emit(&format!("ssh://exit/{task_key}"), None::<i32>);
         }
@@ -540,15 +543,17 @@ pub async fn ssh_connect(
 }
 
 /// 用户确认首次连接的指纹后调用：把待确认的密钥写进 known_hosts。
-/// 密钥材料一直留在 Rust 侧，不经过前端。
+/// 密钥材料一直留在 Rust 侧，不经过前端。跳板机与目标主机同样适用。
 #[tauri::command]
 pub fn ssh_trust_host(
     app: AppHandle,
     state: State<'_, SshState>,
     host: String,
     port: u16,
+    fingerprint: String,
 ) -> Result<String, String> {
-    let key = pending_key(&state.pending_keys, &host, port)?;
+    // 只信任用户在界面上核对过的那一把（按指纹挑），不是「这个地址最近出示的随便哪一把」
+    let key = chain::pending_by_fingerprint(&state.pending_keys, &host, port, &fingerprint)?;
     known_hosts::trust(&app, &host, port, &key)?;
     Ok(known_hosts::fingerprint_of(&key))
 }
@@ -560,12 +565,12 @@ pub fn ssh_replace_host_key(
     state: State<'_, SshState>,
     host: String,
     port: u16,
+    fingerprint: String,
 ) -> Result<String, String> {
-    let key = pending_key(&state.pending_keys, &host, port)?;
+    let key = chain::pending_by_fingerprint(&state.pending_keys, &host, port, &fingerprint)?;
     let removed = known_hosts::replace(&app, &host, port, &key)?;
 
     // 替换后复查：旧指纹也可能来自 OpenSSH 的 ~/.ssh/known_hosts，而我们不写那个文件。
-    // 不复查的话用户会陷入「替换了却还是连不上」的死胡同。
     match known_hosts::verify(&app, &host, port, &key) {
         Verdict::Trusted => Ok(format!(
             "已替换 {removed} 条记录，新指纹 {}",
@@ -576,43 +581,21 @@ pub fn ssh_replace_host_key(
              请自行删除那一行（或改成该主机的真实公钥）后再连接 —— TermX 不会去改你自己的 OpenSSH 配置。"
         )),
         Verdict::Unknown { .. } => Err("替换后仍未生效，请重试".to_string()),
+        Verdict::CheckFailed { reason, .. } => Err(format!("已替换 {removed} 条记录，但复查失败：{reason}")),
     }
 }
 
-/// 取这台主机最近一次握手看到的公钥（只读，不取走）。
-///
-/// 同主机的并发会话共用这一份材料：谁先点「确认」都能拿到同一把密钥，
-/// 不会出现「第二条会话确认时被告知没有待确认密钥」。重复确认只是把同一条
-/// 记录再写一遍 —— known_hosts::trust 已做幂等，不会留下重复行。
-fn pending_key(
-    keys: &Arc<Mutex<HashMap<String, PublicKey>>>,
-    host: &str,
-    port: u16,
-) -> Result<PublicKey, String> {
-    keys.lock()
-        .map_err(|_| "待确认密钥表已损坏".to_string())?
-        .get(&host_port_key(host, port))
-        .cloned()
-        .ok_or_else(|| "没有待确认的主机密钥，请重新发起连接".to_string())
-}
-
-/// 键盘输入 → 远端
+/// 键盘输入 → 远端（按会话编码编码后发送）
 #[tauri::command]
 pub fn ssh_write(state: State<'_, SshState>, key: String, data: String) -> Result<(), String> {
     let sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
     let tx = sessions.get(&key).ok_or_else(|| format!("未找到会话 {key}"))?;
-    tx.send(SshCommand::Data(data.into_bytes()))
-        .map_err(|_| "会话已关闭".to_string())
+    tx.send(SshCommand::Data(data)).map_err(|_| "会话已关闭".to_string())
 }
 
 /// 终端尺寸变化 → 远端 PTY
 #[tauri::command]
-pub fn ssh_resize(
-    state: State<'_, SshState>,
-    key: String,
-    cols: u32,
-    rows: u32,
-) -> Result<(), String> {
+pub fn ssh_resize(state: State<'_, SshState>, key: String, cols: u32, rows: u32) -> Result<(), String> {
     let sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
     let tx = sessions.get(&key).ok_or_else(|| format!("未找到会话 {key}"))?;
     tx.send(SshCommand::Resize { cols, rows })
@@ -620,9 +603,6 @@ pub fn ssh_resize(
 }
 
 /// 在一条已经认证成功的会话上量真正的端到端往返（见 [`SshRttReport`]）。
-///
-/// 这是「延迟」唯一站得住的口径：连接已经建立，往返必须真的走一趟网络，
-/// 本机代理没法替对端作答；也不会在服务端 sshd 日志里留下预认证失败记录。
 #[tauri::command]
 pub async fn ssh_ping_rtt(
     state: State<'_, SshState>,
@@ -635,7 +615,6 @@ pub async fn ssh_ping_rtt(
 
     let (reply_tx, reply_rx) = oneshot::channel();
     {
-        // 锁只在这个块里持有：下面要 await，不能把 std 的守卫带过 await 点
         let sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
         let sender = sessions.get(&key).ok_or_else(|| format!("未找到会话 {key}"))?;
         sender
@@ -647,8 +626,8 @@ pub async fn ssh_ping_rtt(
             .map_err(|_| "会话已关闭".to_string())?;
     }
 
-    // 会话任务里最多等 samples 次超时，这里再放宽一层，避免命令永远挂住
-    let budget = timeout * (samples + 1);
+    // 测量排在同一连接的其它测量之后，预算再放宽一层，避免命令永远挂住
+    let budget = timeout * (samples * 2 + 1);
     match tokio::time::timeout(budget, reply_rx).await {
         Ok(Ok(report)) => Ok(report),
         Ok(Err(_)) => Err("会话在测量过程中结束".to_string()),
@@ -658,21 +637,89 @@ pub async fn ssh_ping_rtt(
 
 #[tauri::command]
 pub fn ssh_disconnect(state: State<'_, SshState>, key: String) -> Result<(), String> {
-    // 认证还没结束（比如正卡在键盘交互等输入）时也要把它叫醒，
-    // 否则会话任务会一直挂着，用户点了「断开」却什么都没发生
+    // 认证还没结束（比如正卡在键盘交互等输入）时也要把它叫醒
     state.auth_prompts.cancel(&key, "用户断开了连接");
-    let mut sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
-    if let Some(tx) = sessions.remove(&key) {
+    let sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
+    // 不在这里移除条目：会话任务收尾时自己移除（连接中途取消也能走完整的清理）
+    if let Some(tx) = sessions.get(&key) {
         let _ = tx.send(SshCommand::Close);
     }
     Ok(())
+}
+
+/* ------------------------------ 远端命令（exec） ------------------------------ */
+
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct ExecOutput {
+    pub code: Option<u32>,
+    pub stdout: String,
+    pub stderr: String,
+    /// 输出超过上限被截断
+    pub truncated: bool,
+}
+
+const EXEC_OUTPUT_LIMIT: usize = 1024 * 1024;
+
+/// 在已有连接上开一个 exec 通道跑一条命令（不占用交互 shell）
+pub async fn exec_on(handle: &SshHandle, command: &str, timeout: Duration) -> Result<ExecOutput, String> {
+    let work = async {
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("打开 exec 通道失败：{e}"))?;
+        channel
+            .exec(true, command.as_bytes().to_vec())
+            .await
+            .map_err(|e| format!("执行远端命令失败：{e}"))?;
+        let mut out = ExecOutput::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::Data { data } => {
+                    if stdout.len() < EXEC_OUTPUT_LIMIT {
+                        stdout.extend_from_slice(&data);
+                    } else {
+                        out.truncated = true;
+                    }
+                }
+                ChannelMsg::ExtendedData { data, .. } => {
+                    if stderr.len() < EXEC_OUTPUT_LIMIT {
+                        stderr.extend_from_slice(&data);
+                    }
+                }
+                ChannelMsg::ExitStatus { exit_status } => out.code = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        out.stdout = String::from_utf8_lossy(&stdout).into_owned();
+        out.stderr = String::from_utf8_lossy(&stderr).into_owned();
+        Ok(out)
+    };
+    tokio::time::timeout(timeout, work)
+        .await
+        .map_err(|_| format!("远端命令 {} 秒内没有结束", timeout.as_secs()))?
+}
+
+/// 在会话所在主机上执行一条非交互命令（监控采样、传输后校验用）
+#[tauri::command]
+pub async fn ssh_exec(
+    state: State<'_, SshState>,
+    key: String,
+    command: String,
+    timeout_ms: Option<u64>,
+) -> Result<ExecOutput, String> {
+    let handle = state.handle(&key).ok_or_else(|| format!("未找到会话 {key}（可能已断开）"))?;
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(15_000).clamp(500, 600_000));
+    exec_on(&handle, &command, timeout).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use russh::client::AuthResult;
-    use russh::keys::HashAlg;
+    use russh::keys::{HashAlg, PublicKey, PublicKeyOrCertificate};
     use std::time::Duration;
 
     /// 测试用 handler：只记录指纹，不需要 AppHandle
@@ -1030,22 +1077,38 @@ mod tests {
     /// （读而不是取走 —— 取走会让第二条会话的「确认指纹」报「没有待确认的密钥」）
     #[test]
     fn pending_key_is_readable_by_every_concurrent_session() {
-        let keys = Arc::new(Mutex::new(HashMap::new()));
-        keys.lock()
-            .unwrap()
-            .insert(host_port_key("18.216.234.51", 22), fixture_key());
+        let keys: PendingKeys = Arc::new(Mutex::new(HashMap::new()));
+        let fp = known_hosts::fingerprint_of(&fixture_key());
+        chain::remember_pending(&keys, "18.216.234.51", 22, fixture_key());
 
-        let first = pending_key(&keys, "18.216.234.51", 22).expect("第一条会话应能读到待确认密钥");
-        let second = pending_key(&keys, "18.216.234.51", 22).expect("并发的第二条会话也应能读到同一把");
-        assert_eq!(
-            known_hosts::fingerprint_of(&first),
-            known_hosts::fingerprint_of(&second),
-            "两条会话看到的必须是同一把密钥"
-        );
+        let first = chain::pending_by_fingerprint(&keys, "18.216.234.51", 22, &fp).expect("第一条会话应能读到待确认密钥");
+        let second = chain::pending_by_fingerprint(&keys, "18.216.234.51", 22, &fp).expect("并发的第二条会话也应能读到同一把");
+        assert_eq!(known_hosts::fingerprint_of(&first), known_hosts::fingerprint_of(&second));
 
         // 主机与端口都是维度：别的目标不能串到这台主机的材料上
-        assert!(pending_key(&keys, "49.235.166.66", 22).is_err());
-        assert!(pending_key(&keys, "18.216.234.51", 2222).is_err());
+        assert!(chain::pending_by_fingerprint(&keys, "49.235.166.66", 22, &fp).is_err());
+        assert!(chain::pending_by_fingerprint(&keys, "18.216.234.51", 2222, &fp).is_err());
+    }
+
+    /// 用户核对的是 A、对端随后换成了 B：确认 A 只能写入 A；拿 B 的指纹去确认也只会写入 B；
+    /// 拿一个从没出示过的指纹去确认必须失败
+    #[test]
+    fn trust_is_bound_to_the_fingerprint_the_user_saw() {
+        let keys: PendingKeys = Arc::new(Mutex::new(HashMap::new()));
+        let a = fixture_key();
+        let b: PublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC3qHhWjgK6jCQ45pmQUhuW+ECM2RsatUtFIp8wXXNI3".parse().unwrap();
+        let (fa, fb) = (known_hosts::fingerprint_of(&a), known_hosts::fingerprint_of(&b));
+        chain::remember_pending(&keys, "h", 22, a.clone());
+        chain::remember_pending(&keys, "h", 22, b.clone());
+        assert_eq!(chain::pending_by_fingerprint(&keys, "h", 22, &fa).unwrap().key_data(), a.key_data());
+        assert_eq!(chain::pending_by_fingerprint(&keys, "h", 22, &fb).unwrap().key_data(), b.key_data());
+        let err = chain::pending_by_fingerprint(&keys, "h", 22, "SHA256:never-shown").unwrap_err();
+        assert!(err.contains("换了钥匙"), "{err}");
+        // 同一把钥匙重复出示不会堆积
+        for _ in 0..20 {
+            chain::remember_pending(&keys, "h", 22, a.clone());
+        }
+        assert_eq!(keys.lock().unwrap().get("h:22").unwrap().len(), 2);
     }
 
     /// 连上一台真机并起一个 shell 通道；连接句柄要一起返回，否则连接会被丢掉
@@ -1065,7 +1128,7 @@ mod tests {
             "密码认证未通过（{user}@{host}）"
         );
 
-        let mut channel = session.channel_open_session().await.expect("打开会话通道失败");
+        let channel = session.channel_open_session().await.expect("打开会话通道失败");
         channel
             .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
             .await

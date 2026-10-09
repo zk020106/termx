@@ -1,0 +1,23 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"allowImportingTsExtensions": false,
+		"outDir": ".tmp/test-build",
+		"rootDir": "src",
+		"sourceMap": false
+	},
+	"include": [],
+	"files": [
+		"src/lib/connectPlan.ts",
+		"src/lib/replayBuffer.ts",
+		"src/lib/hostTerminal.ts",
+		"src/lib/listenPorts.ts",
+		"src/lib/hostMetrics.ts",
+		"src/lib/hostImport.ts",
+		"src/lib/transferNames.ts",
+		"src/lib/sensitive.ts",
+		"src/lib/pathSafety.ts",
+		"src/lib/configSecrets.ts"
+	]
+}

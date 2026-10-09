@@ -23,7 +23,10 @@ import type { Accent, ThemeMode } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { exportConfig, mergeConfig, parseConfigFile } from "@/lib/configBackup";
 import { createVerifier, lockCryptoAvailable, verifyPassword } from "@/lib/lock";
+import { expandHome, parseSshConfig, toHosts } from "@/lib/hostImport";
 import { detectPlatform } from "@/lib/platform";
+import { fsLocalHome, fsLocalReadFile } from "@/lib/sftp";
+import { useHostsStore } from "@/store/hosts";
 import { useLockStore } from "@/store/lock";
 import { useSettingsStore } from "@/store/settings";
 import { useThemeStore } from "@/store/theme";
@@ -47,7 +50,7 @@ const KEYCHAIN_LABEL = {
  *
  * 这一页不放假控件：能接真的就接到真实链路（主题/强调色/密度 → useThemeStore，
  * 终端偏好与安全/数据偏好 → useSettingsStore → 配置文件 + xterm 运行时选项），
- * 暂时没有落地路径的（读取 ~/.ssh/config、known_hosts 列表、定时加密备份）
+ * 暂时没有落地路径的（known_hosts 列表、定时加密备份）
  * 直接禁用并写明原因，绝不返回「看起来成功」的假提示。
  * ========================================================================== */
 
@@ -182,6 +185,29 @@ export default function Settings() {
 	const startLocked = useSettingsStore((s) => s.startLocked);
 	const lockVerifier = useSettingsStore((s) => s.lockVerifier);
 	const sshConfigPath = useSettingsStore((s) => s.sshConfigPath);
+	const [sshImporting, setSshImporting] = useState(false);
+	const importSshConfig = async () => {
+		setSshImporting(true);
+		try {
+			const home = await fsLocalHome();
+			const path = expandHome(sshConfigPath.trim(), home) ?? sshConfigPath;
+			const result = parseSshConfig(await fsLocalReadFile(path));
+			const store = useHostsStore.getState();
+			const defaultUser = home.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || undefined;
+			const { hosts, conflicts } = toHosts(result.hosts, store.hosts, { home, defaultUser });
+			for (const h of hosts) store.upsertHost(h);
+			const notes = [...conflicts, ...result.skipped];
+			toast({
+				title: hosts.length > 0 ? `已从 ${path} 导入 ${hosts.length} 台主机` : "没有新的主机可导入",
+				description: notes.length ? `跳过 ${notes.length} 项：${notes.slice(0, 3).join("；")}${notes.length > 3 ? "…" : ""}` : "密码未导入，首次连接时输入",
+				tone: hosts.length > 0 ? "success" : "warning",
+			});
+		} catch (error) {
+			toast({ title: "导入 ~/.ssh/config 失败", description: String(error), tone: "danger" });
+		} finally {
+			setSshImporting(false);
+		}
+	};
 	const setTerminal = useSettingsStore((s) => s.setTerminal);
 	const setSecurity = useSettingsStore((s) => s.setSecurity);
 	const setSshConfigPath = useSettingsStore((s) => s.setSshConfigPath);
@@ -273,6 +299,17 @@ export default function Settings() {
 				description: `新增 ${summary.hostsAdded} 台主机，更新 ${summary.hostsUpdated} 台`,
 				tone: "success",
 			});
+			// 导入文件里的旧版明文密码：如实说明去向（不会写进配置文件）
+			if (summary.secretsMigrated + summary.secretsSessionOnly > 0) {
+				toast({
+					title: "导入文件里的明文密码已移出配置",
+					description:
+						summary.secretsSessionOnly > 0
+							? `${summary.secretsMigrated} 个存入系统钥匙串；${summary.secretsSessionOnly} 个因钥匙串不可用只保留到本次退出`
+							: `${summary.secretsMigrated} 个已存入系统钥匙串`,
+					tone: summary.secretsSessionOnly > 0 ? "warning" : "default",
+				});
+			}
 		} catch (error) {
 			toast({ title: "导入失败", description: error instanceof Error ? error.message : "文件读不动", tone: "danger" });
 		} finally {
@@ -857,12 +894,17 @@ export default function Settings() {
 											<Field label="配置文件路径" className="flex-1">
 												<Input value={sshConfigPath} onChange={(e) => setSshConfigPath(e.target.value)} spellCheck={false} />
 											</Field>
-											<Button variant="primary" icon="icon-[lucide--file-input]" disabled>
-												导入
+											<Button
+												variant="primary"
+												icon="icon-[lucide--file-input]"
+												disabled={sshImporting}
+												onClick={() => void importSshConfig()}
+											>
+												{sshImporting ? "导入中…" : "导入"}
 											</Button>
 										</div>
 										<p className="text-[10.5px] leading-4 text-faint">
-											读取本机文件需要新增原生命令（Rust 端 fs 读取），本轮未接线，按钮已禁用。
+											导入 Host 块的地址、用户、端口、IdentityFile 与 ProxyJump；通配符块、Match、Include 不导入，密码不导入。
 										</p>
 									</div>
 								</Panel>
