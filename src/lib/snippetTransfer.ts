@@ -4,7 +4,7 @@ import type { Snippet } from "@/data/types";
  * 片段导入 / 导出 —— 移植自 Netcatty domain/snippetTransfer.ts（GPL-3.0-or-later），
  * 文件格式与 Netcatty 相同（kind = "netcatty.snippets"，version 2，兼容 1），两边可以互相导入。
  * 字段对应：termx name ↔ label，group ↔ package，description ↔ description；
- * termx 没有的字段（tags / targetGroups / shortkey…）导出时给默认值，导入时忽略。
+ * termx 没有的字段（tags / targetGroups…）导出时给默认值，导入时忽略；shortkey 双向保留。
  * 冲突判定与 Netcatty 一样按命令文本：skip 跳过，overwrite 覆盖原片段（保留 id）。
  * ========================================================================== */
 
@@ -20,6 +20,7 @@ export interface SnippetExportItem {
 	tags?: string[];
 	package?: string;
 	description?: string;
+	shortkey?: string;
 }
 
 export interface SnippetExportPayload {
@@ -81,6 +82,7 @@ const toExportItem = (snippet: Snippet): SnippetExportItem => ({
 	tags: [],
 	package: snippet.group === DEFAULT_GROUP ? "" : snippet.group,
 	...(snippet.description ? { description: snippet.description } : {}),
+	...(snippet.shortkey ? { shortkey: snippet.shortkey } : {}),
 });
 
 export function buildSnippetExportPayload(snippets: Snippet[], exportedAt = new Date().toISOString()): SnippetExportPayload {
@@ -123,6 +125,7 @@ function sanitizeImportItem(value: unknown): SnippetExportItem | null {
 		tags: Array.isArray(value.tags) ? uniqueStrings(value.tags) : [],
 		package: typeof value.package === "string" ? value.package.trim() : "",
 		description: typeof value.description === "string" && value.description.trim() ? value.description.trim() : undefined,
+		shortkey: typeof value.shortkey === "string" && value.shortkey.trim() ? value.shortkey.trim() : undefined,
 	};
 }
 
@@ -188,6 +191,7 @@ export function mergeSnippetImportPayload(input: {
 		command: item.command,
 		variables: input.extractVariables(item.command),
 		...(item.description ? { description: item.description } : {}),
+		...(item.shortkey ? { shortkey: item.shortkey } : {}),
 	});
 	for (const item of input.payload.snippets) {
 		const idx = commandToIndex.get(item.command);

@@ -22,6 +22,7 @@ import {
 	type SnippetImportConflictAction,
 } from "@/lib/snippetTransfer";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ShellHistoryDrawer, ShortkeyField } from "@/components/snippets/SnippetsExtras";
 import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useSearchParams } from "react-router";
 
@@ -75,6 +76,11 @@ export default function Snippets() {
 	const [deleteGroup, setDeleteGroup] = useState<string | null>(null);
 	const [deleteSnippet, setDeleteSnippet] = useState<Snippet | null>(null);
 	const [pendingImport, setPendingImport] = useState<{ payload: SnippetExportPayload; conflicts: number } | null>(null);
+	/* Netcatty 多选（snippets.selection.*）与 Shell 历史面板 */
+	const [multiSelect, setMultiSelect] = useState(false);
+	const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+	const [bulkDelete, setBulkDelete] = useState<string[] | null>(null);
+	const [historyOpen, setHistoryOpen] = useState(false);
 
 	/* ------------------------------ 派生数据 ------------------------------ */
 
@@ -331,6 +337,44 @@ export default function Snippets() {
 	const copySnippet = (item: Snippet) => {
 		void navigator.clipboard?.writeText(item.command).catch(() => undefined);
 		toast({ title: "命令已复制", description: item.command });
+	};
+
+	const clearSelection = () => {
+		setSelectedIds(new Set());
+		setMultiSelect(false);
+	};
+	const toggleSelected = (id: string) =>
+		setSelectedIds((prev) => {
+			const next = new Set(prev);
+			if (next.has(id)) next.delete(id);
+			else next.add(id);
+			return next;
+		});
+	const confirmBulkDelete = () => {
+		if (!bulkDelete) return;
+		const doomed = new Set(bulkDelete.filter((id) => library.some((item) => item.id === id)));
+		setBulkDelete(null);
+		if (doomed.size === 0) {
+			clearSelection();
+			return;
+		}
+		setAllSnippets(library.filter((item) => !doomed.has(item.id)));
+		if (doomed.has(selectedId)) setSelectedId("");
+		toast({ title: `已删除 ${doomed.size} 个所选项目。`, tone: "success" });
+		clearSelection();
+	};
+	/** Netcatty saveHistoryAsSnippet：放进当前分组 */
+	const saveHistoryAsSnippet = (command: string, label: string) => {
+		const next: Snippet = {
+			...draftSnippet(),
+			id: `sn-${crypto.randomUUID().slice(0, 12)}`,
+			name: label,
+			command,
+			group: group !== ALL_GROUPS ? group : "默认",
+			variables: extractVariables(command),
+		};
+		useSnippetsStore.getState().upsert(next);
+		toast({ title: "已保存为代码片段", description: label, tone: "success" });
 	};
 
 	/** 导出（Netcatty exportSnippetList：netcatty.snippets v2 JSON） */
@@ -705,6 +749,50 @@ export default function Snippets() {
 							</Button>
 						</div>
 					</div>
+					<div className="flex items-center gap-1 border-b border-border px-2 py-1">
+						<Button size="sm" variant={historyOpen ? "primary" : "ghost"} icon="icon-[lucide--clock]" onClick={() => setHistoryOpen(!historyOpen)}>
+							Shell 历史
+						</Button>
+						<div className="flex-1" />
+						<Button
+							size="sm"
+							variant={multiSelect ? "primary" : "ghost"}
+							icon="icon-[lucide--square-check]"
+							title="选择代码片段"
+							aria-label="选择代码片段"
+							onClick={() => (multiSelect ? clearSelection() : setMultiSelect(true))}
+						/>
+					</div>
+					{multiSelect && (
+						<div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1.5">
+							<span className="text-[11px] text-muted">已选择 {selectedIds.size} 个</span>
+							<div className="flex-1" />
+							<Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set(filtered.map((item) => item.id)))}>
+								选择当前显示
+							</Button>
+							<Button size="sm" variant="ghost" onClick={clearSelection}>
+								取消选择
+							</Button>
+							<Button
+								size="sm"
+								variant="primary"
+								icon="icon-[lucide--download]"
+								disabled={selectedIds.size === 0}
+								onClick={() => void exportSnippets(library.filter((item) => selectedIds.has(item.id)), "selected")}
+							>
+								导出选中（{selectedIds.size}）
+							</Button>
+							<Button
+								size="sm"
+								variant="danger"
+								icon="icon-[lucide--trash-2]"
+								disabled={selectedIds.size === 0}
+								onClick={() => setBulkDelete(library.filter((item) => selectedIds.has(item.id)).map((item) => item.id))}
+							>
+								删除（{selectedIds.size}）
+							</Button>
+						</div>
+					)}
 
 					<div className="px-2 pt-2">
 						<div className="relative">
@@ -761,7 +849,8 @@ export default function Snippets() {
 												key={item.id}
 												item={item}
 												active={item.id === selectedId}
-												onSelect={() => selectSnippet(item.id)}
+												checked={multiSelect ? selectedIds.has(item.id) : undefined}
+												onSelect={() => (multiSelect ? toggleSelected(item.id) : selectSnippet(item.id))}
 												onContextMenu={(event) => openMenu(event, { kind: "snippet", item })}
 											/>
 										))}
@@ -863,6 +952,12 @@ export default function Snippets() {
 								className="font-sans"
 							/>
 						</Field>
+
+						<ShortkeyField
+							value={draft.shortkey}
+							others={library.filter((item) => item.id !== draft.id)}
+							onChange={(shortkey) => setDraft((prev) => (prev ? { ...prev, shortkey } : prev))}
+						/>
 					</div>
 				)}
 			</Drawer>
@@ -1034,6 +1129,27 @@ export default function Snippets() {
 					个与现有片段的命令相同。选择跳过还是覆盖这些重复项。
 				</p>
 			</Modal>
+			<Modal
+				open={bulkDelete !== null}
+				onClose={() => setBulkDelete(null)}
+				title={`删除选中的 ${bulkDelete?.length ?? 0} 项？`}
+				icon="icon-[lucide--trash-2]"
+				width={420}
+				footer={
+					<>
+						<Button size="sm" onClick={() => setBulkDelete(null)}>
+							取消
+						</Button>
+						<Button size="sm" variant="danger" icon="icon-[lucide--trash-2]" onClick={confirmBulkDelete}>
+							删除
+						</Button>
+					</>
+				}
+			>
+				<p>所选项目将被永久删除，此操作无法撤销。</p>
+			</Modal>
+
+			<ShellHistoryDrawer open={historyOpen} onClose={() => setHistoryOpen(false)} onSaveAsSnippet={(entry, label) => saveHistoryAsSnippet(entry.command, label)} />
 		</WindowChrome>
 	);
 }
@@ -1042,11 +1158,14 @@ export default function Snippets() {
 function SnippetRow({
 	item,
 	active,
+	checked,
 	onSelect,
 	onContextMenu,
 }: {
 	item: Snippet;
 	active: boolean;
+	/** 多选模式下的勾选状态；undefined = 不在多选模式 */
+	checked?: boolean;
 	onSelect: () => void;
 	onContextMenu: (event: ReactMouseEvent) => void;
 }) {
@@ -1061,7 +1180,11 @@ function SnippetRow({
 			)}
 		>
 			<div className="flex items-center gap-2">
+				{checked !== undefined && (
+					<span className={cn("size-3.5 shrink-0", checked ? "icon-[lucide--square-check] text-primary" : "icon-[lucide--square] text-faint")} />
+				)}
 				<span className="min-w-0 flex-1 truncate text-[12px] font-medium text-surface-foreground">{item.name}</span>
+				{item.shortkey && <span className="shrink-0 rounded bg-surface-raised px-1 font-mono text-[9.5px] text-muted">{item.shortkey}</span>}
 				<span
 					className={cn("shrink-0 font-mono text-[9.5px]", item.variables.length > 0 ? "text-primary" : "text-faint")}
 				>

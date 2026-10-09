@@ -2,6 +2,7 @@ import { Component, lazy, Suspense, useEffect, useState, type ErrorInfo, type Re
 import { HashRouter, Navigate, Route, Routes, useLocation } from "react-router";
 import { LockGate } from "@/components/chrome/LockGate";
 import { ScreenActiveContext } from "@/lib/screenActive";
+import { SnippetVariablesDialog } from "@/components/snippets/SnippetVariablesDialog";
 
 /* 路由与 termx-design-brief「06 设计交付清单」的 16 个界面一一对应。
  * 其中 /welcome、/palette、/updater 是整页或浮层，不套应用外壳；
@@ -67,6 +68,7 @@ export default function App() {
 						</Routes>
 					</Suspense>
 					<KeepAliveWorkspace />
+					<SnippetVariablesDialog />
 				</ScreenBoundary>
 			</LockGate>
 		</HashRouter>

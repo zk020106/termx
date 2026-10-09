@@ -9,7 +9,10 @@ import "@/styles/theme.css";
 import App from "@/App";
 import type { ConfigLoadIssue } from "@/lib/persist";
 import { wireForwardAutoStart } from "@/lib/forwardManager";
-import { hydrateStores, startAutosave, takeSecretMigrationReport } from "@/store/persistence";
+import { hydrateStores, reloadFromDisk, startAutosave, takeSecretMigrationReport } from "@/store/persistence";
+import { useSessionsStore } from "@/store/sessions";
+import { isTauri } from "@/lib/tauri";
+import { currentWindowLabel, isSessionWindow, takeSessionWindowPayload } from "@/lib/window";
 import { useHostsStore } from "@/store/hosts";
 import { toast } from "@/store/toast";
 
@@ -25,10 +28,30 @@ const hydration = hydrateStores().then((issue) => {
 	if (issue) window.setTimeout(() => reportConfigIssue(issue), 600);
 	const migration = takeSecretMigrationReport();
 	if (migration) window.setTimeout(() => reportSecretMigration(migration), 800);
-	void wireForwardAutoStart();
+	// 端口转发自启只由主窗口做一次（Netcatty：会话窗口不跑托盘 / 自启这类全局副作用）
+	if (!isSessionWindow()) void wireForwardAutoStart();
 	return issue;
 });
 await Promise.race([hydration, new Promise((resolve) => window.setTimeout(resolve, 3000))]);
+
+// 多窗口：别的窗口写过配置就重新载入（后端 config_save 广播来源窗口标签）
+if (isTauri()) {
+	void import("@tauri-apps/api/event").then(({ listen }) =>
+		listen<string>("config://changed", (event) => {
+			if (event.payload !== currentWindowLabel()) void reloadFromDisk();
+		}),
+	);
+}
+
+// 「复制标签页到新窗口」打开的会话窗口：取走载荷，按原布局克隆标签（Netcatty createSessionFromCloneSource）
+if (isSessionWindow()) {
+	void hydration.then(async () => {
+		const payload = await takeSessionWindowPayload().catch(() => null);
+		if (payload?.tab && Array.isArray(payload.panes)) {
+			useSessionsStore.getState().importTab(payload.tab, payload.panes);
+		}
+	});
+}
 
 function reportSecretMigration(report: NonNullable<ReturnType<typeof takeSecretMigrationReport>>) {
 	if (report.sessionOnly.length === 0) {

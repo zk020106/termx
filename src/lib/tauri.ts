@@ -36,6 +36,8 @@ export async function spawnLocalShell(
 
 	try {
 		await invoke("pty_spawn", { key, cols, rows });
+		// 会话归属登记：所在窗口关闭时后端结束它（多窗口，见 app_window.rs）
+		void invoke("window_own_session", { kind: "pty", key }).catch(() => undefined);
 	} catch (error) {
 		unlistenData();
 		unlistenExit();

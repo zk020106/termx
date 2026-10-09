@@ -13,7 +13,16 @@ use keyring::Entry;
 /// 钥匙串里的服务名，与应用的 bundle identifier 保持一致
 const SERVICE: &str = "dev.termx.app";
 
+/// 前端可以读写的账户：密钥库的数据密钥 / 私钥口令只给 Rust 用（`key_vault.rs`）
+fn guard(account: &str) -> Result<(), String> {
+    if crate::key_vault::PROTECTED_PREFIXES.iter().any(|p| account.starts_with(p)) {
+        return Err("这个钥匙串条目只允许 TermX 内部使用".to_string());
+    }
+    Ok(())
+}
+
 fn entry(host_id: &str) -> Result<Entry, String> {
+    guard(host_id)?;
     Entry::new(SERVICE, host_id).map_err(|e| format!("无法访问系统钥匙串：{e}"))
 }
 
@@ -65,4 +74,15 @@ pub async fn secret_available() -> bool {
     })
     .await
     .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn key_vault_accounts_are_not_reachable_from_the_frontend() {
+        assert!(super::guard("key-vault:abc").is_err());
+        assert!(super::guard("key-passphrase:abc").is_err());
+        assert!(super::guard("identity:abc").is_ok());
+        assert!(super::guard("host-1").is_ok());
+    }
 }

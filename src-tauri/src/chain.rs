@@ -340,6 +340,26 @@ pub async fn connect_chain(req: ChainRequest) -> Result<Chain, SessionError> {
     };
     emit_phase(&app, &key, "resolve", true, format!("{via}{}", route.join(" → ")));
 
+    // ProxyCommand 会在本机执行任意命令：每条（代入 %h/%p 后的）命令本次运行首次使用前，
+    // 都要用户在原生对话框里确认 —— 防止被注入的前端脚本借连接参数执行命令。
+    // 目标主机的主机密钥照常在 ClientHandler::check_server_key 里对 known_hosts 校验。
+    if let (Some(p), Some(first)) = (proxy.as_ref().filter(|p| p.is_command()), hops.first()) {
+        let line = transport::proxy_command_line(p, &first.host, first.port).map_err(SessionError::msg)?;
+        crate::fs_guard::confirm_native(
+            &app,
+            &format!("proxy-command\u{0}{line}"),
+            "确认运行 ProxyCommand",
+            format!(
+                "连接 {} 需要在本机运行下面的 ProxyCommand：\n\n{line}\n\n如果这不是你配置的命令，请点「取消」。",
+                first.display()
+            ),
+            "运行",
+        )
+        .await
+        .map_err(|_| SessionError::msg("已取消：没有允许运行 ProxyCommand".to_string()))?;
+        emit_phase(&app, &key, "tcp", true, format!("ProxyCommand：{line}"));
+    }
+
     let config = client_config();
     let mut opened: Vec<Arc<SshHandle>> = Vec::new();
 

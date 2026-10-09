@@ -1,3 +1,4 @@
+import { DEFAULT_SFTP_COLUMN_VISIBILITY, normalizeSftpColumnVisibility, type SftpColumnVisibility } from "@/lib/sftpColumns";
 import { isAccent, type Accent } from "./types";
 import { DEFAULT_KEYWORD_HIGHLIGHT_RULES, normalizeKeywordHighlightRules, type KeywordHighlightRule } from "@/components/terminal/netcatty/keywordHighlightRules";
 import type { CustomKeyBindings, HotkeyScheme } from "@/lib/keyBindings";
@@ -95,6 +96,8 @@ export interface TerminalPreferences {
 	smoothScrolling: boolean;
 	scrollOnInput: boolean;
 	disableBracketedPaste: boolean;
+	/** Netcatty autoUploadClipboardImageOnPaste：远端会话粘贴时剪贴板图片优先上传（默认关） */
+	autoUploadClipboardImageOnPaste: boolean;
 	clearWipesScrollback: boolean;
 	keywordHighlightEnabled: boolean;
 	keywordHighlightRules: KeywordHighlightRule[];
@@ -108,8 +111,16 @@ export interface TerminalPreferences {
 	sftpAutoSync: boolean;
 	/** 显示以 . 开头的隐藏文件（Netcatty sftpShowHiddenFiles） */
 	sftpShowHiddenFiles: boolean;
+	/** Netcatty sftpFollowTerminalCwd：侧栏 SFTP 跟随终端 cwd（OSC 7）变化 */
+	sftpFollowTerminalCwd: boolean;
 	/** 按扩展名记住的打开方式（Netcatty FileOpenerDialog「始终使用此方式打开」） */
 	sftpFileOpeners: Record<string, SftpFileOpener>;
+	/** SFTP 列表显示哪些列（Netcatty STORAGE_KEY_SFTP_VISIBLE_COLUMNS；名称列恒显示） */
+	sftpVisibleColumns: SftpColumnVisibility;
+	/** 目录置顶（Netcatty STORAGE_KEY_SFTP_DIRECTORIES_FIRST，默认开） */
+	sftpDirectoriesFirst: boolean;
+	/** 每台主机记住的视图模式：列表 / 树形（Netcatty STORAGE_KEY_SFTP_HOST_VIEW_MODES；本地栏键为 "local"） */
+	sftpHostViewModes: Record<string, "list" | "tree">;
 }
 
 export type SftpDoubleClickBehavior = "open" | "transfer";
@@ -176,6 +187,7 @@ export const DEFAULT_TERMINAL: TerminalPreferences = {
 	smoothScrolling: false,
 	scrollOnInput: true,
 	disableBracketedPaste: false,
+	autoUploadClipboardImageOnPaste: false,
 	clearWipesScrollback: true,
 	keywordHighlightEnabled: true,
 	keywordHighlightRules: DEFAULT_KEYWORD_HIGHLIGHT_RULES.map((rule) => ({ ...rule, patterns: [...rule.patterns] })),
@@ -186,7 +198,11 @@ export const DEFAULT_TERMINAL: TerminalPreferences = {
 	sftpDoubleClickBehavior: "open",
 	sftpAutoSync: false,
 	sftpShowHiddenFiles: false,
+	sftpFollowTerminalCwd: false,
 	sftpFileOpeners: {},
+	sftpVisibleColumns: { ...DEFAULT_SFTP_COLUMN_VISIBILITY },
+	sftpDirectoriesFirst: true,
+	sftpHostViewModes: {},
 };
 
 export const DEFAULT_SECURITY: SecurityPreferences = {
@@ -271,6 +287,15 @@ function pickNumber(value: unknown, allowed: readonly number[], fallback: number
 	return typeof value === "number" && allowed.includes(value) ? value : fallback;
 }
 
+function normalizeHostViewModes(value: unknown): Record<string, "list" | "tree"> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const out: Record<string, "list" | "tree"> = {};
+	for (const [key, mode] of Object.entries(value as Record<string, unknown>)) {
+		if (key && key.length <= 256 && (mode === "list" || mode === "tree")) out[key] = mode;
+	}
+	return out;
+}
+
 function pickBoolean(value: unknown, fallback: boolean): boolean {
 	return typeof value === "boolean" ? value : fallback;
 }
@@ -326,6 +351,7 @@ export function normalizePreferences(raw: unknown): Preferences {
 			smoothScrolling: pickBoolean(terminal.smoothScrolling, DEFAULT_TERMINAL.smoothScrolling),
 			scrollOnInput: pickBoolean(terminal.scrollOnInput, DEFAULT_TERMINAL.scrollOnInput),
 			disableBracketedPaste: pickBoolean(terminal.disableBracketedPaste, DEFAULT_TERMINAL.disableBracketedPaste),
+			autoUploadClipboardImageOnPaste: pickBoolean(terminal.autoUploadClipboardImageOnPaste, DEFAULT_TERMINAL.autoUploadClipboardImageOnPaste),
 			clearWipesScrollback: pickBoolean(terminal.clearWipesScrollback, DEFAULT_TERMINAL.clearWipesScrollback),
 			keywordHighlightEnabled: pickBoolean(terminal.keywordHighlightEnabled, DEFAULT_TERMINAL.keywordHighlightEnabled),
 			keywordHighlightRules: normalizeHighlightRules(terminal.keywordHighlightRules),
@@ -336,7 +362,11 @@ export function normalizePreferences(raw: unknown): Preferences {
 			sftpDoubleClickBehavior: pick(terminal.sftpDoubleClickBehavior, SFTP_DOUBLE_CLICK_BEHAVIORS, DEFAULT_TERMINAL.sftpDoubleClickBehavior),
 			sftpAutoSync: pickBoolean(terminal.sftpAutoSync, DEFAULT_TERMINAL.sftpAutoSync),
 			sftpShowHiddenFiles: pickBoolean(terminal.sftpShowHiddenFiles, DEFAULT_TERMINAL.sftpShowHiddenFiles),
+			sftpFollowTerminalCwd: pickBoolean(terminal.sftpFollowTerminalCwd, DEFAULT_TERMINAL.sftpFollowTerminalCwd),
 			sftpFileOpeners: normalizeFileOpeners(terminal.sftpFileOpeners),
+			sftpVisibleColumns: normalizeSftpColumnVisibility(terminal.sftpVisibleColumns),
+			sftpDirectoriesFirst: pickBoolean(terminal.sftpDirectoriesFirst, DEFAULT_TERMINAL.sftpDirectoriesFirst),
+			sftpHostViewModes: normalizeHostViewModes(terminal.sftpHostViewModes),
 		},
 		security: {
 			keychain: pickBoolean(security.keychain, DEFAULT_SECURITY.keychain),

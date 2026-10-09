@@ -13,6 +13,10 @@ mod ssh;
 mod ssh_auth;
 mod transfer;
 mod transport;
+mod app_window;
+mod zmodem;
+mod session_cwd;
+mod key_vault;
 #[cfg(test)]
 mod live_tests;
 
@@ -39,6 +43,14 @@ pub fn run() {
         .manage(SftpState::default())
         .manage(forward::ForwardState::default())
         .manage(transfer::TransferState::default())
+        .manage(zmodem::ZmodemState::default())
+        .manage(app_window::AppWindowState::default())
+        // 窗口销毁时断开它名下的会话（Netcatty：webContents destroyed 时清理该窗口的会话）
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                app_window::on_window_destroyed(window);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             pty::pty_spawn,
             pty::pty_write,
@@ -99,6 +111,28 @@ pub fn run() {
             fs_open::fs_local_copy,
             known_hosts::known_hosts_list,
             known_hosts::known_hosts_remove,
+            key_vault::key_vault_import,
+            key_vault::key_vault_generate,
+            key_vault::key_vault_delete,
+            key_vault::key_vault_set_passphrase,
+            key_vault::key_vault_status,
+            known_hosts::known_hosts_import,
+            session_cwd::ssh_session_pwd,
+            session_cwd::ssh_upload_clipboard_image,
+            ssh::ssh_write_bytes,
+            ssh::ssh_zmodem_release,
+            zmodem::zmodem_pick_upload_files,
+            zmodem::zmodem_read_chunk,
+            zmodem::zmodem_release_files,
+            zmodem::zmodem_pick_download_dir,
+            zmodem::zmodem_create_file,
+            zmodem::zmodem_write_chunk,
+            zmodem::zmodem_finish_file,
+            ssh::ssh_drain,
+            app_window::window_open_session,
+            app_window::window_take_session_payload,
+            app_window::window_own_session,
+            sftp::sftp_copy_between,
         ])
         .run(tauri::generate_context!())
         .expect("TermX 启动失败");

@@ -1,4 +1,6 @@
+import { openSessionInNewWindow } from "@/lib/window";
 import { WindowChrome } from "@/components/chrome/WindowChrome";
+import { GroupSettingsDrawer } from "@/components/host/GroupSettingsDrawer";
 import { useScreenActive } from "@/lib/screenActive";
 import { startForward, stopForward } from "@/lib/forwardManager";
 import { HostEditModal } from "@/components/host/HostEditModal";
@@ -7,9 +9,16 @@ import { SftpSidebar } from "@/components/sftp/SftpSidebar";
 import { observeSshLifecycle } from "@/components/terminal/sshCache";
 import { type TerminalHandle, type TerminalMatchInfo } from "@/components/terminal/Terminal";
 import { TerminalPane } from "@/components/terminal/TerminalPane";
+import { TERMINAL_TOOLBAR_ITEMS, TerminalToolbarItems } from "@/components/terminal/TerminalToolbarLayout";
+import { ShellHistoryDrawer } from "@/components/snippets/SnippetsExtras";
+import { resolveSnippetCommand } from "@/lib/snippetRun";
+import { draftSnippet, extractVariables } from "@/store/snippets";
 import { Button, IconButton, Kbd } from "@/components/ui/Button";
 import { StatusDot } from "@/components/ui/Display";
 import { Modal } from "@/components/ui/Overlay";
+import { toastClipboardImageUploadResult } from "@/components/terminal/Terminal";
+import { resolveRemoteCwd, setupOsc7Tracking } from "@/lib/terminalCwd";
+import { OSC7_SETUP_TARGETS, buildOsc7SetupExecCommand, runOsc7SetupAction } from "@/lib/osc7Setup";
 import { PromptModal } from "@/components/ui/PromptModal";
 import { ContextMenu, MenuHeader, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { isMiddleClickContextMenuEvent, resolveTerminalRightClick } from "@/components/terminal/terminalMenu";
@@ -137,6 +146,10 @@ export default function Workspace() {
 	const setTerminal = useSettingsStore((s) => s.setTerminal);
 
 	const [searchOpen, setSearchOpen] = useState(false);
+	const [shellHistoryOpen, setShellHistoryOpen] = useState(false);
+	/** Netcatty「配置目录追踪」对话框：记下发起时的格子 */
+	const [osc7SetupPane, setOsc7SetupPane] = useState<string | null>(null);
+	const [osc7SetupRunning, setOsc7SetupRunning] = useState(false);
 	const [query, setQuery] = useState("");
 	const [match, setMatch] = useState<TerminalMatchInfo>({ index: -1, count: 0 });
 	const [menu, setMenu] = useState<MenuState | null>(null);
@@ -473,6 +486,18 @@ export default function Workspace() {
 		toast({ title: `已复制标签页：${tab.title}`, tone: "default" });
 	};
 
+	/** Netcatty「复制标签页到新窗口」（copySessionToNewWindowWithCurrentShellImpl）：新窗口里按原布局克隆 */
+	const copyTabToNewWindow = (tabId: string) => {
+		setTabMenu(null);
+		const state = useSessionsStore.getState();
+		const tab = state.tabs.find((t) => t.id === tabId);
+		if (!tab) return;
+		const panes = state.panes.filter((p) => p.tabId === tabId).map((p) => ({ ...p, lines: [] }));
+		void openSessionInNewWindow(tab.title, { tab, panes }).catch(() => {
+			toast({ title: "无法在新窗口打开标签页", tone: "danger" });
+		});
+	};
+
 	const reconnectTab = (tabId: string) => {
 		useSessionsStore.getState().reconnectTab(tabId);
 		setTabMenu(null);
@@ -679,6 +704,54 @@ export default function Workspace() {
 		else void copySelection(paneId);
 	};
 
+	/** Netcatty useTerminalContextActions.onUploadClipboardImage + handleClipboardImageUploadResult */
+	const uploadClipboardImageInto = async (paneId: string) => {
+		closeMenu();
+		const handle = handleFor(paneId);
+		if (!handle) return;
+		toastClipboardImageUploadResult(await handle.uploadClipboardImage());
+	};
+
+	/** Netcatty Terminal.handleOsc7SetupConfirm */
+	const confirmOsc7Setup = async () => {
+		const paneId = osc7SetupPane;
+		const pane = paneId ? panes.find((p) => p.id === paneId) : undefined;
+		const handle = paneId ? handleFor(paneId) : null;
+		const key = pane?.sessionKey ?? null;
+		if (!paneId || !handle?.hasRemoteSession() || !key) {
+			setOsc7SetupPane(null);
+			return;
+		}
+		if (osc7SetupRunning) return;
+		const currentCwd = await resolveRemoteCwd(key);
+		if (!currentCwd) {
+			toast({ title: "目录追踪配置失败", tone: "danger" });
+			return;
+		}
+		setOsc7SetupRunning(true);
+		try {
+			const result = await runOsc7SetupAction({
+				status: "connected",
+				sessionId: key,
+				setupCommand: buildOsc7SetupExecCommand(currentCwd),
+				setupOsc7Tracking,
+				writeToSession: (_sessionId, data) => handle.writeToSession(data),
+				writeLocalTerminalData: (data) => handle.writeLocalTerminalData(data),
+			});
+			setOsc7SetupPane(null);
+			if (result.success) {
+				toast({ title: result.sentToTerminal ? "目录追踪配置已发送到终端" : "目录追踪已配置", tone: "success" });
+			} else {
+				toast({ title: result.error || "目录追踪配置失败", tone: "danger" });
+			}
+		} catch (error) {
+			toast({ title: error instanceof Error ? error.message : "目录追踪配置失败", tone: "danger" });
+		} finally {
+			setOsc7SetupRunning(false);
+			queueMicrotask(() => handle.focus());
+		}
+	};
+
 	const pasteSelectionInto = (paneId: string) => {
 		closeMenu();
 		if (!handleFor(paneId)?.pasteSelection()) {
@@ -874,28 +947,41 @@ export default function Workspace() {
 									</button>
 								)}
 
-								<IconButton
-									icon="icon-[lucide--columns-2]"
-									label={`水平分屏${kbd("split-horizontal") ? ` (${kbd("split-horizontal")})` : ""}`}
-									className="size-5.5"
-									onClick={splitRight}
-								/>
-
-								<IconButton
-									icon="icon-[lucide--rows-2]"
-									label={`垂直分屏${kbd("split-vertical") ? ` (${kbd("split-vertical")})` : ""}`}
-									className="size-5.5"
-									onClick={splitDown}
-								/>
-
-								<IconButton
-									icon="icon-[lucide--folder-tree]"
-									label={`切换 SFTP 面板${kbd("open-sftp") ? ` (${kbd("open-sftp")})` : ""}`}
-									className={cn("size-5.5", embeddedSftpOpen && "text-primary")}
-									onClick={toggleEmbeddedSftp}
-								/>
-
-								<div className="flex items-center rounded border border-border bg-surface p-0.5" title="切换分屏布局">
+<TerminalToolbarItems
+									available={[
+										"splitHorizontal",
+										"splitVertical",
+										"sftp",
+										"search",
+										"scripts",
+										"history",
+										// Netcatty：只对远端 shell 会话提供（shouldOfferOsc7SetupAction）
+										...(gridPanes.find((p) => p.id === focusId)?.sessionKey && gridPanes.find((p) => p.id === focusId)?.status === "connected" ? (["configureOsc7"] as const) : []),
+										"layout",
+									]}
+									renderItem={(id, mode) => {
+										const def = TERMINAL_TOOLBAR_ITEMS[id];
+										const label = id === "splitHorizontal"
+											? `水平分屏${kbd("split-horizontal") ? ` (${kbd("split-horizontal")})` : ""}`
+											: id === "splitVertical"
+												? `垂直分屏${kbd("split-vertical") ? ` (${kbd("split-vertical")})` : ""}`
+												: id === "sftp"
+													? `切换 SFTP 面板${kbd("open-sftp") ? ` (${kbd("open-sftp")})` : ""}`
+													: id === "search"
+														? `搜索终端${kbd("search-terminal") ? ` (${kbd("search-terminal")})` : ""}`
+														: def.label;
+										const action = () => {
+											if (id === "splitHorizontal") splitRight();
+											else if (id === "splitVertical") splitDown();
+											else if (id === "sftp") toggleEmbeddedSftp();
+											else if (id === "search") setSearchOpen(true);
+											else if (id === "scripts") useUiStore.getState().setActivity("snippets");
+											else if (id === "history") setShellHistoryOpen(true);
+											else if (id === "configureOsc7") setOsc7SetupPane(focusId);
+										};
+										if (id === "layout") {
+											return mode === "inline" ? (
+												<div key={id} className="flex items-center rounded border border-border bg-surface p-0.5" title="切换分屏布局">
 									{(["single", "horizontal", "vertical", "grid"] as SplitLayout[]).map((mode) => {
 										const info = LAYOUT_CHIP[mode];
 										const isCurrent = activeTab?.layout === mode && !effectiveMaximizedPaneId;
@@ -920,10 +1006,76 @@ export default function Workspace() {
 										);
 									})}
 								</div>
+											) : null;
+										}
+										return mode === "inline" ? (
+											<IconButton
+												key={id}
+												icon={def.icon}
+												label={label}
+												className={cn("size-5.5", id === "sftp" && embeddedSftpOpen && "text-primary", id === "search" && searchOpen && "text-primary")}
+												onClick={action}
+											/>
+										) : (
+											<MenuItem key={id} icon={def.icon} label={label} checked={id === "sftp" && embeddedSftpOpen} onClick={action} />
+										);
+									}}
+								/>
 							</div>
 						)}
 					</div>
 
+					{/* Netcatty TerminalView 的「配置目录追踪」对话框 */}
+					<Modal
+						open={osc7SetupPane !== null}
+						onClose={() => {
+							setOsc7SetupPane(null);
+							if (osc7SetupPane) queueMicrotask(() => handleFor(osc7SetupPane)?.focus());
+						}}
+						title="配置目录追踪"
+						width={640}
+						footer={
+							<div className="flex items-center gap-2">
+								<Button size="sm" variant="ghost" onClick={() => setOsc7SetupPane(null)}>
+									取消
+								</Button>
+								<Button size="sm" variant="primary" disabled={osc7SetupRunning} onClick={() => void confirmOsc7Setup()}>
+									{osc7SetupRunning ? "正在配置..." : "执行配置"}
+								</Button>
+							</div>
+						}
+					>
+						<div className="space-y-3">
+							<p className="text-xs text-muted">
+								TermX 会为当前远端用户添加 OSC 7 提示符配置。这样在 sudo 或 su 之后，SFTP 也能继续跟随终端目录。
+							</p>
+							<div className="rounded-md border border-border bg-surface-raised p-3">
+								<p className="mb-2 text-xs font-medium text-muted">可能写入的文件</p>
+								<div className="flex flex-wrap gap-2">
+									{OSC7_SETUP_TARGETS.map((target) => (
+										<code key={target} className="rounded bg-surface px-2 py-1 text-[11px] text-surface-foreground">
+											{target}
+										</code>
+									))}
+								</div>
+							</div>
+						</div>
+					</Modal>
+
+					<ShellHistoryDrawer
+						open={shellHistoryOpen}
+						onClose={() => setShellHistoryOpen(false)}
+						onSaveAsSnippet={(entry, label) => {
+							useSnippetsStore.getState().upsert({
+								...draftSnippet(),
+								id: `sn-${crypto.randomUUID().slice(0, 12)}`,
+								name: label,
+								command: entry.command,
+								variables: extractVariables(entry.command),
+							});
+							toast({ title: "已保存为代码片段", description: label, tone: "success" });
+						}}
+					/>
 					{/* 标签栏下方主体内容：主机库大本营 or 终端分屏 */}
 					{isVaults ? (
 						<div className="min-h-0 flex-1 overflow-hidden">
@@ -1068,6 +1220,9 @@ export default function Workspace() {
 							<MenuHeader title="终端" subtitle={panes.find((p) => p.id === menu.paneId)?.title ?? activeHost?.name ?? "本地终端"} />
 							<MenuItem icon="icon-[lucide--copy]" label="复制" kbd={kbd("copy")} disabled={!menu.canCopy} onClick={() => void copySelection(menu.paneId)} />
 							<MenuItem icon="icon-[lucide--clipboard-paste]" label="粘贴" kbd={kbd("paste")} onClick={() => void pasteIntoTerminal(menu.paneId)} />
+							{handleFor(menu.paneId)?.hasRemoteSession() && (
+								<MenuItem icon="icon-[lucide--upload]" label="上传剪贴板图片" onClick={() => void uploadClipboardImageInto(menu.paneId)} />
+							)}
 							<MenuItem
 								icon="icon-[lucide--clipboard-paste]"
 								label="粘贴选中文本"
@@ -1176,6 +1331,7 @@ export default function Workspace() {
 							<ContextMenu x={tabMenu.x} y={tabMenu.y} width={200} onClose={() => setTabMenu(null)} label="标签菜单">
 								<MenuHeader title="会话标签" subtitle={menuTab.title} />
 								<MenuItem icon="icon-[lucide--copy-plus]" label="复制标签页" onClick={() => copyTab(menuTab.id)} />
+								<MenuItem icon="icon-[lucide--app-window]" label="复制标签页到新窗口" onClick={() => copyTabToNewWindow(menuTab.id)} />
 								<MenuItem icon="icon-[lucide--copy]" label="复制会话" onClick={() => duplicateTab(menuTab.id)} />
 								{tabPanes.length > 1 && (
 									<MenuItem
@@ -1816,7 +1972,11 @@ function SnippetsSidebar({ activeHost }: { activeHost?: Host | null }) {
 			s.group.toLowerCase().includes(query.toLowerCase()),
 	);
 
-	const handleSendSnippet = (command: string, name: string) => {
+	const handleSendSnippet = async (raw: string, name: string) => {
+		// 有 ${变量} 时先弹填写框（Netcatty resolveSnippetCommand）
+		const snippet = snippets.find((s) => s.command === raw && s.name === name);
+		const command = snippet ? await resolveSnippetCommand(snippet) : raw;
+		if (command === null) return;
 		const ok = writeToActiveTerminal(command + "\n");
 		if (ok) {
 			toast({ title: `已发送命令：${name}`, tone: "success" });
@@ -1867,7 +2027,7 @@ function SnippetsSidebar({ activeHost }: { activeHost?: Host | null }) {
 									variant="primary"
 									className="h-5 px-2 text-[10px]"
 									icon="icon-[lucide--play]"
-									onClick={() => handleSendSnippet(s.command, s.name)}
+									onClick={() => void handleSendSnippet(s.command, s.name)}
 									title={`发送到当前活跃终端${activeHost ? ` (${activeHost.name})` : ""}`}
 								>
 									执行
@@ -2214,6 +2374,7 @@ function HostGroupContextMenu({
 	onNewSubgroup,
 	onRename,
 	onDelete,
+	onSettings,
 }: {
 	x: number;
 	y: number;
@@ -2223,11 +2384,23 @@ function HostGroupContextMenu({
 	onNewSubgroup: () => void;
 	onRename: () => void;
 	onDelete: () => void;
+	/** 给出时用 Netcatty Vault 列表的分组菜单：新建子分组 / 分组设置 / 删除分组 */
+	onSettings?: () => void;
 }) {
 	const act = (fn: () => void) => () => {
 		onClose();
 		fn();
 	};
+	if (onSettings) {
+		return (
+			<ContextMenu x={x} y={y} onClose={onClose} label="分组">
+				<MenuHeader title="分组" subtitle={group.name} icon="icon-[lucide--folder]" />
+				<MenuItem icon="icon-[lucide--folder-plus]" label="新建子分组" onClick={act(onNewSubgroup)} />
+				<MenuItem icon="icon-[lucide--pencil]" label="分组设置" onClick={act(onSettings)} />
+				<MenuItem icon="icon-[lucide--trash-2]" label="删除分组" danger onClick={act(onDelete)} />
+			</ContextMenu>
+		);
+	}
 	return (
 		<ContextMenu x={x} y={y} onClose={onClose} label="分组">
 			<MenuHeader title="分组" subtitle={group.name} icon="icon-[lucide--folder]" />
@@ -2544,6 +2717,7 @@ function HostWorkbench({
 		onDeleted: (ids) => setSelectedGroup((cur) => (ids.has(cur) ? "all" : cur)),
 	});
 	const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; groupId: string } | null>(null);
+	const [settingsGroupId, setSettingsGroupId] = useState<string | null>(null);
 	const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
 	const toggleCollapse = (id: string) => {
@@ -3024,9 +3198,11 @@ function HostWorkbench({
 					onNewSubgroup={() => groupDialogs.openCreate(menuGroup.id)}
 					onRename={() => groupDialogs.openRename(menuGroup)}
 					onDelete={() => groupDialogs.openDelete(menuGroup)}
+					onSettings={() => setSettingsGroupId(menuGroup.id)}
 				/>
 			)}
 			{groupDialogs.dialogs}
+			<GroupSettingsDrawer groupId={settingsGroupId} onClose={() => setSettingsGroupId(null)} />
 		</div>
 	);
 }

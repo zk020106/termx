@@ -78,6 +78,16 @@ export function TerminalBehaviorSettings() {
 			<SettingRow title="禁用括号粘贴模式" description="关闭后多行粘贴不再包裹 \e[200~ … \e[201~">
 				<Switch checked={s.disableBracketedPaste} onChange={(value) => set({ disableBracketedPaste: value })} label="禁用括号粘贴模式" />
 			</SettingRow>
+			<SettingRow
+				title="粘贴时自动上传剪贴板图片"
+				description="当剪贴板包含图片时，在远程会话中粘贴会通过 SFTP 将图片上传到远端当前目录的 .netcatty-paste-images/ 文件夹，并在终端输入远端路径，而不是粘贴文本。"
+			>
+				<Switch
+					checked={s.autoUploadClipboardImageOnPaste}
+					onChange={(value) => set({ autoUploadClipboardImageOnPaste: value })}
+					label="粘贴时自动上传剪贴板图片"
+				/>
+			</SettingRow>
 			<SettingRow title="`clear` 同时清空回滚历史" description="关闭后远端的 \e[3J 只清屏、保留回滚">
 				<Switch checked={s.clearWipesScrollback} onChange={(value) => set({ clearWipesScrollback: value })} label="clear 同时清空回滚历史" />
 			</SettingRow>

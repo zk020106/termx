@@ -24,25 +24,55 @@ export async function resolveConnectProfile(hostId: string): Promise<{ ok: true;
 		const hop = byId.get(id);
 		if (hop?.auth.method !== "password") continue;
 		try {
-			const value = await secretLoad(id);
+			// 凭据来自身份 / 分组时，密码在 identity:<id> / group:<id>；否则在主机 id 下
+			const value = (hop.auth.secretAccount ? await secretLoad(hop.auth.secretAccount) : null) ?? (await secretLoad(id));
 			if (value) saved.set(id, value);
 		} catch {
 			/* 钥匙串不可用：连接时向用户要 */
 		}
 	}
 	let proxyPassword: string | undefined;
-	if (target.proxy?.username) {
+	let proxyUsername: string | undefined;
+	const { useIdentitiesStore } = await import("@/store/identities");
+	const identities = useIdentitiesStore.getState().identities;
+	if (target.proxy?.identityId) {
+		// 代理凭据来自钥匙串身份（Netcatty「钥匙串身份」）：用户名取身份，口令取 identity:<id>
+		const identity = identities.find((i) => i.id === target.proxy?.identityId);
+		if (!identity) return { ok: false, error: "钥匙串身份不存在" };
+		if (!identity.username || !identity.hasPassword) return { ok: false, error: "代理身份需要用户名和密码" };
+		proxyUsername = identity.username;
 		try {
-			const account = stored.proxy ? proxySecretAccount(target.id) : proxyProfileSecretAccount(stored.proxyProfileId ?? "");
+			proxyPassword = (await secretLoad(`identity:${identity.id}`)) ?? undefined;
+		} catch {
+			/* 钥匙串不可用：按空口令发（代理会如实拒绝） */
+		}
+	} else if (target.proxy?.username) {
+		try {
+			// 代理口令所在的钥匙串账户：主机自己的代理 → proxy:<主机 id>；代理配置 → proxy-profile:<id>；
+			// 分组设置里的代理 → group-proxy:<定义它的分组 id>
+			const raw = useHostsStore.getState().rawHostById(hostId);
+			let account: string;
+			if (raw?.proxy) account = proxySecretAccount(target.id);
+			else if (stored.proxyProfileId) account = proxyProfileSecretAccount(stored.proxyProfileId);
+			else {
+				const { resolveGroupDefaults } = await import("./groupConfig");
+				const { useGroupConfigsStore } = await import("@/store/groupConfigs");
+				const d = resolveGroupDefaults(stored.groupId, useHostsStore.getState().groups, useGroupConfigsStore.getState().configs);
+				account = `group-proxy:${d.proxyGroupId ?? ""}`;
+			}
 			proxyPassword = (await secretLoad(account)) ?? undefined;
 		} catch {
 			/* 钥匙串不可用：按空口令发（代理会如实拒绝） */
 		}
 	}
+	const { useKeysStore } = await import("@/store/keys");
+	const keys = useKeysStore.getState().keys;
 
 	return buildConnectProfile(target, {
 		hostById: (id) => byId.get(id),
 		savedPassword: (id) => saved.get(id),
 		proxyPassword,
+		proxyUsername,
+		keyLabel: (id) => keys.find((k) => k.id === id)?.name,
 	});
 }

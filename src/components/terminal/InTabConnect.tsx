@@ -51,7 +51,7 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 	const [password, setPassword] = useState("");
 	const [showPassword, setShowPassword] = useState(false);
 	const [rememberPassword, setRememberPassword] = useState(host?.auth.rememberPassword ?? false);
-	const [selectedKeyId, setSelectedKeyId] = useState(host?.auth.keyId ?? (keys[0]?.id || ""));
+	const [selectedKeyId, setSelectedKeyId] = useState(host?.auth.keyId ?? "");
 	const [keyPath, setKeyPath] = useState(host?.auth.keyPath ?? "");
 	const [passphrase, setPassphrase] = useState("");
 	const [showPassphrase, setShowPassphrase] = useState(false);
@@ -94,9 +94,14 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 			const effectivePassword = overridePassword !== undefined ? overridePassword : password;
 			const activeKeyPath = overrideKeyPath !== undefined ? overrideKeyPath : keyPath;
 
+			// 钥匙串里有私钥的密钥、且没填私钥文件：私钥由 Rust 从密钥库取
+			const stored = keys.find((k) => k.id === selectedKeyId && k.hasPrivateKey);
 			switch (activeMethod) {
 				case "key":
 				case "key-passphrase":
+					if (stored && !activeKeyPath.trim()) {
+						return { method: "stored_key", keyId: stored.id, label: stored.name, passphrase: passphrase ? passphrase : null };
+					}
 					return {
 						method: "private_key",
 						path: activeKeyPath.trim(),
@@ -110,7 +115,7 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 					return { method: "password", password: effectivePassword };
 			}
 		},
-		[authMethod, keyPath, passphrase, password],
+		[authMethod, keyPath, passphrase, password, keys, selectedKeyId],
 	);
 
 	// 执行真实连接
@@ -125,7 +130,8 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 				setError("请输入登录密码");
 				return;
 			}
-			if ((activeMethod === "key" || activeMethod === "key-passphrase") && !activeKeyPath.trim()) {
+			const hasStoredKey = keys.some((k) => k.id === selectedKeyId && k.hasPrivateKey);
+			if ((activeMethod === "key" || activeMethod === "key-passphrase") && !activeKeyPath.trim() && !hasStoredKey) {
 				setError("请选择或输入私钥文件路径");
 				return;
 			}
@@ -158,10 +164,12 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 
 				if (result.ok) {
 					// 连接成功：处理钥匙串持久化
-					const shouldSavePwd = activeMethod === "password" && rememberPassword;
+					// 凭据来自身份 / 分组设置时，密码在它们自己的钥匙串账户里，这里不动
+					const inherited = host.auth.credentialSource === "identity" || host.auth.credentialSource === "group";
+					const shouldSavePwd = activeMethod === "password" && rememberPassword && !inherited;
 					if (shouldSavePwd && effectivePassword) {
 						void secretSave(host.id, effectivePassword).catch(() => undefined);
-					} else if (activeMethod === "password" && !rememberPassword) {
+					} else if (activeMethod === "password" && !rememberPassword && !inherited) {
 						void secretDelete(host.id).catch(() => undefined);
 					}
 
@@ -169,7 +177,7 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 					const updatedHost: Host = {
 						...host,
 						lastConnectedAt: new Date().toISOString(),
-						auth: {
+						auth: inherited ? host.auth : {
 							...host.auth,
 							method: updateDefaultAuth ? activeMethod : host.auth.method,
 							rememberPassword: activeMethod === "password" ? rememberPassword : host.auth.rememberPassword,
@@ -209,7 +217,7 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 				setError(err instanceof Error ? err.message : String(err));
 			}
 		},
-		[host, sessionKey, authMethod, password, keyPath, passphrase, rememberPassword, updateDefaultAuth, selectedKeyId, buildCredential, onConnected],
+		[host, sessionKey, authMethod, password, keyPath, passphrase, rememberPassword, updateDefaultAuth, selectedKeyId, buildCredential, onConnected, keys],
 	);
 
 	// 初始加载钥匙串并尝试自动连接
@@ -219,8 +227,9 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 
 		if (host.auth.method === "password") {
 			// 已记住密码：从系统钥匙串（或本次运行的内存）载入后自动连接
-			if (host.auth.rememberPassword) {
-				void secretLoad(host.id).then((savedPassword) => {
+			if (host.auth.rememberPassword || host.auth.secretAccount) {
+				const account = host.auth.secretAccount;
+				void (async () => (account ? await secretLoad(account).catch(() => null) : null) ?? (await secretLoad(host.id)))().then((savedPassword) => {
 					if (savedPassword) {
 						setPassword(savedPassword);
 						setRememberPassword(true);
@@ -232,6 +241,9 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 			void doConnect(undefined, host.auth.method);
 		} else if ((host.auth.method === "key" || host.auth.method === "key-passphrase") && host.auth.keyPath) {
 			void doConnect(undefined, host.auth.method, host.auth.keyPath);
+		} else if (host.auth.method === "key" && keys.some((k) => k.id === host.auth.keyId && k.hasPrivateKey)) {
+			// 钥匙串密钥：没有口令或口令已记住的直接连；需要口令时 Rust 会经认证输入框询问
+			void doConnect(undefined, "key", "");
 		}
 	}, [host, doConnect]);
 

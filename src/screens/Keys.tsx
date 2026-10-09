@@ -13,6 +13,11 @@ import { ContextMenu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { buildKeyExportCommand, validateKeyExportTarget } from "@/lib/keyExport";
 import { sshExec } from "@/lib/ssh";
 import { useSessionsStore } from "@/store/sessions";
+import { GenerateKeyDrawer, IdentityDrawer, ImportKeyDrawer, identitySummary } from "@/components/keys/KeychainPanels";
+import type { Identity } from "@/data/types";
+import { keyVaultDelete, keyVaultStatus } from "@/lib/keyVault";
+import { secretDelete } from "@/lib/secret";
+import { identitySecretAccount, useIdentitiesStore } from "@/store/identities";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
@@ -23,9 +28,9 @@ import { useNavigate } from "react-router";
  * 部署 = Netcatty「导出密钥」：在主机已连接的终端会话上执行导出脚本（lib/keyExport.ts），
  * 真正写入远端 ~/.ssh/authorized_keys；没有已连接会话的主机如实报「未连接」，不记录。
  *
- * 诚实边界：TermX 只登记**公钥**。私钥与口令始终留在你自己的机器上；
- * 在应用内生成密钥对需要接入本机 ssh-keygen / 系统钥匙串，尚未接入，
- * 因此这里不做「假生成」，只登记你已有的公钥（指纹用 WebCrypto 真实计算）。
+ * 钥匙串（Netcatty KeychainManager）：生成密钥 / 导入密钥（私钥进 Rust 密钥库，信封加密，
+ * 数据密钥在系统钥匙串）/ 登记外部公钥 / 身份（用户名 + 密码或密钥）。
+ * 导出成功后与 Netcatty 一样把密钥绑定到主机（主机引用了身份时改身份）。
  * ========================================================================== */
 
 const KEY_TYPE_LABEL: Record<KeyType, string> = {
@@ -138,6 +143,22 @@ export default function Keys() {
 	const markDeployed = useKeysStore((s) => s.markDeployed);
 	const hosts = useHostsStore((s) => s.hosts);
 	const hostById = useHostsStore((s) => s.hostById);
+	const identities = useIdentitiesStore((s) => s.identities);
+	const [generateOpen, setGenerateOpen] = useState(false);
+	const [importOpen, setImportOpen] = useState(false);
+	const [identityDraft, setIdentityDraft] = useState<{ identity: Identity | null } | null>(null);
+	const [identityMenu, setIdentityMenu] = useState<{ x: number; y: number; identity: Identity } | null>(null);
+	const [identityDelete, setIdentityDelete] = useState<Identity | null>(null);
+	/** 本机密钥库里真的有没有私钥（配置可能来自别的机器） */
+	const [vaultHas, setVaultHas] = useState<Record<string, boolean>>({});
+	useEffect(() => {
+		const ids = keys.filter((k) => k.hasPrivateKey).map((k) => k.id);
+		if (ids.length === 0) return;
+		void keyVaultStatus(ids)
+			.then((flags) => setVaultHas(Object.fromEntries(ids.map((id, i) => [id, flags[i]]))))
+			.catch(() => undefined);
+	}, [keys]);
+	const hasPrivate = (key: SshKey) => Boolean(key.hasPrivateKey) && vaultHas[key.id] !== false;
 
 	const [selectedId, setSelectedId] = useState("");
 	const [panel, setPanel] = useState<KeysPanel>("list");
@@ -272,6 +293,8 @@ export default function Keys() {
 		if (!selected) return;
 		const victim = selected;
 		remove(victim.id);
+		// 私钥一并从密钥库删除（密钥库文件 + 钥匙串里的数据密钥与口令）
+		if (victim.hasPrivateKey) void keyVaultDelete(victim.id).catch(() => undefined);
 		setDeleteOpen(false);
 		setSelectedId((id) => (id === victim.id ? "" : id));
 		toast({ title: `已删除密钥 ${victim.name}`, tone: "default" });
@@ -296,6 +319,8 @@ export default function Keys() {
 					if (out.code === 0 || (out.code == null && !err)) {
 						markDeployed(selected.id, host.id);
 						ok.push(host.name);
+						// Netcatty「导出并绑定」：主机引用了身份就把密钥绑到身份上，否则绑到主机（认证方式改为密钥）
+						if (hasPrivate(selected)) attachKey(host.id, selected.id);
 					} else {
 						failed.push(`${host.name}：${err || out.stdout?.trim() || `命令退出码 ${out.code}`}`);
 					}
@@ -322,6 +347,26 @@ export default function Keys() {
 		}
 	}
 
+	/** 把密钥绑定到主机（Netcatty KeychainExportPanel：identity 优先，否则 host.identityFileId + authMethod key） */
+	function attachKey(hostId: string, keyId: string) {
+		const hostStore = useHostsStore.getState();
+		const raw = hostStore.rawHostById(hostId);
+		if (!raw) return;
+		const identity = raw.auth.identityId ? useIdentitiesStore.getState().identities.find((i) => i.id === raw.auth.identityId) : undefined;
+		if (identity) {
+			useIdentitiesStore.getState().upsert({ ...identity, authMethod: "key", keyId });
+			return;
+		}
+		hostStore.upsertRawHost({ ...raw, auth: { ...raw.auth, method: "key", keyId, keyPath: undefined } });
+	}
+
+	function confirmDeleteIdentity() {
+		if (!identityDelete) return;
+		useIdentitiesStore.getState().remove(identityDelete.id);
+		void secretDelete(identitySecretAccount(identityDelete.id)).catch(() => undefined);
+		setIdentityDelete(null);
+	}
+
 	/** 右键「导出密钥」：选中并定位到导出卡片 */
 	function openExport(key: SshKey) {
 		setSelectedId(key.id);
@@ -338,9 +383,14 @@ export default function Keys() {
 							<span className="icon-[lucide--key-round] size-3.5 text-primary" />
 							<h1 className="text-[12px] font-semibold text-surface-foreground">SSH 密钥管理</h1>
 						</div>
-						<Button size="sm" variant="primary" icon="icon-[lucide--plus]" className="h-6 px-2 text-[11px]" onClick={openAdd}>
-							登记公钥
-						</Button>
+						<div className="flex items-center gap-1">
+							<Button size="sm" variant="primary" icon="icon-[lucide--key-round]" className="h-6 px-2 text-[11px]" onClick={() => setGenerateOpen(true)}>
+								生成密钥
+							</Button>
+							<Button size="sm" icon="icon-[lucide--file-key]" className="h-6 px-2 text-[11px]" onClick={() => setImportOpen(true)}>
+								导入密钥
+							</Button>
+						</div>
 					</div>
 
 					{keys.length === 0 ? (
@@ -394,11 +444,46 @@ export default function Keys() {
 											</span>
 											<span className="shrink-0 font-mono text-faint">{key.createdAt.slice(0, 10)}</span>
 										</div>
+										<div className="mt-1 text-[10px] text-faint">{hasPrivate(key) ? "私钥在本机密钥库" : "仅公钥"}</div>
 									</button>
 								);
 							})}
 						</div>
 					)}
+
+					{/* 身份（Netcatty keychain.section.identities） */}
+					<div className="border-t border-border">
+						<div className="flex h-8 items-center justify-between px-3">
+							<span className="text-[11px] font-semibold text-surface-foreground">
+								身份 <span className="font-mono text-faint">{identities.length}</span>
+							</span>
+							<Button size="sm" variant="ghost" icon="icon-[lucide--user-plus]" className="h-6 px-1.5 text-[11px]" onClick={() => setIdentityDraft({ identity: null })}>
+								新建身份
+							</Button>
+						</div>
+						<div className="max-h-[180px] space-y-1 overflow-y-auto px-2 pb-2">
+							{identities.map((identity) => (
+								<button
+									key={identity.id}
+									type="button"
+									onClick={() => setIdentityDraft({ identity })}
+									onContextMenu={(event) => {
+										event.preventDefault();
+										setIdentityMenu({ x: event.clientX, y: event.clientY, identity });
+									}}
+									className="flex w-full items-center gap-2 rounded border border-transparent bg-surface p-2 text-left hover:border-border"
+								>
+									<span className="icon-[lucide--user] size-3.5 shrink-0 text-success" />
+									<span className="min-w-0 flex-1">
+										<span className="block truncate text-[11.5px] font-medium text-surface-foreground">{identity.label}</span>
+										<span className="block truncate font-mono text-[10px] text-faint">
+											{identity.username} · {identitySummary(identity)}
+										</span>
+									</span>
+								</button>
+							))}
+						</div>
+					</div>
 
 					<div className="border-t border-border p-2">
 						<button
@@ -431,7 +516,9 @@ export default function Keys() {
 										<p className="mt-1 text-[11.5px] text-muted">
 											登记于 {selected.createdAt.slice(0, 10)} ·{" "}
 											{deployed.length > 0 ? `已记录部署到 ${deployed.length} 台主机` : "尚未部署到任何主机"} ·
-											只登记公钥，私钥与口令留在你自己的机器上
+											{hasPrivate(selected)
+												? `私钥在本机密钥库（系统钥匙串加密）${selected.hasPassphrase ? (selected.savePassphrase ? " · 口令已保存" : " · 有口令，连接时询问") : ""}`
+												: "只登记了公钥，私钥留在你自己的机器上"}
 										</p>
 									</div>
 
@@ -596,7 +683,7 @@ export default function Keys() {
 												disabled={selectedHosts.length === 0 || exportTargetError !== null}
 												onClick={() => setConfirmOpen(true)}
 											>
-												导出到所选主机
+												{hasPrivate(selected) ? "导出并绑定" : "导出到所选主机"}
 											</Button>
 										</div>
 									</>
@@ -786,6 +873,58 @@ export default function Keys() {
 					</ContextMenu>
 				)}
 
+				<GenerateKeyDrawer
+					open={generateOpen}
+					onClose={() => setGenerateOpen(false)}
+					onSaved={(key) => {
+						setSelectedId(key.id);
+						toast({ title: `已生成 ${key.name}`, description: key.fingerprint, tone: "success" });
+					}}
+				/>
+				<ImportKeyDrawer
+					open={importOpen}
+					onClose={() => setImportOpen(false)}
+					onSaved={(key) => {
+						setSelectedId(key.id);
+						toast({ title: `已导入 ${key.name}`, description: key.fingerprint, tone: "success" });
+					}}
+				/>
+				<IdentityDrawer open={identityDraft !== null} identity={identityDraft?.identity ?? null} onClose={() => setIdentityDraft(null)} />
+				{identityMenu && (
+					<ContextMenu x={identityMenu.x} y={identityMenu.y} onClose={() => setIdentityMenu(null)} label="身份菜单">
+						<MenuItem icon="icon-[lucide--edit-3]" label="编辑" onClick={() => (setIdentityDraft({ identity: identityMenu.identity }), setIdentityMenu(null))} />
+						<MenuSeparator />
+						<MenuItem
+							icon="icon-[lucide--trash-2]"
+							label="删除"
+							danger
+							onClick={() => (setIdentityDelete(identityMenu.identity), setIdentityMenu(null))}
+						/>
+					</ContextMenu>
+				)}
+				<Modal
+					open={identityDelete !== null}
+					onClose={() => setIdentityDelete(null)}
+					title="删除身份"
+					icon="icon-[lucide--trash-2]"
+					width={420}
+					footer={
+						<>
+							<Button size="sm" onClick={() => setIdentityDelete(null)}>
+								取消
+							</Button>
+							<Button size="sm" variant="danger" icon="icon-[lucide--trash-2]" onClick={confirmDeleteIdentity}>
+								删除
+							</Button>
+						</>
+					}
+				>
+					<p>
+						将删除身份 <span className="font-mono text-surface-foreground">{identityDelete?.label ?? "—"}</span>
+						以及它在系统钥匙串里的密码。引用它的主机会提示「钥匙串身份不存在」。
+					</p>
+				</Modal>
+
 				{/* 删除确认 */}
 				<Modal
 					open={deleteOpen}
@@ -806,7 +945,7 @@ export default function Keys() {
 				>
 					<p>
 						将从密钥库移除 <span className="font-mono text-surface-foreground">{selected?.name ?? "—"}</span>
-						，同时清除它的部署记录。你机器上的私钥文件不受影响。
+						，同时清除它的部署记录{selected?.hasPrivateKey ? "，并删除本机密钥库里的私钥" : ""}。你自己机器上的私钥文件不受影响。
 					</p>
 				</Modal>
 			</div>

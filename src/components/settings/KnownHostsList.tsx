@@ -3,12 +3,16 @@
  * 右键菜单与 Netcatty 一致：转换为主机（已有同地址主机时不可用，对应 Netcatty 的 converted）/ 移除。
  * 来源差异：Netcatty 管理自己 vault 里的列表；TermX 列出真正参与校验的文件，
  * OpenSSH 的 ~/.ssh/known_hosts 只读沿用，不在这里改用户文件。
+ * 「扫描系统」/「导入文件」把条目复制进 TermX 自己的 known_hosts（之后可在这里移除），
+ * 因为导入等于信任这些主机密钥，Rust 端写入前会弹原生确认框。
  */
 import { ContextMenu, MenuItem } from "@/components/ui/Menu";
 import { Badge } from "@/components/ui/Display";
 import { Input } from "@/components/ui/Input";
 import type { Host } from "@/data/types";
-import { convertibleHost, knownHostLabel, knownHostsList, knownHostsRemove, type KnownHostEntry } from "@/lib/knownHosts";
+import { convertibleHost, knownHostLabel, knownHostsImport, knownHostsList, knownHostsRemove, type KnownHostEntry } from "@/lib/knownHosts";
+import { Button } from "@/components/ui/Button";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "@/lib/tauri";
 import { useHostsStore } from "@/store/hosts";
 import { toast } from "@/store/toast";
@@ -79,6 +83,30 @@ export function KnownHostsList() {
 		navigate(`/hosts/${host.id}/edit`);
 	};
 
+	/** Netcatty handleScanSystem / handleFileSelect：去重 host:port、过滤公共服务主机，toast 文案同 Netcatty */
+	const [scanning, setScanning] = useState(false);
+	const runImport = async (path?: string) => {
+		setScanning(true);
+		try {
+			const r = await knownHostsImport(path);
+			if (r.noFile) toast({ title: "未找到系统 known_hosts 文件。", tone: "default" });
+			else if (r.parsed === 0) toast({ title: "known_hosts 中没有可用条目。", tone: "default" });
+			else if (r.imported > 0) toast({ title: `已导入 ${r.imported} 个新主机。`, tone: "success" });
+			else toast({ title: "没有发现新的主机。", tone: "default" });
+			if (r.filteredPublic > 0) toast({ title: `已跳过 ${r.filteredPublic} 个公共服务主机（如 github.com）。`, tone: "default" });
+		} catch (e) {
+			const msg = String(e);
+			if (!msg.includes("已取消")) toast({ title: path ? "导入 known_hosts 失败" : "扫描系统 known_hosts 失败。", description: msg, tone: "danger" });
+		} finally {
+			setScanning(false);
+			void refresh();
+		}
+	};
+	const importFile = async () => {
+		const picked = await openFileDialog({ multiple: false, directory: false, title: "导入文件" }).catch(() => null);
+		if (typeof picked === "string" && picked) await runImport(picked);
+	};
+
 	const remove = async (entry: KnownHostEntry) => {
 		try {
 			const n = await knownHostsRemove(entry.line);
@@ -106,6 +134,12 @@ export function KnownHostsList() {
 				>
 					<span className={`icon-[lucide--refresh-cw] size-3.5 ${loading ? "animate-spin" : ""}`} />
 				</button>
+				<Button size="sm" icon="icon-[lucide--scan-search]" disabled={scanning} onClick={() => void runImport()}>
+					扫描系统
+				</Button>
+				<Button size="sm" icon="icon-[lucide--file-up]" disabled={scanning} onClick={() => void importFile()}>
+					导入文件
+				</Button>
 			</div>
 			{error && <p className="text-[11.5px] text-danger">{error}</p>}
 			{!error && filtered.length === 0 && (

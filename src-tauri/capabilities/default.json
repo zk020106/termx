@@ -1,8 +1,8 @@
 {
 	"$schema": "../gen/schemas/desktop-schema.json",
 	"identifier": "default",
-	"description": "TermX 主窗口默认能力：窗口控制（无边框自绘标题栏）+ 事件通道（终端输出）+ 逐条列出的应用命令（见 build.rs）",
-	"windows": ["main"],
+	"description": "TermX 主窗口与「复制标签页到新窗口」打开的会话窗口（session-*）的默认能力：窗口控制（无边框自绘标题栏）+ 事件通道（终端输出）+ 逐条列出的应用命令（见 build.rs）",
+	"windows": ["main", "session-*"],
 	"permissions": [
 		"core:default",
 		"core:event:default",
@@ -72,6 +72,28 @@
 		"allow-fs-local-extract",
 		"allow-fs-local-copy",
 		"allow-known-hosts-list",
-		"allow-known-hosts-remove"
+		"allow-known-hosts-remove",
+		"allow-key-vault-import",
+		"allow-key-vault-generate",
+		"allow-key-vault-delete",
+		"allow-key-vault-set-passphrase",
+		"allow-key-vault-status",
+		"allow-known-hosts-import",
+		"allow-ssh-session-pwd",
+		"allow-ssh-upload-clipboard-image",
+		"allow-ssh-write-bytes",
+		"allow-ssh-zmodem-release",
+		"allow-zmodem-pick-upload-files",
+		"allow-zmodem-read-chunk",
+		"allow-zmodem-release-files",
+		"allow-zmodem-pick-download-dir",
+		"allow-zmodem-create-file",
+		"allow-zmodem-write-chunk",
+		"allow-zmodem-finish-file",
+		"allow-ssh-drain",
+		"allow-window-open-session",
+		"allow-window-take-session-payload",
+		"allow-window-own-session",
+		"allow-sftp-copy-between"
 	]
 }

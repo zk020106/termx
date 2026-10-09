@@ -19,7 +19,8 @@ export type HopCredential =
 	| { method: "agent" }
 	| { method: "keyboard_interactive" }
 	| { method: "ask_password" }
-	| { method: "ask_passphrase"; path: string };
+	| { method: "ask_passphrase"; path: string }
+	| { method: "stored_key"; keyId: string; label?: string | null; passphrase?: string | null };
 
 export interface HopSpec {
 	label: string;
@@ -30,9 +31,11 @@ export interface HopSpec {
 }
 
 export interface ProxySpec {
-	type: "socks5" | "http";
+	type: "socks5" | "http" | "command";
 	host: string;
 	port: number;
+	/** ProxyCommand 模板（%h / %p / %%），type 为 command 时必填 */
+	command?: string | null;
 	username?: string | null;
 	password?: string | null;
 }
@@ -54,12 +57,24 @@ export interface PlanInputs {
 	savedPassword: (hostId: string) => string | undefined;
 	/** 代理口令（钥匙串里读出来的），没有就是 undefined */
 	proxyPassword?: string;
+	/** 代理用户名来自钥匙串身份时（Netcatty proxy identityId）由调用方解析好传进来 */
+	proxyUsername?: string;
+	/** 按 id 查钥匙串里的密钥名（stored_key 的提示文案用） */
+	keyLabel?: (keyId: string) => string | undefined;
 }
 
 export type PlanResult = { ok: true; profile: ConnectProfile } | { ok: false; error: string };
 
 /** 一跳的认证凭据 */
-export function hopCredential(host: Host, savedPassword: string | undefined): HopCredential | { error: string } {
+export function hopCredential(
+	host: Host,
+	savedPassword: string | undefined,
+	keyLabel?: (keyId: string) => string | undefined,
+): HopCredential | { error: string } {
+	// 钥匙串里的密钥（身份 / 分组 / 主机选了钥匙串密钥）：私钥由 Rust 从密钥库取
+	if ((host.auth.method === "key" || host.auth.method === "key-passphrase") && host.auth.keyId && !host.auth.keyPath) {
+		return { method: "stored_key", keyId: host.auth.keyId, label: keyLabel?.(host.auth.keyId) ?? null, passphrase: null };
+	}
 	switch (host.auth.method) {
 		case "password": {
 			// 密码只来自钥匙串（或本次运行的内存）；没有就在连接时向用户要
@@ -108,7 +123,7 @@ export function buildConnectProfile(target: Host, inputs: PlanInputs): PlanResul
 
 	const jumps: HopSpec[] = [];
 	for (const hop of chain) {
-		const credential = hopCredential(hop, inputs.savedPassword(hop.id));
+		const credential = hopCredential(hop, inputs.savedPassword(hop.id), inputs.keyLabel);
 		if ("error" in credential) return { ok: false, error: credential.error };
 		if (!hop.hostname.trim()) return { ok: false, error: `跳板机「${hop.name}」没有填写地址` };
 		jumps.push({
@@ -121,15 +136,22 @@ export function buildConnectProfile(target: Host, inputs: PlanInputs): PlanResul
 	}
 
 	let proxy: ProxySpec | null = null;
-	if (target.proxy && target.proxy.host.trim()) {
+	if (target.proxy && target.proxy.type === "command") {
+		// ProxyCommand（Netcatty proxy.type === 'command'）：命令在本机执行，Rust 侧运行前要用户确认
+		const command = target.proxy.command?.trim() ?? "";
+		if (!command) return { ok: false, error: "ProxyCommand 不能为空" };
+		proxy = { type: "command", host: "", port: 0, command, username: null, password: null };
+	} else if (target.proxy && target.proxy.host.trim()) {
 		const p = target.proxy;
 		if (!p.port || p.port < 1 || p.port > 65535) return { ok: false, error: "代理端口无效" };
+		const username = (p.identityId ? inputs.proxyUsername : p.username)?.trim() || null;
+		if (p.identityId && !username) return { ok: false, error: "钥匙串身份不存在" };
 		proxy = {
 			type: p.type === "http" ? "http" : "socks5",
 			host: p.host.trim(),
 			port: p.port,
-			username: p.username?.trim() || null,
-			password: p.username?.trim() ? (inputs.proxyPassword ?? "") : null,
+			username,
+			password: username ? (inputs.proxyPassword ?? "") : null,
 		};
 	}
 
@@ -154,7 +176,8 @@ export function buildConnectProfile(target: Host, inputs: PlanInputs): PlanResul
 /** 给界面看的路线描述：本机 → [代理] → 跳板… → 目标 */
 export function describeRoute(profile: ConnectProfile, target: { hostname: string; port: number }): string {
 	const parts = ["本机"];
-	if (profile.proxy) parts.push(`${profile.proxy.type === "http" ? "HTTP" : "SOCKS5"} ${profile.proxy.host}:${profile.proxy.port}`);
+	if (profile.proxy?.type === "command") parts.push(`ProxyCommand ${profile.proxy.command ?? ""}`);
+	else if (profile.proxy) parts.push(`${profile.proxy.type === "http" ? "HTTP" : "SOCKS5"} ${profile.proxy.host}:${profile.proxy.port}`);
 	for (const hop of profile.jumps) parts.push(hop.label || `${hop.host}:${hop.port}`);
 	parts.push(`${target.hostname}:${target.port}`);
 	return parts.join(" → ");

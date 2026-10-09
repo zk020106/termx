@@ -1,4 +1,4 @@
-﻿import type { ForwardRule, Host, HostGroup, ProxyProfile, Snippet, SshKey } from "@/data/types";
+﻿import type { ForwardRule, GroupConfig, Host, HostGroup, Identity, ProxyProfile, Snippet, SshKey } from "@/data/types";
 import { normalizePreferences, type Preferences } from "@/data/preferences";
 import { stripHostSecrets } from "./configSecrets";
 import { isTauri } from "./tauri";
@@ -23,6 +23,10 @@ export interface PersistedConfig {
 	forwards: ForwardRule[];
 	/** 可复用代理配置（Netcatty「代理」）；口令不在这里 */
 	proxyProfiles: ProxyProfile[];
+	/** 钥匙串身份（Netcatty identities）；密码只在钥匙串 */
+	identities: Identity[];
+	/** 分组设置（Netcatty groupConfigs）；密码只在钥匙串 */
+	groupConfigs: GroupConfig[];
 	preferences: Preferences;
 }
 
@@ -35,6 +39,8 @@ export function emptyConfig(): PersistedConfig {
 		snippets: [],
 		forwards: [],
 		proxyProfiles: [],
+		identities: [],
+		groupConfigs: [],
 		// 每次都给一份全新的默认偏好，避免共享对象被就地改坏
 		preferences: normalizePreferences(null),
 	};
@@ -43,7 +49,7 @@ export function emptyConfig(): PersistedConfig {
 const LS_KEY = "termx.config";
 
 /** 已知的顶层字段；其余字段（更新版本写入的新字段）原样保留，写回时不丢 */
-const KNOWN_FIELDS = new Set(["version", "hosts", "groups", "keys", "snippets", "forwards", "proxyProfiles", "preferences"]);
+const KNOWN_FIELDS = new Set(["version", "hosts", "groups", "keys", "snippets", "forwards", "proxyProfiles", "identities", "groupConfigs", "preferences"]);
 let unknownFields: Record<string, unknown> = {};
 
 /** 后端在「配置文件解析失败但已备份」时返回的错误前缀（见 src-tauri/src/config.rs） */
@@ -82,7 +88,7 @@ function isProxyProfile(value: unknown): value is ProxyProfile {
 		typeof v.id === "string" &&
 		typeof v.label === "string" &&
 		!!v.config &&
-		(v.config.type === "socks5" || v.config.type === "http") &&
+		(v.config.type === "socks5" || v.config.type === "http" || v.config.type === "command") &&
 		typeof v.config.host === "string" &&
 		typeof v.config.port === "number"
 	);
@@ -92,6 +98,26 @@ function isProxyProfile(value: unknown): value is ProxyProfile {
 function stripProfileSecret(profile: ProxyProfile): ProxyProfile {
 	const { password: _password, ...config } = profile.config as ProxyProfile["config"] & { password?: unknown };
 	return { ...profile, config };
+}
+
+function isIdentity(value: unknown): value is Identity {
+	const v = value as Partial<Identity> | null;
+	return !!v && typeof v.id === "string" && typeof v.label === "string" && typeof v.username === "string";
+}
+
+/** 身份 / 分组设置里不允许留明文密码（只在钥匙串） */
+function stripIdentitySecret(identity: Identity): Identity {
+	const { password: _p, ...rest } = identity as Identity & { password?: unknown };
+	return { ...rest, authMethod: rest.authMethod === "key" ? "key" : "password" };
+}
+
+function stripGroupConfigSecret(config: GroupConfig): GroupConfig {
+	const { password: _p, ...rest } = config as GroupConfig & { password?: unknown };
+	if (rest.proxyConfig) {
+		const { password: _pp, ...proxy } = rest.proxyConfig as GroupConfig["proxyConfig"] & { password?: unknown };
+		return { ...rest, proxyConfig: proxy as GroupConfig["proxyConfig"] };
+	}
+	return rest;
 }
 
 /** 把读到的对象补齐成完整结构，旧文件缺字段也不至于炸（导入配置时也用它） */
@@ -106,6 +132,10 @@ export function normalizeConfig(raw: Partial<PersistedConfig> | null): Persisted
 		snippets: Array.isArray(raw.snippets) ? raw.snippets : [],
 		forwards: Array.isArray(raw.forwards) ? raw.forwards.map(persistableForward) : [],
 		proxyProfiles: Array.isArray(raw.proxyProfiles) ? raw.proxyProfiles.filter(isProxyProfile).map(stripProfileSecret) : [],
+		identities: Array.isArray(raw.identities) ? raw.identities.filter(isIdentity).map(stripIdentitySecret) : [],
+		groupConfigs: Array.isArray(raw.groupConfigs)
+			? raw.groupConfigs.filter((c): c is GroupConfig => !!c && typeof (c as GroupConfig).groupId === "string").map(stripGroupConfigSecret)
+			: [],
 		// 偏好逐项校验：老配置文件只有 accent，也能补齐成完整结构
 		preferences: normalizePreferences(raw.preferences),
 	};
@@ -158,6 +188,8 @@ export async function saveConfig(config: PersistedConfig): Promise<void> {
 		hosts: stripHostSecrets(config.hosts).hosts,
 		forwards: config.forwards.map(persistableForward),
 		proxyProfiles: config.proxyProfiles.map(stripProfileSecret),
+		identities: config.identities.map(stripIdentitySecret),
+		groupConfigs: config.groupConfigs.map(stripGroupConfigSecret),
 	};
 	if (isTauri()) {
 		const { invoke } = await import("@tauri-apps/api/core");

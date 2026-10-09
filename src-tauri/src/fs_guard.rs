@@ -185,7 +185,7 @@ fn already_confirmed(key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn remember_confirmed(key: String) {
+pub(crate) fn remember_confirmed(key: String) {
     if let Ok(mut g) = CONFIRMED.lock() {
         g.get_or_insert_with(HashSet::new).insert(key);
     }

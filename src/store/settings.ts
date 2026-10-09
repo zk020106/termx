@@ -94,6 +94,7 @@ function pickTerminalExtras(state: TerminalPreferences) {
 		smoothScrolling: state.smoothScrolling,
 		scrollOnInput: state.scrollOnInput,
 		disableBracketedPaste: state.disableBracketedPaste,
+		autoUploadClipboardImageOnPaste: state.autoUploadClipboardImageOnPaste,
 		clearWipesScrollback: state.clearWipesScrollback,
 		keywordHighlightEnabled: state.keywordHighlightEnabled,
 		keywordHighlightRules: state.keywordHighlightRules,
@@ -104,6 +105,10 @@ function pickTerminalExtras(state: TerminalPreferences) {
 		sftpDoubleClickBehavior: state.sftpDoubleClickBehavior,
 		sftpAutoSync: state.sftpAutoSync,
 		sftpShowHiddenFiles: state.sftpShowHiddenFiles,
+		sftpFollowTerminalCwd: state.sftpFollowTerminalCwd,
 		sftpFileOpeners: state.sftpFileOpeners,
+		sftpVisibleColumns: state.sftpVisibleColumns,
+		sftpDirectoriesFirst: state.sftpDirectoriesFirst,
+		sftpHostViewModes: state.sftpHostViewModes,
 	};
 }

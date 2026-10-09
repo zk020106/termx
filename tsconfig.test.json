@@ -30,6 +30,13 @@
 		"src/lib/snippetTransfer.ts",
 		"src/lib/knownHosts.ts",
 		"src/lib/proxyProfiles.ts",
-		"src/components/terminal/netcatty/clearTerminalViewport.ts"
+		"src/components/terminal/netcatty/clearTerminalViewport.ts",
+		"src/lib/groupConfig.ts",
+		"src/lib/toolbarItemLayout.ts",
+		"src/lib/shellHistory.ts",
+		"src/lib/osc7Setup.ts",
+		"src/lib/terminalCwd.ts",
+		"src/lib/zmodem/zmodemHelper.ts",
+		"src/lib/sftpColumns.ts"
 	]
 }

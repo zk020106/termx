@@ -3,7 +3,9 @@ import { normalizeConfig } from "./persist";
 import { proxySecretAccount, stripHostSecrets } from "./configSecrets";
 import { flushNow, migrateLegacySecrets, snapshotConfig } from "@/store/persistence";
 import { useForwardsStore } from "@/store/forwards";
+import { useGroupConfigsStore } from "@/store/groupConfigs";
 import { useHostsStore } from "@/store/hosts";
+import { useIdentitiesStore } from "@/store/identities";
 import { useKeysStore } from "@/store/keys";
 import { useProxyProfilesStore } from "@/store/proxyProfiles";
 import { useSnippetsStore } from "@/store/snippets";
@@ -68,7 +70,8 @@ export function parseConfigFile(text: string): PersistedConfig {
  */
 export async function mergeConfig(incoming: PersistedConfig): Promise<ImportSummary> {
 	const hostStore = useHostsStore.getState();
-	const mergedHosts = [...hostStore.hosts];
+	// 合并的是原始主机（继承来的值不固化）
+	const mergedHosts = [...hostStore.rawHosts];
 	const byAddress = new Map(mergedHosts.map((host) => [`${host.hostname}:${host.port}`, host]));
 	let hostsAdded = 0;
 	let hostsUpdated = 0;
@@ -102,11 +105,24 @@ export async function mergeConfig(incoming: PersistedConfig): Promise<ImportSumm
 	};
 
 	const groups = mergeById(hostStore.groups, incoming.groups);
-	const keys = mergeById(useKeysStore.getState().keys, incoming.keys);
+	// 私钥不随配置文件走（在本机密钥库里）：别处导出的密钥到这里只有公钥，除非本机已有同一把
+	const localPrivate = new Set(useKeysStore.getState().keys.filter((k) => k.hasPrivateKey).map((k) => k.id));
+	const keys = mergeById(
+		useKeysStore.getState().keys,
+		incoming.keys.map((k) => ({ ...k, hasPrivateKey: localPrivate.has(k.id) })),
+	);
+	const identities = mergeById(useIdentitiesStore.getState().identities, incoming.identities.map((i) => ({ ...i, hasPassword: false })));
+	const groupConfigs = (() => {
+		const map = new Map(useGroupConfigsStore.getState().configs.map((c) => [c.groupId, c]));
+		for (const c of incoming.groupConfigs) map.set(c.groupId, { ...c, hasPassword: false });
+		return [...map.values()];
+	})();
 	const snippets = mergeById(useSnippetsStore.getState().snippets, incoming.snippets);
 	const forwards = mergeById(useForwardsStore.getState().rules, incoming.forwards);
 	const proxyProfiles = mergeById(useProxyProfilesStore.getState().profiles, incoming.proxyProfiles);
 
+	useIdentitiesStore.getState().setAll(identities);
+	useGroupConfigsStore.getState().setAll(groupConfigs);
 	useHostsStore.getState().setAll(mergedHosts, groups);
 	useKeysStore.getState().setAll(keys);
 	useSnippetsStore.getState().setAll(snippets);

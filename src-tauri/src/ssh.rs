@@ -33,6 +33,12 @@ pub use crate::chain::{emit_phase, emit_phase_full, SessionError};
 enum SshCommand {
     /// 键盘输入（文本，发送前按会话编码编码）
     Data(String),
+    /// 原始字节（ZMODEM：不经编码，见 crate::zmodem）
+    Bytes(Vec<u8>),
+    /// 前端的 ZMODEM 会话收尾：输出回到解码通道
+    ZmodemRelease,
+    /// 排在之前的所有写入都已交给 SSH 通道后答复（ZMODEM 上传的背压，等价 Node stream 'drain'）
+    Drain(oneshot::Sender<()>),
     Resize { cols: u32, rows: u32 },
     /// 在这条连接上量一次往返；答复走 oneshot 回给发起测量的命令
     Ping {
@@ -395,6 +401,8 @@ async fn run_session(
     }
 
     let data_event = format!("ssh://data/{key}");
+    let zmodem_event = format!("ssh://zmodem/{key}");
+    let mut gate = crate::zmodem::ZmodemGate::default();
     let exit_event = format!("ssh://exit/{key}");
     let mut exit_code: Option<i32> = None;
     // 同一条连接上的往返测量必须串行（russh 按 FIFO 配对答复）
@@ -405,9 +413,16 @@ async fn run_session(
             incoming = channel.wait() => {
                 match incoming {
                     Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        let text = codec.decode(&data);
-                        if !text.is_empty() {
-                            let _ = app.emit(&data_event, text);
+                        // 先过 ZMODEM 闸门（解码之前看原始字节）；平时原样交给解码器
+                        let out = gate.feed(&data);
+                        if !out.text.is_empty() {
+                            let text = codec.decode(&out.text);
+                            if !text.is_empty() {
+                                let _ = app.emit(&data_event, text);
+                            }
+                        }
+                        if let Some(raw) = out.raw {
+                            let _ = app.emit(&zmodem_event, crate::zmodem::chunk(codec.name(), &raw));
                         }
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
@@ -422,12 +437,28 @@ async fn run_session(
                     _ => {}
                 }
             }
+            // 包尾扣下的半个 ZMODEM 起始头等不到下文：短暂等待后照常显示
+            _ = tokio::time::sleep(Duration::from_millis(40)), if gate.has_held() && !gate.is_raw() => {
+                let text = codec.decode(&gate.flush_held());
+                if !text.is_empty() {
+                    let _ = app.emit(&data_event, text);
+                }
+            }
             command = rx.recv() => {
                 match command {
                     Some(SshCommand::Data(text)) => {
                         if channel.data(&codec.encode(&text)[..]).await.is_err() {
                             break;
                         }
+                    }
+                    Some(SshCommand::Bytes(bytes)) => {
+                        if channel.data(&bytes[..]).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(SshCommand::ZmodemRelease) => gate.release(),
+                    Some(SshCommand::Drain(reply)) => {
+                        let _ = reply.send(());
                     }
                     Some(SshCommand::Resize { cols, rows }) => {
                         let _ = channel.window_change(cols.max(1), rows.max(1), 0, 0).await;
@@ -591,6 +622,36 @@ pub fn ssh_write(state: State<'_, SshState>, key: String, data: String) -> Resul
     let sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
     let tx = sessions.get(&key).ok_or_else(|| format!("未找到会话 {key}"))?;
     tx.send(SshCommand::Data(data)).map_err(|_| "会话已关闭".to_string())
+}
+
+/// 原始字节写入会话（ZMODEM 协议数据，不经会话编码；base64 传输）
+#[tauri::command]
+pub fn ssh_write_bytes(state: State<'_, SshState>, key: String, data: String) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| format!("数据不是合法的 base64：{e}"))?;
+    let sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
+    let tx = sessions.get(&key).ok_or_else(|| format!("未找到会话 {key}"))?;
+    tx.send(SshCommand::Bytes(bytes)).map_err(|_| "会话已关闭".to_string())
+}
+
+/// 等会话写队列排空（之前排队的原始字节都已写进 SSH 通道窗口）
+#[tauri::command]
+pub async fn ssh_drain(state: State<'_, SshState>, key: String) -> Result<(), String> {
+    let (tx, rx) = oneshot::channel();
+    {
+        let sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
+        let sender = sessions.get(&key).ok_or_else(|| format!("未找到会话 {key}"))?;
+        sender.send(SshCommand::Drain(tx)).map_err(|_| "会话已关闭".to_string())?;
+    }
+    rx.await.map_err(|_| "会话已关闭".to_string())
+}
+
+/// 前端 ZMODEM 会话结束：会话输出回到按编码解码的文本通道
+#[tauri::command]
+pub fn ssh_zmodem_release(state: State<'_, SshState>, key: String) -> Result<(), String> {
+    let sessions = state.sessions.lock().map_err(|_| "SSH 会话表已损坏".to_string())?;
+    let tx = sessions.get(&key).ok_or_else(|| format!("未找到会话 {key}"))?;
+    tx.send(SshCommand::ZmodemRelease).map_err(|_| "会话已关闭".to_string())
 }
 
 /// 终端尺寸变化 → 远端 PTY

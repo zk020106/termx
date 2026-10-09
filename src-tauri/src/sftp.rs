@@ -629,3 +629,60 @@ mod tests {
     }
 }
 
+
+/// 两个远程栏之间直接拷贝一个文件（Netcatty 的 remote-to-remote 传输：主进程从源 SFTP 读、
+/// 往目标 SFTP 写）。目标已存在时拒绝（EXCLUDE），写到一半出错会删掉残留的半截文件；
+/// 沿用源文件权限位。返回拷贝的字节数。
+#[tauri::command]
+pub async fn sftp_copy_between(
+    state: State<'_, SftpState>,
+    src_key: String,
+    src_path: String,
+    dst_key: String,
+    dst_path: String,
+) -> Result<u64, String> {
+    use russh_sftp::protocol::OpenFlags;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let src = state.get_sftp(&src_key).await?;
+    let dst = state.get_sftp(&dst_key).await?;
+    let meta = src.metadata(src_path.clone()).await.map_err(|e| format!("读取源文件失败：{e}"))?;
+    if meta.is_dir() {
+        return Err("目录请逐项拷贝".into());
+    }
+    let mut reader = src.open(src_path.clone()).await.map_err(|e| format!("打开源文件失败：{e}"))?;
+    let mut writer = dst
+        .open_with_flags(dst_path.clone(), OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE)
+        .await
+        .map_err(|e| format!("无法在目标创建「{dst_path}」（可能已存在）：{e}"))?;
+    let copied = async {
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut total = 0u64;
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n]).await?;
+            total += n as u64;
+        }
+        writer.shutdown().await?;
+        Ok::<u64, std::io::Error>(total)
+    }
+    .await;
+    match copied {
+        Ok(total) => {
+            if let Some(perm) = meta.permissions {
+                let attrs = russh_sftp::protocol::FileAttributes {
+                    permissions: Some(perm & 0o7777),
+                    ..Default::default()
+                };
+                let _ = dst.set_metadata(dst_path, attrs).await;
+            }
+            Ok(total)
+        }
+        Err(e) => {
+            let _ = dst.remove_file(dst_path).await;
+            Err(format!("拷贝失败：{e}"))
+        }
+    }
+}

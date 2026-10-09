@@ -47,6 +47,8 @@ interface SessionsState {
 	detachPane: (paneId: string) => string | null;
 	/** 「复制标签页」：按原布局复制整个标签，每格各开一条新会话，插在原标签右侧 */
 	copyTab: (tabId: string) => string | null;
+	/** 「复制标签页到新窗口」的接收端：按传来的标签与分屏格克隆一份（每格新会话） */
+	importTab: (source: SessionTab, sourcePanes: TerminalPane[]) => string;
 	/** 「复制会话」：同主机开一条全新连接的单格标签，插在原标签右侧 */
 	duplicateSession: (tabId: string) => string | null;
 	setPaneTitle: (paneId: string, title: string) => void;
@@ -80,6 +82,31 @@ export function flushClosedTabs(): void {
 		destroyPaneSessions(closed.panes);
 		recentlyClosed.delete(id);
 	}
+}
+
+/**
+ * 按原布局克隆一个标签：每格各开一条新会话（新会话键），本地格开新的本地终端。
+ * 「复制标签页」与「复制标签页到新窗口」的接收端共用。
+ */
+function cloneTab(source: SessionTab, sourcePanes: TerminalPane[]): { tab: SessionTab; panes: TerminalPane[] } {
+	const id = `tab-${++seq}`;
+	const panes: TerminalPane[] = sourcePanes.map((p) => ({
+		...p,
+		id: `pane-${++seq}`,
+		tabId: id,
+		sessionKey: p.hostId ? newSshSessionKey(p.hostId) : null,
+		status: (p.hostId ? "connecting" : "connected") as ConnectionStatus,
+		lines: [],
+	}));
+	const head = panes[0];
+	const tab: SessionTab = {
+		...source,
+		id,
+		sessionKey: head?.sessionKey ?? null,
+		status: head?.status ?? "connected",
+		broadcasting: false,
+	};
+	return { tab, panes };
 }
 
 export const useSessionsStore = create<SessionsState>((set, get) => ({
@@ -386,27 +413,18 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 		const source = s.tabs.find((t) => t.id === tabId);
 		if (!source) return null;
 		const sourcePanes = s.panes.filter((p) => p.tabId === tabId);
-		const id = `tab-${++seq}`;
-		const panes: TerminalPane[] = sourcePanes.map((p) => ({
-			...p,
-			id: `pane-${++seq}`,
-			tabId: id,
-			sessionKey: p.hostId ? newSshSessionKey(p.hostId) : null,
-			status: (p.hostId ? "connecting" : "connected") as ConnectionStatus,
-			lines: [],
-		}));
-		const head = panes[0];
-		const tab: SessionTab = {
-			...source,
-			id,
-			sessionKey: head?.sessionKey ?? null,
-			status: head?.status ?? "connected",
-			broadcasting: false,
-		};
+		const { tab, panes } = cloneTab(source, sourcePanes);
 		const tabs = [...s.tabs];
 		tabs.splice(s.tabs.findIndex((t) => t.id === tabId) + 1, 0, tab);
-		set({ tabs, panes: [...s.panes, ...panes], activeTabId: id, focusedPaneId: head?.id ?? s.focusedPaneId });
-		return id;
+		set({ tabs, panes: [...s.panes, ...panes], activeTabId: tab.id, focusedPaneId: panes[0]?.id ?? s.focusedPaneId });
+		return tab.id;
+	},
+
+	importTab: (source, sourcePanes) => {
+		const s = get();
+		const { tab, panes } = cloneTab(source, sourcePanes);
+		set({ tabs: [...s.tabs, tab], panes: [...s.panes, ...panes], activeTabId: tab.id, focusedPaneId: panes[0]?.id ?? s.focusedPaneId });
+		return tab.id;
 	},
 
 	duplicateSession: (tabId) => {

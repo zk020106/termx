@@ -21,6 +21,7 @@ import { toast } from "@/store/toast";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useSftpPaneActions, type SftpPaneRef } from "@/components/sftp/useSftpPaneActions";
 import { useSettingsStore } from "@/store/settings";
+import { resolveRemoteCwd, subscribeSessionCwd } from "@/lib/terminalCwd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 
@@ -130,6 +131,21 @@ export function EmbeddedSftpDrawer({
 			setRemotePath("");
 		}
 	}, [sessionKey, status, loadDir]);
+
+	/* Netcatty useSftpFollowTerminalCwd：「定位到终端当前目录」与「追随终端目录」（全局设置 sftpFollowTerminalCwd） */
+	const followTerminalCwd = useSettingsStore((s) => s.sftpFollowTerminalCwd);
+	const goToTerminalCwd = useCallback(async () => {
+		if (!sessionKey) return;
+		const cwd = await resolveRemoteCwd(sessionKey);
+		if (cwd) void loadDir(cwd);
+		else toast({ title: "无法获取终端当前目录", tone: "warning" });
+	}, [sessionKey, loadDir]);
+	useEffect(() => {
+		if (!followTerminalCwd || !sessionKey || status !== "connected" || modalMode) return;
+		return subscribeSessionCwd((key, cwd) => {
+			if (key === sessionKey) void loadDir(cwd);
+		});
+	}, [followTerminalCwd, sessionKey, status, modalMode, loadDir]);
 
 	// 过滤与排序（Netcatty sftpShowHiddenFiles）
 	const showHidden = useSettingsStore((s) => s.sftpShowHiddenFiles);
@@ -447,6 +463,22 @@ export function EmbeddedSftpDrawer({
 						label="上一级目录"
 						className="size-6"
 						onClick={() => loadDir(posixDirname(remotePath))}
+					/>
+					<IconButton
+						icon="icon-[lucide--square-terminal]"
+						label="定位到终端当前目录"
+						className="size-6"
+						onClick={() => void goToTerminalCwd()}
+					/>
+					<IconButton
+						icon="icon-[lucide--folder-sync]"
+						label={followTerminalCwd ? "关闭追随终端目录" : "开启追随终端目录"}
+						className={cn("size-6", followTerminalCwd && "text-primary")}
+						onClick={() => {
+							const next = !followTerminalCwd;
+							useSettingsStore.getState().setTerminal({ sftpFollowTerminalCwd: next });
+							if (next) void goToTerminalCwd();
+						}}
 					/>
 					<IconButton
 						icon="icon-[lucide--folder-plus]"

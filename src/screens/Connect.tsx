@@ -234,7 +234,9 @@ export default function Connect() {
 			if (!alive) return;
 			setSecretUsable(available);
 			// 钥匙串不可用时仍可能有本次运行里「记住」在内存中的密码
-			const saved = await secretLoad(storedHostId);
+			// 凭据来自钥匙串身份 / 分组设置时，密码在 identity:<id> / group:<id>
+			const account = host?.auth.secretAccount;
+			const saved = (account ? await secretLoad(account).catch(() => null) : null) ?? (await secretLoad(storedHostId));
 			if (!alive || !saved) return;
 			setPassword(saved);
 			setRemember(true);
@@ -364,6 +366,9 @@ export default function Connect() {
 	/** 真实指纹：优先用 Rust 事件里直接带的 fingerprint，其次从握手 detail 里取；都没有就不显示 */
 	const fingerprint = progress.stages.handshake?.fingerprint || fingerprintOf(progress.stages.handshake?.detail);
 
+	/** 钥匙串里有私钥的那把密钥（没填私钥文件路径时用它，私钥由 Rust 从密钥库取） */
+	const storedKey = registeredKey?.hasPrivateKey && !keyPath.trim() ? registeredKey : undefined;
+
 	/** 当前认证方式还差什么才能发起连接；null = 齐了。桌面端不可用另有提示，不算在这里 */
 	const credentialProblem: string | null =
 		authMethod === "password"
@@ -371,7 +376,7 @@ export default function Connect() {
 				? null
 				: "请先输入登录密码"
 			: authMethod === "key" || authMethod === "key-passphrase"
-				? keyPath.trim()
+				? keyPath.trim() || storedKey
 					? null
 					: "请先选择或粘贴私钥文件路径"
 				: authMethod === "agent" && agentIdentities !== null && agentIdentities.length === 0
@@ -510,6 +515,14 @@ export default function Connect() {
 		switch (authMethod) {
 			case "key":
 			case "key-passphrase":
+				if (storedKey) {
+					return {
+						method: "stored_key",
+						keyId: storedKey.id,
+						label: storedKey.name,
+						passphrase: authMethod === "key-passphrase" && passphrase ? passphrase : null,
+					};
+				}
 				return {
 					method: "private_key",
 					path: keyPath.trim(),
@@ -599,11 +612,13 @@ export default function Connect() {
 		}
 
 		// 会话已经建立：同步持久化密码与主机配置，再进工作区
-		if (authMethod === "password") await persistSecret();
+		if (authMethod === "password" && !host.auth.secretAccount) await persistSecret();
+		// 凭据来自身份 / 分组设置：不把它们写回主机（否则会固化成主机自己的凭据）
+		const inherited = host.auth.credentialSource === "identity" || host.auth.credentialSource === "group";
 		useHostsStore.getState().upsertHost({
 			...host,
 			lastConnectedAt: new Date().toISOString(),
-			auth: {
+			auth: inherited ? host.auth : {
 				...host.auth,
 				method: authMethod,
 				rememberPassword: authMethod === "password" ? remember : host.auth.rememberPassword,
@@ -1058,8 +1073,13 @@ export default function Connect() {
 											</div>
 											{registeredKey && (
 												<p className="mt-1.5 text-[10.5px] leading-4 text-faint">
-													主机登记的密钥：{registeredKey.name}（{registeredKey.type}
+													{storedKey ? "将使用钥匙串密钥" : "主机登记的密钥"}：{registeredKey.name}（{registeredKey.type}
 													{registeredKey.bits ? ` ${registeredKey.bits}` : ""} · {registeredKey.fingerprint}）
+													{storedKey
+														? " —— 私钥在本机密钥库里，不需要文件；填了路径则改用文件。"
+														: registeredKey.hasPrivateKey
+															? ""
+															: " —— 本机密钥库里没有它的私钥，请指定私钥文件。"}
 												</p>
 											)}
 											{authMethod === "key-passphrase" && (

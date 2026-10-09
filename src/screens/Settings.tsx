@@ -152,6 +152,7 @@ export default function Settings() {
 	const sftpDoubleClickBehavior = useSettingsStore((s) => s.sftpDoubleClickBehavior);
 	const sftpAutoSync = useSettingsStore((s) => s.sftpAutoSync);
 	const sftpShowHiddenFiles = useSettingsStore((s) => s.sftpShowHiddenFiles);
+	const sftpFollowTerminalCwd = useSettingsStore((s) => s.sftpFollowTerminalCwd);
 	const sftpFileOpeners = useSettingsStore((s) => s.sftpFileOpeners);
 	const commandSuggestions = useSettingsStore((s) => s.commandSuggestions);
 	const ghostText = useSettingsStore((s) => s.ghostText);
@@ -584,6 +585,13 @@ export default function Settings() {
 											checked={sftpShowHiddenFiles}
 											onChange={(value) => setTerminal({ sftpShowHiddenFiles: value })}
 											label="显示隐藏文件"
+										/>
+									</SettingRow>
+									<SettingRow title="默认开启追随终端目录" description="打开侧栏 SFTP 时默认启用追随模式，终端执行 cd 后文件浏览器会自动跳转">
+										<Switch
+											checked={sftpFollowTerminalCwd}
+											onChange={(value) => setTerminal({ sftpFollowTerminalCwd: value })}
+											label="默认开启追随终端目录"
 										/>
 									</SettingRow>
 									<SettingRow title="文件打开方式" description="在「打开方式」里勾选「始终使用此方式打开」后记住的扩展名关联">

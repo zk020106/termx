@@ -7,6 +7,9 @@ import { getHostVisual } from "@/lib/hostVisual";
 import { secretDelete, secretLoad, secretSave } from "@/lib/secret";
 import { proxySecretAccount } from "@/lib/configSecrets";
 import { useHostsStore } from "@/store/hosts";
+import { useGroupConfigsStore } from "@/store/groupConfigs";
+import { useIdentitiesStore } from "@/store/identities";
+import { resolveGroupDefaults } from "@/lib/groupConfig";
 import { useKeysStore } from "@/store/keys";
 import { useProxyProfilesStore } from "@/store/proxyProfiles";
 import { formatProxyConfigEndpoint, formatProxyConfigType, isValidProxyPort } from "@/lib/proxyProfiles";
@@ -70,7 +73,7 @@ const OS_PRESETS: { value: string; label: string; icon: string; color: string }[
 	{ value: "linux", label: "通用 Linux", icon: "icon-[simple-icons--linux]", color: "text-amber-500" },
 ];
 
-const COLOR_SCHEMES = [
+export const COLOR_SCHEMES = [
 	{ id: "One Dark", bg: "#282c34", fg: "#abb2bf" },
 	{ id: "Dracula", bg: "#282a36", fg: "#f8f8f2" },
 	{ id: "Nord", bg: "#2e3440", fg: "#d8dee9" },
@@ -109,7 +112,13 @@ interface FormState {
 	proxyEnabled: boolean;
 	/** 选中的已保存代理（空 = 自定义代理），同 Netcatty「已保存代理 / 自定义代理」 */
 	proxyProfileId: string;
-	proxyType: "socks5" | "http";
+	proxyType: "socks5" | "http" | "command";
+	/** ProxyCommand 模板 */
+	proxyCommand: string;
+	/** 代理凭据用钥匙串身份（空 = 手动凭据） */
+	proxyIdentityId: string;
+	/** 钥匙串身份（Netcatty host.identityId；空 = 不使用） */
+	identityId: string;
 	proxyHost: string;
 	proxyPort: string;
 	/** 代理认证（可选） */
@@ -129,7 +138,10 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 	const hosts = useHostsStore((s) => s.hosts);
 	const groups = useHostsStore((s) => s.groups);
 	const addGroup = useHostsStore((s) => s.addGroup);
-	const upsertHost = useHostsStore((s) => s.upsertHost);
+	const upsertHost = useHostsStore((s) => s.upsertRawHost);
+	const rawHosts = useHostsStore((s) => s.rawHosts);
+	const identities = useIdentitiesStore((s) => s.identities);
+	const groupConfigs = useGroupConfigsStore((s) => s.configs);
 	const removeHost = useHostsStore((s) => s.removeHost);
 	const keys = useKeysStore((s) => s.keys);
 	const proxyProfiles = useProxyProfilesStore((s) => s.profiles);
@@ -137,13 +149,14 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 	const isEditing = Boolean(hostId && hostId !== "new");
 	const targetHost = useMemo(() => {
 		if (!isEditing || !hostId) return null;
-		return hosts.find((h) => h.id === hostId) ?? null;
-	}, [isEditing, hostId, hosts]);
+		// 编辑的是原始主机：没设置的字段保持空，才能继承分组设置
+		return rawHosts.find((h) => h.id === hostId) ?? null;
+	}, [isEditing, hostId, rawHosts]);
 	/** 复制主机时的模板 */
 	const sourceHost = useMemo(() => {
 		if (isEditing || !duplicateFromId) return null;
-		return hosts.find((h) => h.id === duplicateFromId) ?? null;
-	}, [isEditing, duplicateFromId, hosts]);
+		return rawHosts.find((h) => h.id === duplicateFromId) ?? null;
+	}, [isEditing, duplicateFromId, rawHosts]);
 	/** 表单的数据来源：编辑的主机，或被复制的主机 */
 	const formSource = targetHost ?? sourceHost;
 
@@ -222,6 +235,14 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 	}, [open, isDirty, form]);
 
 	const selectedProxyProfile = proxyProfiles.find((p) => p.id === form.proxyProfileId);
+	/** 所选分组链合并后的默认值（Netcatty resolveGroupDefaults），用于占位提示 */
+	const groupDefaults = useMemo(
+		() => resolveGroupDefaults(form.groupId || null, groups, groupConfigs),
+		[form.groupId, groups, groupConfigs],
+	);
+	const selectedIdentity = identities.find((i) => i.id === form.identityId);
+	/** 能用于认证的钥匙串密钥：本机密钥库里有私钥的 */
+	const privateKeys = keys.filter((k) => k.hasPrivateKey);
 
 	const update = <K extends keyof FormState>(key: K, value: FormState[K]) => {
 		if ((APPEARANCE_FIELDS as readonly string[]).includes(key)) setAppearanceTouched(true);
@@ -273,7 +294,8 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 		if (!form.name.trim()) newErrors.name = "主机名称不能为空";
 		if (!form.hostname.trim()) newErrors.hostname = "连接地址不能为空";
 		const p = Number(form.port);
-		if (!/^\d+$/.test(form.port.trim()) || !Number.isInteger(p) || p < 1 || p > 65535) {
+		// 端口留空 = 继承分组设置（没有就是 22）
+		if (form.port.trim() !== "" && (!/^\d+$/.test(form.port.trim()) || !Number.isInteger(p) || p < 1 || p > 65535)) {
 			newErrors.port = "端口需在 1~65535 范围内";
 		}
 		setErrors(newErrors);
@@ -287,7 +309,12 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 			setTab("network");
 			return false;
 		}
-		if (form.proxyEnabled && !form.proxyProfileId && !isValidProxyPort(form.proxyPort.trim() || "1080")) {
+		if (form.proxyEnabled && !form.proxyProfileId && form.proxyType === "command" && !form.proxyCommand.trim()) {
+			toast({ title: "代理主机和端口，或 ProxyCommand 不能为空。", tone: "danger" });
+			setTab("network");
+			return false;
+		}
+		if (form.proxyEnabled && !form.proxyProfileId && form.proxyType !== "command" && !isValidProxyPort(form.proxyPort.trim() || "1080")) {
 			toast({ title: "端口必须在 1 到 65535 之间。", tone: "danger" });
 			setTab("network");
 			return false;
@@ -309,8 +336,9 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 			name: form.name.trim(),
 			groupId: form.groupId || null,
 			hostname: form.hostname.trim(),
-			port: Number(form.port) || 22,
-			username: form.username.trim() || "root",
+			// 端口 / 用户名留空 = 继承分组设置（store 的生效层再兜底 22 / root）
+			port: Number(form.port) || 0,
+			username: form.username.trim(),
 			tags: tagsList,
 			favorite: form.favorite,
 			os: form.osPreset !== "auto" ? { name: form.osPreset, icon: "" } : formSource?.os,
@@ -319,9 +347,10 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 			...(targetHost?.pinned ? { pinned: true } : {}),
 			auth: {
 				method: form.authMethod,
+				...(form.identityId ? { identityId: form.identityId } : {}),
 				keyId:
 					form.authMethod === "key" || form.authMethod === "key-passphrase"
-						? form.keyId || keys[0]?.id
+						? form.keyId || undefined
 						: undefined,
 				keyPath:
 					form.authMethod === "key" || form.authMethod === "key-passphrase"
@@ -330,17 +359,28 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 				rememberPassword: form.authMethod === "password" ? form.rememberPassword : formSource?.auth.rememberPassword,
 			},
 			jumpHostIds: form.jumpHostIds,
-			proxy: form.proxyEnabled && !form.proxyProfileId
+			// 关闭代理时不写 proxy 字段（= 继承分组设置），同 Netcatty proxyConfig undefined
+			...(form.proxyEnabled && !form.proxyProfileId
 				? {
-						type: form.proxyType,
-						host: form.proxyHost.trim() || "127.0.0.1",
-						port: Number(form.proxyPort) || 1080,
-						// 代理口令进钥匙串（见下方），配置里只留用户名
-						...(form.proxyUsername.trim() ? { username: form.proxyUsername.trim() } : {}),
-				  }
-				: null,
+						proxy:
+							form.proxyType === "command"
+								? { type: "command" as const, host: "", port: 0, command: form.proxyCommand.trim() }
+								: {
+										type: form.proxyType,
+										host: form.proxyHost.trim() || "127.0.0.1",
+										port: Number(form.proxyPort) || 1080,
+										// 代理口令进钥匙串（见下方），配置里只留用户名；或者引用钥匙串身份
+										...(form.proxyIdentityId
+											? { identityId: form.proxyIdentityId }
+											: form.proxyUsername.trim()
+												? { username: form.proxyUsername.trim() }
+												: {}),
+									},
+					}
+				: {}),
 			...(form.proxyEnabled && form.proxyProfileId ? { proxyProfileId: form.proxyProfileId } : {}),
-			encoding: form.encoding,
+			// 编码留空 = 继承分组设置（没有就是 UTF-8）
+			...(form.encoding ? { encoding: form.encoding } : {}),
 			termType: form.termType,
 			envVars: form.envVars.filter((v) => v.key.trim() !== ""),
 			loginScript: form.loginScript,
@@ -361,7 +401,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 
 		// 密码安全凭据存储：只进系统钥匙串；存不进去时如实告知（本次运行内仍可用）
 		const keychainFailures: string[] = [];
-		if (form.authMethod === "password") {
+		if (form.authMethod === "password" && !form.identityId) {
 			if (form.rememberPassword && form.password) {
 				await secretSave(record.id, form.password).catch((error: unknown) => {
 					keychainFailures.push(`登录密码：${error instanceof Error ? error.message : String(error)}`);
@@ -616,7 +656,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 										<Input
 											value={form.port}
 											onChange={(e) => update("port", e.target.value)}
-											placeholder="22"
+											placeholder={String(groupDefaults.port ?? 22)}
 											inputMode="numeric"
 											className="h-8 font-mono text-[12px] text-center"
 										/>
@@ -624,13 +664,23 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 								</div>
 
 								{/* 用户名 */}
-								<Field label="登录用户名" hint="默认 root">
+								<Field
+									label="登录用户名"
+									hint={
+										selectedIdentity
+											? `使用钥匙串身份「${selectedIdentity.label}」的用户名`
+											: groupDefaults.username
+												? `留空继承分组设置（${groupDefaults.username}）`
+												: "默认 root"
+									}
+								>
 									<div className="relative">
 										<span className="icon-[lucide--user] pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted" />
 										<Input
 											value={form.username}
 											onChange={(e) => update("username", e.target.value)}
-											placeholder="root"
+											placeholder={selectedIdentity?.username ?? groupDefaults.username ?? "root"}
+											disabled={Boolean(selectedIdentity)}
 											className="h-8 pl-8 font-mono text-[12px]"
 										/>
 									</div>
@@ -702,6 +752,25 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 						{/* -------------------- 标签 2: 身份凭据 -------------------- */}
 						{tab === "auth" && (
 							<div className="space-y-4.5">
+								{/* 钥匙串身份（Netcatty host.identityId）：用户名 + 密码 / 密钥整体来自身份 */}
+								<Field label="钥匙串身份" hint={identities.length === 0 ? "在「密钥」页创建身份后可在这里选择" : "选中后用户名与凭据都来自身份"}>
+									<Select value={form.identityId} onChange={(e) => update("identityId", e.target.value)} className="h-8 text-xs">
+										<option value="">{groupDefaults.identityId ? "不使用（继承分组身份）" : "不使用"}</option>
+										{identities.map((i) => (
+											<option key={i.id} value={i.id}>
+												{i.label} · {i.username}
+											</option>
+										))}
+										{form.identityId && !selectedIdentity && <option value={form.identityId}>钥匙串身份不存在</option>}
+									</Select>
+								</Field>
+								{!form.identityId && groupDefaults.identityId && (
+									<p className="text-[10.5px] text-muted">
+										这台主机没有自己的凭据时，使用分组设置里的身份「{identities.find((i) => i.id === groupDefaults.identityId)?.label ?? "（不存在）"}」。
+									</p>
+								)}
+								{!selectedIdentity && (
+								<>
 								<div>
 									<span className="block mb-2 text-[11.5px] font-medium text-surface-foreground">
 										认证方式 (Authentication Method)
@@ -775,20 +844,25 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 											</button>
 										</div>
 
-										{keys.length > 0 && (
+										<Field label="钥匙串密钥" hint="私钥在本机密钥库（系统钥匙串加密保存）；选「私钥文件」则用下方路径">
 											<Select
-												value={form.keyId || keys[0]?.id}
+												value={form.keyId}
 												onChange={(e) => update("keyId", e.target.value)}
 												className="h-8.5 font-mono text-xs"
 											>
-												{keys.map((k) => (
+												<option value="">私钥文件（下方路径）</option>
+												{privateKeys.map((k) => (
 													<option key={k.id} value={k.id}>
 														🔑 {k.name} ({k.type.toUpperCase()}{k.bits ? ` ${k.bits}` : ""}) · {k.fingerprint.slice(0, 24)}…
 													</option>
 												))}
+												{form.keyId && !privateKeys.some((k) => k.id === form.keyId) && (
+													<option value={form.keyId}>密钥不存在或本机没有私钥</option>
+												)}
 											</Select>
-										)}
+										</Field>
 
+										{!form.keyId && (
 										<Field label="私钥文件路径">
 											<div className="flex gap-1.5">
 												<Input
@@ -819,6 +893,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 												</Button>
 											</div>
 										</Field>
+										)}
 
 										{form.authMethod === "key-passphrase" && (
 											<Field label="私钥解密口令 (Passphrase)" hint="仅当私钥自身设置了加密保护时填写">
@@ -872,6 +947,8 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 											</div>
 										</div>
 									</div>
+								)}
+								</>
 								)}
 							</div>
 						)}
@@ -1011,13 +1088,27 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 											<Field label="协议类型">
 												<Select
 													value={form.proxyType}
-													onChange={(e) => update("proxyType", e.target.value as "socks5" | "http")}
+													onChange={(e) => update("proxyType", e.target.value as "socks5" | "http" | "command")}
 													className="h-8 text-xs"
 												>
 													<option value="socks5">SOCKS5</option>
 													<option value="http">HTTP</option>
+													<option value="command">ProxyCommand</option>
 												</Select>
 											</Field>
+											{form.proxyType === "command" ? (
+												<div className="col-span-2">
+													<Field label="ProxyCommand" hint="使用 %h 表示目标主机，%p 表示目标端口，%% 表示字面百分号。">
+														<Input
+															value={form.proxyCommand}
+															onChange={(e) => update("proxyCommand", e.target.value)}
+															placeholder="cloudflared access ssh --hostname %h"
+															className="h-8 font-mono text-xs"
+														/>
+													</Field>
+												</div>
+											) : (
+											<>
 
 											<Field label="代理服务器地址">
 												<Input
@@ -1038,6 +1129,28 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 												/>
 											</Field>
 
+											{identities.length > 0 && (
+												<div className="col-span-3">
+													<Field label="钥匙串身份">
+														<Select
+															value={form.proxyIdentityId}
+															onChange={(e) => update("proxyIdentityId", e.target.value)}
+															className="h-8 text-xs"
+														>
+															<option value="">手动凭据</option>
+															{identities.map((i) => (
+																<option key={i.id} value={i.id}>
+																	{i.label} - {i.username}
+																</option>
+															))}
+															{form.proxyIdentityId && !identities.some((i) => i.id === form.proxyIdentityId) && (
+																<option value={form.proxyIdentityId}>钥匙串身份不存在</option>
+															)}
+														</Select>
+													</Field>
+												</div>
+											)}
+											{!form.proxyIdentityId && (
 											<div className="col-span-3 grid grid-cols-2 gap-2">
 												<Field label="代理用户名（可选）">
 													<Input
@@ -1059,6 +1172,9 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 													/>
 												</Field>
 											</div>
+											)}
+											</>
+											)}
 										</div>
 									)}
 								</div>
@@ -1075,6 +1191,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 											onChange={(e) => update("encoding", e.target.value)}
 											className="h-8 font-mono text-xs"
 										>
+											<option value="">{groupDefaults.charset ? `继承分组（${groupDefaults.charset}）` : "默认（UTF-8）"}</option>
 											{["UTF-8", "GBK", "GB18030", "GB2312", "ISO-8859-1", "Big5"].map((enc) => (
 												<option key={enc} value={enc}>
 													{enc}
@@ -1394,12 +1511,12 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 	);
 }
 
-function toForm(host?: Host | null, defaultKeyId?: string, fallbackGroupId?: string | null): FormState {
+function toForm(host?: Host | null, _defaultKeyId?: string, fallbackGroupId?: string | null): FormState {
 	return {
 		name: host?.name ?? "",
 		hostname: host?.hostname ?? "",
-		port: String(host?.port ?? 22),
-		username: host?.username ?? "root",
+		port: host?.port ? String(host.port) : "",
+		username: host?.username ?? "",
 		groupId: host?.groupId ?? fallbackGroupId ?? "",
 		tags: host?.tags?.join(", ") ?? "",
 		favorite: host?.favorite ?? false,
@@ -1407,15 +1524,19 @@ function toForm(host?: Host | null, defaultKeyId?: string, fallbackGroupId?: str
 		authMethod: host?.auth?.method ?? "password",
 		password: "",
 		rememberPassword: host?.auth?.rememberPassword ?? false,
-		keyId: host?.auth?.keyId ?? defaultKeyId ?? "",
+		// 不再默认选第一把密钥：只有钥匙串里有私钥的密钥才能用于认证，需用户明确选择
+		keyId: host?.auth?.keyId ?? "",
+		identityId: host?.auth?.identityId ?? "",
 		keyPath: host?.auth?.keyPath ?? "",
 		passphrase: "",
 		jumpHostIds: host?.jumpHostIds ?? [],
-		encoding: host?.encoding ?? "UTF-8",
+		encoding: host?.encoding ?? "",
 		termType: host?.termType ?? "xterm-256color",
 		proxyEnabled: Boolean(host?.proxy || host?.proxyProfileId),
 		proxyProfileId: host?.proxy ? "" : (host?.proxyProfileId ?? ""),
 		proxyType: host?.proxy?.type ?? "socks5",
+		proxyCommand: host?.proxy?.command ?? "",
+		proxyIdentityId: host?.proxy?.identityId ?? "",
 		proxyHost: host?.proxy?.host ?? "127.0.0.1",
 		proxyPort: String(host?.proxy?.port ?? 1080),
 		proxyUsername: host?.proxy?.username ?? "",

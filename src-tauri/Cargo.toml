@@ -24,7 +24,8 @@ portable-pty = "0.9"
 russh = { version = "0.63", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp = "3.0.1"
 dirs = "6"
-tokio = { version = "1", features = ["sync", "time", "io-util", "net", "rt", "macros"] }
+# process：ProxyCommand（Netcatty proxyUtils.cjs 用 child_process.spawn）
+tokio = { version = "1", features = ["sync", "time", "io-util", "net", "rt", "macros", "process"] }
 keyring = "4"
 tauri-plugin-single-instance = "2"
 encoding_rs = "0.8"
@@ -35,6 +36,14 @@ hmac = "0.13"
 sha1 = "0.11"
 # 本地「解压到当前目录」的 .gz（同 Netcatty 用 zlib 内置解，不依赖系统 gzip）；russh 已经引入同版本
 flate2 = "1"
+# 密钥库的信封加密（AES-256-GCM）与生成密钥用的随机数；均为 russh 已引入的同版本
+ring = "0.17"
+rand = "0.10"
+# 「上传剪贴板图片」读系统剪贴板里的图片（Electron clipboard.readImage 的等价物），编码成 PNG
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+png = "0.18"
+# 剪贴板图片文件名用本地时间（同 Netcatty）；russh-sftp 已引入
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 # 仅测试用：给 #[tokio::test] 提供运行时

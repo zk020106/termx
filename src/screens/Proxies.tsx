@@ -19,6 +19,7 @@ import {
 } from "@/lib/proxyProfiles";
 import { secretDelete, secretLoad, secretSave } from "@/lib/secret";
 import { useHostsStore } from "@/store/hosts";
+import { useIdentitiesStore } from "@/store/identities";
 import { useProxyProfilesStore } from "@/store/proxyProfiles";
 import { toast } from "@/store/toast";
 import { useMemo, useState } from "react";
@@ -27,18 +28,22 @@ import { useMemo, useState } from "react";
  * 代理 —— 对应 Netcatty components/ProxyProfilesManager.tsx（Vault「代理」分区）。
  * 可复用的 HTTP / SOCKS5 代理配置，在主机设置的「网络」里选择「已保存代理」引用。
  * 右键菜单与 Netcatty 一致：编辑 / 复制 | 删除（删除时解除所有主机上的引用）。
- * 差异：ProxyCommand 与「钥匙串身份」凭据不移植——TermX 原生层没有 ProxyCommand 通道，
- * 也没有身份（identity）实体；口令存系统钥匙串，不进配置文件。
+ * 类型含 HTTP / SOCKS5 / ProxyCommand；凭据可选「手动凭据」或「钥匙串身份」（Netcatty 同款）。
+ * 口令存系统钥匙串，不进配置文件。
  * ========================================================================== */
 
 const TYPE_ICON: Record<ProxyProfile["config"]["type"], string> = {
 	http: "icon-[lucide--globe]",
 	socks5: "icon-[lucide--route]",
+	command: "icon-[lucide--terminal-square]",
 };
+
+const MANUAL = "__manual__";
 
 export default function Proxies() {
 	const profiles = useProxyProfilesStore((s) => s.profiles);
 	const hosts = useHostsStore((s) => s.hosts);
+	const identities = useIdentitiesStore((s) => s.identities);
 	const [search, setSearch] = useState("");
 	const [draft, setDraft] = useState<ProxyProfile | null>(null);
 	const [draftPassword, setDraftPassword] = useState("");
@@ -50,7 +55,11 @@ export default function Proxies() {
 		const q = search.trim().toLowerCase();
 		if (!q) return profiles;
 		return profiles.filter(
-			(p) => p.label.toLowerCase().includes(q) || p.config.host.toLowerCase().includes(q) || p.config.type.toLowerCase().includes(q),
+			(p) =>
+				p.label.toLowerCase().includes(q) ||
+				p.config.host.toLowerCase().includes(q) ||
+				p.config.type.toLowerCase().includes(q) ||
+				(p.config.command ?? "").toLowerCase().includes(q),
 		);
 	}, [profiles, search]);
 
@@ -94,7 +103,7 @@ export default function Proxies() {
 
 	const save = async () => {
 		if (!draft) return;
-		const result = prepareProxyProfileForSave(draft);
+		const result = prepareProxyProfileForSave(draft, Date.now(), identities);
 		if (!result.saved) {
 			toast({ title: PROXY_PROFILE_ERROR_TEXT[result.error ?? "required"], tone: "danger" });
 			return;
@@ -119,7 +128,7 @@ export default function Proxies() {
 	const confirmDelete = () => {
 		if (!deleteTarget) return;
 		const hostStore = useHostsStore.getState();
-		hostStore.setAll(removeProxyProfileReferences(deleteTarget.id, hostStore.hosts), hostStore.groups);
+		hostStore.setAll(removeProxyProfileReferences(deleteTarget.id, hostStore.rawHosts), hostStore.groups);
 		useProxyProfilesStore.getState().remove(deleteTarget.id);
 		void secretDelete(proxyProfileSecretAccount(deleteTarget.id)).catch(() => undefined);
 		if (draft?.id === deleteTarget.id) setDraft(null);
@@ -227,8 +236,20 @@ export default function Proxies() {
 								>
 									<option value="http">HTTP</option>
 									<option value="socks5">SOCKS5</option>
+									<option value="command">ProxyCommand</option>
 								</Select>
 							</Field>
+							{draft.config.type === "command" ? (
+								<Field label="ProxyCommand" required hint="使用 %h 表示目标主机，%p 表示目标端口，%% 表示字面百分号。">
+									<Input
+										value={draft.config.command ?? ""}
+										onChange={(e) => updateConfig("command", e.target.value)}
+										placeholder="cloudflared access ssh --hostname %h"
+										className="font-mono text-[11.5px]"
+									/>
+								</Field>
+							) : (
+								<>
 							<div className="grid grid-cols-[1fr_96px] gap-2">
 								<Field label="代理主机" required>
 									<Input
@@ -251,6 +272,44 @@ export default function Proxies() {
 								<div className="flex items-center gap-2 text-[11.5px] font-semibold text-surface-foreground">
 									凭据 <Badge>可选</Badge>
 								</div>
+								{identities.length > 0 && (
+									<Field label="钥匙串身份">
+										<Select
+											value={draft.config.identityId ?? MANUAL}
+											onChange={(e) => updateConfig("identityId", e.target.value === MANUAL ? undefined : e.target.value)}
+										>
+											<option value={MANUAL}>手动凭据</option>
+											{draft.config.identityId && !identities.some((i) => i.id === draft.config.identityId) && (
+												<option value={draft.config.identityId}>钥匙串身份不存在</option>
+											)}
+											{identities.map((i) => (
+												<option key={i.id} value={i.id}>
+													{i.label}
+												</option>
+											))}
+										</Select>
+									</Field>
+								)}
+								{draft.config.identityId ? (
+									(() => {
+										const identity = identities.find((i) => i.id === draft.config.identityId);
+										if (!identity) return <p className="rounded-control bg-danger/10 p-2 text-[11.5px] text-danger">钥匙串身份不存在</p>;
+										return (
+											<>
+												<div className="flex items-center gap-2 rounded-control bg-surface-raised p-2 text-[11.5px]">
+													<Badge>钥匙串身份</Badge>
+													<span className="truncate">
+														{identity.label} - {identity.username}
+													</span>
+												</div>
+												{(!identity.username || !identity.hasPassword) && (
+													<p className="rounded-control bg-danger/10 p-2 text-[11.5px] text-danger">代理身份需要用户名和密码</p>
+												)}
+											</>
+										);
+									})()
+								) : (
+									<>
 								<Field label="用户名">
 									<Input
 										value={draft.config.username ?? ""}
@@ -271,7 +330,11 @@ export default function Proxies() {
 										className="font-mono"
 									/>
 								</Field>
+									</>
+								)}
 							</div>
+								</>
+							)}
 						</div>
 					)}
 				</Drawer>

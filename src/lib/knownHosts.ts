@@ -42,3 +42,20 @@ export function knownHostLabel(entry: KnownHostEntry): string {
 	if (entry.hashed) return "（哈希的主机名）";
 	return entry.patterns.join(", ");
 }
+
+export interface KnownHostsImportResult {
+	noFile: boolean;
+	parsed: number;
+	imported: number;
+	filteredPublic: number;
+}
+
+/**
+ * Netcatty「扫描系统」（path 省略 → ~/.ssh/known_hosts）/「导入文件」。
+ * 文件由 Rust 读取并解析；写入 TermX 的 known_hosts 前 Rust 会弹原生确认框。
+ */
+export async function knownHostsImport(path?: string): Promise<KnownHostsImportResult> {
+	if (!isTauri()) throw new Error("仅桌面端可用");
+	const { invoke } = await import("@tauri-apps/api/core");
+	return invoke<KnownHostsImportResult>("known_hosts_import", { path: path ?? null });
+}

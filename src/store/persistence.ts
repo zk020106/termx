@@ -12,6 +12,8 @@ import {
 import { stripHostSecrets, type LegacySecret } from "@/lib/configSecrets";
 import { secretRememberForSession, secretSave } from "@/lib/secret";
 import { useForwardsStore } from "./forwards";
+import { useGroupConfigsStore } from "./groupConfigs";
+import { useIdentitiesStore } from "./identities";
 import { useHostsStore } from "./hosts";
 import { useKeysStore } from "./keys";
 import { useProxyProfilesStore } from "./proxyProfiles";
@@ -32,13 +34,16 @@ export function snapshotConfig(): PersistedConfig {
 	return {
 		version: 1,
 		// 写盘与导出共用这一份：密码一律剥掉（只存系统钥匙串）
-		hosts: stripHostSecrets(useHostsStore.getState().hosts).hosts,
+		// 落盘的是原始主机（分组默认值 / 身份在生效层里，不固化进主机）
+		hosts: stripHostSecrets(useHostsStore.getState().rawHosts).hosts,
 		groups: useHostsStore.getState().groups,
 		keys: useKeysStore.getState().keys,
 		snippets: useSnippetsStore.getState().snippets,
 		// 转发规则的运行期状态（运行中、连接数、流量）不进配置：否则流量每秒变化都会触发写盘
 		forwards: useForwardsStore.getState().rules.map(persistableForward),
 		proxyProfiles: useProxyProfilesStore.getState().profiles,
+		identities: useIdentitiesStore.getState().identities,
+		groupConfigs: useGroupConfigsStore.getState().configs,
 		preferences: { accent: useThemeStore.getState().accent, ...preferences },
 	};
 }
@@ -78,6 +83,9 @@ export async function hydrateStores(): Promise<ConfigLoadIssue | null> {
 		// 等偏好（钥匙串开关）就绪后迁进系统钥匙串，最后把干净的配置写回磁盘
 		const { hosts, legacy } = stripHostSecrets(loaded.hosts);
 		const config: PersistedConfig = { ...loaded, hosts };
+		// 先灌身份与分组设置，再灌主机：生效主机一次算对
+		useIdentitiesStore.getState().setAll(config.identities);
+		useGroupConfigsStore.getState().setAll(config.groupConfigs);
 		useHostsStore.getState().setAll(config.hosts, config.groups);
 		useKeysStore.getState().setAll(config.keys);
 		useSnippetsStore.getState().setAll(config.snippets);
@@ -137,6 +145,8 @@ export async function migrateLegacySecrets(legacy: LegacySecret[]): Promise<Secr
 }
 
 function applyConfig(config: PersistedConfig) {
+	useIdentitiesStore.getState().setAll(config.identities);
+	useGroupConfigsStore.getState().setAll(config.groupConfigs);
 	useHostsStore.getState().setAll(config.hosts, config.groups);
 	useKeysStore.getState().setAll(config.keys);
 	useSnippetsStore.getState().setAll(config.snippets);
@@ -146,10 +156,42 @@ function applyConfig(config: PersistedConfig) {
 	useSettingsStore.getState().hydrate(config.preferences);
 }
 
+/** 自动保存的内部钩子：另一窗口写盘后重新载入时用（见 reloadFromDisk） */
+let autosaveHooks: { pending: () => boolean; markSaved: () => void } | null = null;
+
+/**
+ * 多窗口：另一个窗口刚写过配置（后端广播 config://changed）时重新载入，
+ * 免得本窗口拿着旧副本在下次自动保存时把对方的修改覆盖掉。
+ * 本窗口自己还有没写盘的修改时不载入（马上轮到本窗口写盘，并广播给对方）。
+ */
+export async function reloadFromDisk(): Promise<void> {
+	if (autosaveHooks?.pending()) return;
+	let raw: unknown;
+	try {
+		raw = await loadRawConfig();
+	} catch {
+		return;
+	}
+	const version = rawVersion(raw);
+	if (version !== null && version > 1) return;
+	const loaded = normalizeConfig(raw as Partial<PersistedConfig> | null);
+	const { hosts } = stripHostSecrets(loaded.hosts);
+	applyConfig({ ...loaded, hosts });
+	autosaveHooks?.markSaved();
+}
+
 export function startAutosave(): () => void {
 	let timer: number | null = null;
 	// 用序列化结果做脏检查：改视图、改搜索词这类内存态不该触发写盘
 	let lastSaved = snapshotText();
+	autosaveHooks = {
+		pending: () => timer !== null,
+		markSaved: () => {
+			if (timer !== null) window.clearTimeout(timer);
+			timer = null;
+			lastSaved = snapshotText();
+		},
+	};
 
 	const flush = () => {
 		timer = null;
@@ -172,6 +214,8 @@ export function startAutosave(): () => void {
 		useSnippetsStore.subscribe(schedule),
 		useForwardsStore.subscribe(schedule),
 		useProxyProfilesStore.subscribe(schedule),
+		useIdentitiesStore.subscribe(schedule),
+		useGroupConfigsStore.subscribe(schedule),
 		useThemeStore.subscribe(schedule),
 		useSettingsStore.subscribe(schedule),
 	];
@@ -179,6 +223,7 @@ export function startAutosave(): () => void {
 	return () => {
 		for (const unsubscribe of unsubscribes) unsubscribe();
 		if (timer !== null) window.clearTimeout(timer);
+		autosaveHooks = null;
 	};
 }
 

@@ -21,6 +21,7 @@ import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref
 import { fg, noteColor, readPalette, xtermThemeFor } from "./terminalTheme";
 import { CommandCompletionPopup } from "./CommandCompletionPopup";
 import { useCommandsStore, type CommandSuggestion } from "@/store/commands";
+import { useShellHistoryStore } from "@/store/shellHistory";
 import { cn } from "@/lib/cn";
 import { isLikelySecretEntry } from "@/lib/sensitive";
 import { effectiveLook } from "@/lib/hostTerminal";
@@ -34,13 +35,19 @@ import {
 	subscribeCopyOnSelectUserGesture,
 } from "./netcatty/copyOnSelect";
 import { currentHotkeyContext, emitTerminalRequest, matchHotkey } from "@/lib/hotkeys";
+import { resolveSnippetCommand } from "@/lib/snippetRun";
+import { useSnippetsStore } from "@/store/snippets";
 import {
 	APP_LEVEL_ACTIONS,
 	TERMINAL_ACTIONS,
 	nextTerminalFontSizeForAction,
 	nextTerminalFontSizeForWheel,
+	matchesKeyBinding,
 } from "@/lib/keyBindings";
 import { markMiddleClickContextMenuEvent } from "./terminalMenu";
+import { toast } from "@/store/toast";
+import { ZmodemOverlay } from "./ZmodemOverlay";
+import { parseOsc7Cwd, setSessionCwd, uploadClipboardImage, type RemoteClipboardImageUploadResult } from "@/lib/terminalCwd";
 
 /* =============================================================================
  * 终端分屏格 —— xterm 6 的 React 封装。
@@ -79,6 +86,21 @@ export interface TerminalHandle {
 	endSearch: () => void;
 	focus: () => void;
 	isDemo: () => boolean;
+	/** Netcatty「上传剪贴板图片」：剪贴板图片经 SFTP 传到远端 cwd，再把路径键入终端 */
+	uploadClipboardImage: () => Promise<RemoteClipboardImageUploadResult>;
+	/** 本格是否接着一条已建立的 SSH 会话（远端图片粘贴 / 目录追踪只对它开放） */
+	hasRemoteSession: () => boolean;
+	/** 把一段数据直接写进本格会话（Netcatty terminalBackend.writeToSession，不经 xterm 粘贴通道） */
+	writeToSession: (data: string) => void;
+	/** 只在本地显示一段终端数据，不发给远端（Netcatty writeLocalTerminalData） */
+	writeLocalTerminalData: (data: string) => void;
+}
+
+/** Netcatty handleClipboardImageUploadResult 的提示文案 */
+export function toastClipboardImageUploadResult(result: RemoteClipboardImageUploadResult): void {
+	if (result.ok) return;
+	if (result.reason === "no-image") toast({ title: "剪贴板中没有图片", tone: "warning" });
+	else toast({ title: "无法上传剪贴板图片", description: result.detail, tone: "danger" });
 }
 
 export function Terminal({
@@ -112,6 +134,8 @@ export function Terminal({
 	const highlighterRef = useRef<KeywordHighlighter | null>(null);
 	/** Ctrl(⌘)+= / - / 0 与 Ctrl+滚轮的会话内字号（null = 跟随设置）；同 Netcatty 按会话缩放 */
 	const zoomFontRef = useRef<number | null>(null);
+	const sessionKeyRef = useRef<string | null>(sessionKey ?? null);
+	sessionKeyRef.current = sessionKey ?? null;
 	const resolvedTheme = useThemeStore((s) => s.resolved);
 	const accent = useThemeStore((s) => s.accent);
 
@@ -214,6 +238,49 @@ export function Terminal({
 		[paneId, sessionKey],
 	);
 
+	const remoteKey = (): string | null => {
+		const key = sessionKeyRef.current;
+		return key && hasSshSession(key) ? key : null;
+	};
+
+	/** Netcatty handleRemoteClipboardImageUpload 的收尾：路径直接写进会话（不回车）并聚焦 */
+	const runClipboardImageUpload = async (): Promise<RemoteClipboardImageUploadResult> => {
+		const key = remoteKey();
+		if (!key || noPtyRef.current) return { ok: false, reason: "no-session" };
+		try {
+			const result = await uploadClipboardImage(key);
+			if (result.ok) {
+				writeSsh(key, result.pastedPath);
+				termRef.current?.scrollToBottom();
+				termRef.current?.focus();
+			}
+			return result;
+		} catch (error) {
+			return { ok: false, reason: "upload-failed", detail: error instanceof Error ? error.message : String(error) };
+		}
+	};
+
+	/**
+	 * Netcatty handleTerminalClipboardPaste：设置「粘贴时自动上传剪贴板图片」打开且是远端会话时图片优先，
+	 * 剪贴板里没有图片（no-image / unsupported）才照常粘贴文本；上传失败报错且不再粘贴别的内容。
+	 */
+	const pasteFromClipboard = async (term: XTerm): Promise<boolean> => {
+		if (useSettingsStore.getState().autoUploadClipboardImageOnPaste && remoteKey()) {
+			const result = await runClipboardImageUpload();
+			if (result.ok) return true;
+			if (result.reason !== "no-image" && result.reason !== "unsupported" && result.reason !== "no-session") {
+				toastClipboardImageUploadResult(result);
+				return false;
+			}
+		}
+		const text = await readClipboard();
+		if (!text || noPtyRef.current) return false;
+		// 走 xterm 的粘贴通道：远端开了 bracketed paste（?2004h）时自动包上
+		// \e[200~ … \e[201~，多行粘贴不会被逐行执行；随后经 onData 写入会话（含广播）
+		term.paste(text);
+		return true;
+	};
+
 	useEffect(() => {
 		const container = containerRef.current;
 		if (!container) return;
@@ -264,6 +331,13 @@ export function Terminal({
 			params[0] === 3 && !useSettingsStore.getState().clearWipesScrollback,
 		);
 
+		// OSC 7：shell 上报当前目录（Netcatty createXTermRuntime 的 OSC 7 处理器）
+		const osc7Sub = term.parser.registerOscHandler(7, (data) => {
+			const cwd = parseOsc7Cwd(data);
+			if (cwd) setSessionCwd(sessionKey ?? `pty:${paneId}`, cwd);
+			return true;
+		});
+
 		// 选择即复制（Netcatty copyOnSelect.ts：只认用户手势产生的选区，搜索 / 程序选中不写剪贴板）
 		const copyTracker = createCopyOnSelectUserGestureTracker();
 		const unsubscribeGesture = subscribeCopyOnSelectUserGesture(term, copyTracker);
@@ -290,9 +364,7 @@ export function Terminal({
 			event.preventDefault();
 			event.stopPropagation();
 			if (behavior === "paste") {
-				void readClipboard().then((text) => {
-					if (text && !noPtyRef.current) term.paste(text);
-				});
+				void pasteFromClipboard(term);
 				return;
 			}
 			const menuEvent = markMiddleClickContextMenuEvent(
@@ -413,7 +485,20 @@ export function Terminal({
 		term.attachCustomKeyEventHandler((event) => {
 			// 快捷键（Netcatty createXTermRuntime 的 checkAppShortcut 分支）
 			if (event.type === "keydown") {
-				const binding = matchHotkey(event);
+				// 片段快捷键优先（Netcatty：即使快捷键方案关闭也生效）；只在会话可写时拦截
+				const hotkeyCtx = currentHotkeyContext();
+				for (const snippet of useSnippetsStore.getState().snippets) {
+					if (snippet.shortkey && matchesKeyBinding(event, snippet.shortkey, hotkeyCtx.isMac)) {
+						if (noPtyRef.current) return true;
+						event.preventDefault();
+						event.stopPropagation();
+						void resolveSnippetCommand(snippet).then((command) => {
+							if (command !== null) send(`${command}\r`);
+						});
+						return false;
+					}
+				}
+				const binding = matchHotkey(event, hotkeyCtx);
 				if (binding) {
 					const { action } = binding;
 					// 应用级动作交给窗口层处理，不能再发给 shell
@@ -439,9 +524,7 @@ export function Terminal({
 								void writeClipboard(normalizeCopied(term.getSelection()));
 								break;
 							case "paste":
-								void readClipboard().then((text) => {
-									if (text && !noPtyRef.current) term.paste(text);
-								});
+								void pasteFromClipboard(term);
 								break;
 							case "pasteSelection": {
 								const selected = term.getSelection();
@@ -545,6 +628,14 @@ export function Terminal({
 				// 在密码 / 口令提示符下（或远端关了回显时）敲的是秘密，不是命令：绝不记进历史
 				if (cmd && !isLikelySecretEntry(currentLogicalLine(term), cmd)) {
 					useCommandsStore.getState().recordCommand(cmd, hostId);
+					// Netcatty onCommandExecuted → Shell 历史（本地终端记为「本地终端」）
+					const hostRec = hostId ? useHostsStore.getState().hosts.find((h) => h.id === hostId) : undefined;
+					useShellHistoryStore.getState().add({
+						command: cmd,
+						hostId: hostId ?? "",
+						hostLabel: hostRec?.name ?? "本地终端",
+						sessionId: paneId,
+					});
 				}
 				inputBufferRef.current = "";
 				setInputBuffer("");
@@ -650,6 +741,7 @@ export function Terminal({
 			searchResultsSub.dispose();
 			selectionSub.dispose();
 			ed3Sub.dispose();
+			osc7Sub.dispose();
 			unsubscribeGesture();
 			unsubscribeCommand();
 			copyTracker.dispose();
@@ -794,21 +886,19 @@ export function Terminal({
 				return writeClipboard(text);
 			},
 			paste: async () => {
-				let text = "";
-				try {
-					text = await navigator.clipboard.readText();
-				} catch {
-					return false;
-				}
-				if (!text) return false;
 				const term = termRef.current;
 				// 没有真实会话（说明页）时不往终端里塞内容
 				if (!term || noPtyRef.current) return false;
-				// 走 xterm 的粘贴通道：远端开了 bracketed paste（?2004h）时自动包上
-				// \e[200~ … \e[201~，多行粘贴不会被逐行执行；随后经 onData 写入会话（含广播）
-				term.paste(text);
-				return true;
+				return pasteFromClipboard(term);
 			},
+			uploadClipboardImage: runClipboardImageUpload,
+			hasRemoteSession: () => remoteKey() !== null && !noPtyRef.current,
+			writeToSession: (data: string) => {
+				const key = remoteKey();
+				if (key) writeSsh(key, data);
+				else writePty(paneId, data);
+			},
+			writeLocalTerminalData: (data: string) => termRef.current?.write(data),
 			saveScreen: () => {
 				const term = termRef.current;
 				if (!term) return;
@@ -877,6 +967,7 @@ export function Terminal({
 			}}
 		>
 			<div ref={containerRef} className="h-full w-full" data-pane={paneId} data-host={hostId ?? undefined} />
+			<ZmodemOverlay sessionKey={sessionKey} />
 
 			{/* Warp 风格行内幽灵文本 (Ghost Text) */}
 			{ghostRemainder && cursorCoords && (

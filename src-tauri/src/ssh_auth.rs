@@ -61,6 +61,21 @@ pub enum Credential {
     AskPassphrase {
         path: String,
     },
+    /// 钥匙串（密钥库）里的私钥：私钥材料由 Rust 从密钥库就地解开，前端只传 id。
+    /// 口令：调用方给了就用；没给则用钥匙串里记住的口令；都没有且私钥加了口令时连接时再问。
+    StoredKey {
+        key_id: String,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        passphrase: Option<String>,
+    },
+    /// 已经解开的私钥（只在 Rust 内部由 StoredKey 换来，不接受前端传入）
+    #[serde(skip)]
+    Loaded {
+        key: Arc<ssh_key::PrivateKey>,
+        label: String,
+    },
 }
 
 /// 手写 `Debug`：凭据有可能被顺手打进日志，密码与口令绝不能在日志里出现。
@@ -77,6 +92,13 @@ impl std::fmt::Debug for Credential {
             Credential::KeyboardInteractive => f.write_str("KeyboardInteractive"),
             Credential::AskPassword => f.write_str("AskPassword"),
             Credential::AskPassphrase { path } => f.debug_struct("AskPassphrase").field("path", path).finish(),
+            Credential::StoredKey { key_id, label, passphrase } => f
+                .debug_struct("StoredKey")
+                .field("key_id", key_id)
+                .field("label", label)
+                .field("passphrase", &passphrase.as_ref().map(|_| "<已隐藏>"))
+                .finish(),
+            Credential::Loaded { label, .. } => f.debug_struct("Loaded").field("label", label).finish(),
         }
     }
 }
@@ -187,7 +209,7 @@ pub async fn authenticate_as<H: russh::client::Handler>(
     // 「连接时再问」的凭据：先问到具体的密码 / 口令（正常流程里调用方已经换好了）
     let resolved;
     let credential = match credential {
-        Credential::AskPassword | Credential::AskPassphrase { .. } => {
+        Credential::AskPassword | Credential::AskPassphrase { .. } | Credential::StoredKey { .. } => {
             match resolve_credential(app, key, prompts, credential.clone(), username, username, phase).await {
                 Ok(c) => {
                     resolved = c;
@@ -210,7 +232,8 @@ pub async fn authenticate_as<H: russh::client::Handler>(
         Credential::KeyboardInteractive => {
             keyboard_interactive_auth(Some(app), key, session, username, prompts).await
         }
-        Credential::AskPassword | Credential::AskPassphrase { .. } => {
+        Credential::Loaded { key, label } => loaded_key_auth(session, username, key.clone(), label).await,
+        Credential::AskPassword | Credential::AskPassphrase { .. } | Credential::StoredKey { .. } => {
             unreachable!("上面已经换成具体凭据")
         }
     };
@@ -257,6 +280,38 @@ pub async fn resolve_credential(
             let passphrase = answers.pop().filter(|p| !p.is_empty());
             Ok(Credential::PrivateKey { path, passphrase })
         }
+        Credential::StoredKey { key_id, label, passphrase } => {
+            let shown = label.clone().unwrap_or_else(|| "钥匙串密钥".to_string());
+            let text = {
+                let app = app.clone();
+                let id = key_id.clone();
+                tauri::async_runtime::spawn_blocking(move || crate::key_vault::load_text(&app, &id))
+                    .await
+                    .map_err(|e| format!("读取密钥库异常：{e}"))??
+            };
+            let mut pass = passphrase.filter(|p| !p.is_empty());
+            if pass.is_none() && crate::key_vault::needs_passphrase(&text) {
+                let id = key_id.clone();
+                pass = tauri::async_runtime::spawn_blocking(move || crate::key_vault::saved_passphrase(&id))
+                    .await
+                    .ok()
+                    .flatten();
+                if pass.is_none() {
+                    emit_phase(app, key, phase, true, format!("{who}：等待输入私钥口令"));
+                    let items = [Prompt {
+                        prompt: format!("密钥「{shown}」的口令："),
+                        echo: false,
+                    }];
+                    let mut answers = ask_user(Some(app), key, prompts, who, "这把私钥有口令保护，请输入后继续连接。", &items).await?;
+                    pass = answers.pop().filter(|p| !p.is_empty());
+                }
+            }
+            let private = crate::key_vault::decode(&text, pass.as_deref()).map_err(|e| format!("密钥「{shown}」：{e}"))?;
+            Ok(Credential::Loaded {
+                key: Arc::new(private),
+                label: shown,
+            })
+        }
         other => Ok(other),
     }
 }
@@ -296,13 +351,22 @@ async fn private_key_auth<H: russh::client::Handler>(
     passphrase: Option<&str>,
 ) -> Result<String, String> {
     let private = load_private_key(path, passphrase)?;
+    loaded_key_auth(session, username, Arc::new(private), &display_path(path)).await
+}
+
+/// 用已经解开的私钥认证（文件私钥与钥匙串私钥共用）
+async fn loaded_key_auth<H: russh::client::Handler>(
+    session: &mut Handle<H>,
+    username: &str,
+    private: Arc<ssh_key::PrivateKey>,
+    shown: &str,
+) -> Result<String, String> {
     let public = private.public_key().clone();
-    let shown = display_path(path);
     let algorithm = public.algorithm().to_string();
     let fingerprint = known_hosts::fingerprint_of(&public);
 
     let hash_alg = rsa_hash_alg(session, public.algorithm()).await;
-    let key = PrivateKeyWithHashAlg::new(Arc::new(private), hash_alg);
+    let key = PrivateKeyWithHashAlg::new(private, hash_alg);
 
     let result = session
         .authenticate_publickey(username, key)

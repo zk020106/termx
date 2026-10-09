@@ -1,6 +1,8 @@
 import type { ConnectProfile } from "@/lib/connectPlan";
 import { resolveConnectProfile } from "@/lib/connectProfile";
 import { ReplayBuffer } from "@/lib/replayBuffer";
+import { forgetSessionCwd } from "@/lib/terminalCwd";
+import { consumeZmodemChunk, disposeZmodemSession, interceptZmodemInput } from "@/lib/zmodem/sessionZmodem";
 import { listenSsh, sshConnect, sshDisconnect, sshResize, sshWrite, type SshPhase } from "@/lib/ssh";
 
 /* =============================================================================
@@ -227,7 +229,14 @@ export async function openSshSession(
 				entry.replay.push(chunk);
 				for (const sub of entry.subs) sub(chunk);
 			},
+			onZmodem: (chunk) => {
+				consumeZmodemChunk(key, chunk, (text) => {
+					entry.replay.push(text);
+					for (const sub of entry.subs) sub(text);
+				});
+			},
 			onExit: (code) => {
+				disposeZmodemSession(key);
 				entry.connected = false;
 				entry.exited = true;
 				for (const sub of entry.exitSubs) sub(code);
@@ -319,6 +328,7 @@ export function clearSshReplay(key: string): void {
 export function writeSsh(key: string, data: string): boolean {
 	const entry = sessions.get(key);
 	if (!entry?.connected) return false;
+	if (interceptZmodemInput(key, data)) return true;
 
 	const mock = mockSshBuffers.get(key);
 	if (mock) {
@@ -404,4 +414,5 @@ export async function closeSshSession(key: string): Promise<void> {
 	entry.unlisten = null;
 	entry.connected = false;
 	sessions.delete(key);
+	forgetSessionCwd(key);
 }

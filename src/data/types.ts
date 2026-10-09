@@ -52,6 +52,13 @@ export interface HostAuth {
 	 * 绝不写进 termx.json / 导出文件；旧版本留在配置里的明文会在启动时迁走（lib/configSecrets.ts）。
 	 */
 	rememberPassword?: boolean;
+	/**
+	 * 只出现在「生效主机」上（store/hosts.ts 由 lib/groupConfig.ts 算出，不落盘）：
+	 * 凭据来自身份 / 分组时，密码在钥匙串里的账户（`identity:<id>` / `group:<id>`）。
+	 */
+	secretAccount?: string;
+	/** 只出现在生效主机上：凭据来自哪里（界面提示用） */
+	credentialSource?: "host" | "identity" | "group";
 }
 
 export interface HostTerminalPrefs {
@@ -68,9 +75,17 @@ export interface HostTerminalPrefs {
 }
 
 export interface ProxyConfig {
-	type: "socks5" | "http";
+	/** command = ProxyCommand（Netcatty proxyConfig.type === 'command'） */
+	type: "socks5" | "http" | "command";
 	host: string;
 	port: number;
+	/** ProxyCommand 模板：%h 目标主机、%p 目标端口、%% 字面百分号 */
+	command?: string;
+	/**
+	 * 用钥匙串身份作为代理凭据（Netcatty「钥匙串身份」/ ProxyConfig.identityId）：
+	 * 用户名取身份的用户名，口令取钥匙串 `identity:<id>`；与手填用户名二选一。
+	 */
+	identityId?: string;
 	/**
 	 * 代理认证（可选）：SOCKS5 用户名/口令（RFC 1929）或 HTTP Basic。
 	 * 口令存系统钥匙串（账户名 `proxy:<主机 id>`），不进配置文件。
@@ -138,6 +153,66 @@ export interface SshKey {
 	/** 已部署到哪些主机 */
 	deployedTo: string[];
 	hasPassphrase: boolean;
+	/**
+	 * 私钥在本机密钥库里（Netcatty SSHKey.privateKey）。私钥本体由 Rust 信封加密保存
+	 * （数据密钥在系统钥匙串），配置文件里只有这个标记。
+	 */
+	hasPrivateKey?: boolean;
+	/** Netcatty source：generated / imported（只导入了公钥的是 public） */
+	source?: "generated" | "imported" | "public";
+	/** 口令记在系统钥匙串里（Netcatty savePassphrase） */
+	savePassphrase?: boolean;
+}
+
+/* ------------------------------- 身份 ------------------------------- */
+
+/**
+ * 钥匙串身份（Netcatty domain/models/connection.ts Identity）：用户名 + 密码或密钥的组合，
+ * 主机 / 分组 / 代理都可以引用。密码存系统钥匙串（账户 `identity:<id>`），不进配置文件。
+ */
+export interface Identity {
+	id: string;
+	label: string;
+	username: string;
+	authMethod: "password" | "key";
+	keyId?: string;
+	/** 钥匙串里存了密码 */
+	hasPassword?: boolean;
+	created: number;
+}
+
+/* ------------------------------- 分组设置 ------------------------------- */
+
+/**
+ * 分组默认值（Netcatty GroupConfig）。Netcatty 用分组路径做键，TermX 的分组有 id/parentId，
+ * 所以用 groupId 做键、按 parentId 链从根到叶合并（子分组覆盖父分组）。
+ * 密码存系统钥匙串（账户 `group:<groupId>`），配置文件里只有 hasPassword 标记。
+ */
+export interface GroupConfig {
+	groupId: string;
+	username?: string;
+	authMethod?: AuthMethod;
+	hasPassword?: boolean;
+	identityId?: string;
+	/** Netcatty identityFileId：钥匙串里的密钥 */
+	keyId?: string;
+	/** Netcatty identityFilePaths：本地私钥文件 */
+	keyPath?: string;
+	port?: number;
+	proxyProfileId?: string;
+	proxyConfig?: ProxyConfig;
+	/** Netcatty hostChain.hostIds */
+	jumpHostIds?: string[];
+	startupCommand?: string;
+	environmentVariables?: { key: string; value: string }[];
+	charset?: string;
+	termType?: string;
+	theme?: string;
+	themeOverride?: boolean;
+	fontFamily?: string;
+	fontFamilyOverride?: boolean;
+	fontSize?: number;
+	fontSizeOverride?: boolean;
 }
 
 /* ------------------------------ 命令片段 ------------------------------ */
@@ -150,6 +225,8 @@ export interface Snippet {
 	/** 形如 ${service} 的占位变量 */
 	variables: string[];
 	description?: string;
+	/** 快捷键（Netcatty snippet.shortkey）：在终端里按下即发送这条命令 */
+	shortkey?: string;
 }
 
 export type SnippetTarget = "current" | "selected" | "all";

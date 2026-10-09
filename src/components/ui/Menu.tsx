@@ -129,3 +129,79 @@ export function MenuItem({
 		</button>
 	);
 }
+
+/**
+ * 子菜单（Radix ContextMenuSub 的等价物）：悬停 / 点击展开到右侧，贴边时翻到左侧。
+ * 用 fixed 定位，避免被父菜单的滚动容器裁掉。
+ */
+export function MenuSub({
+	icon,
+	label,
+	hint,
+	children,
+	width = 180,
+}: {
+	icon?: ReactNode;
+	label: string;
+	/** 右侧的当前值提示（Netcatty 子菜单触发器右边的小字） */
+	hint?: ReactNode;
+	children: ReactNode;
+	width?: number;
+}) {
+	const rowRef = useRef<HTMLDivElement | null>(null);
+	const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+	const timer = useRef<number | null>(null);
+	const openSub = () => {
+		if (timer.current) window.clearTimeout(timer.current);
+		const rect = rowRef.current?.getBoundingClientRect();
+		if (!rect) return;
+		const left = rect.right + width + 8 > window.innerWidth ? Math.max(8, rect.left - width - 4) : rect.right + 4;
+		setPos({ left, top: rect.top - 6 });
+	};
+	const closeSoon = () => {
+		if (timer.current) window.clearTimeout(timer.current);
+		timer.current = window.setTimeout(() => setPos(null), 150);
+	};
+	return (
+		<div ref={rowRef} onMouseEnter={openSub} onMouseLeave={closeSoon}>
+			<button
+				type="button"
+				role="menuitem"
+				aria-haspopup="menu"
+				aria-expanded={pos !== null}
+				onClick={openSub}
+				className={cn(
+					"group flex h-7.5 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[11.5px] text-surface-foreground transition-all hover:bg-primary/15 hover:text-primary",
+					pos && "bg-primary/10",
+				)}
+			>
+				{typeof icon === "string" ? <span className={cn(icon, "size-3.5 shrink-0 text-muted group-hover:text-primary")} /> : icon}
+				<span className="flex-1 truncate">{label}</span>
+				{hint && <span className="flex shrink-0 items-center gap-1 text-[10px] text-faint">{hint}</span>}
+				<span className="icon-[lucide--chevron-right] size-3 shrink-0 text-faint" />
+			</button>
+			{pos && (
+				<div
+					role="menu"
+					aria-label={label}
+					className="fixed z-[60] rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover backdrop-blur-md ring-1 ring-black/5"
+					style={{ left: pos.left, top: pos.top, width }}
+					onMouseEnter={openSub}
+					onMouseLeave={closeSoon}
+				>
+					{children}
+				</div>
+			)}
+		</div>
+	);
+}
+
+/** 不可点的小标题（Radix ContextMenuLabel） */
+export function MenuLabel({ icon, label }: { icon?: string; label: string }) {
+	return (
+		<div className="flex items-center gap-2 px-2.5 pt-1 pb-1 text-[11px] font-medium text-muted">
+			{icon && <span className={cn(icon, "size-3.5 shrink-0")} />}
+			{label}
+		</div>
+	);
+}

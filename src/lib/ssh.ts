@@ -1,5 +1,6 @@
 import type { ConnectProfile } from "./connectPlan";
 import { isTauri } from "./tauri";
+import { ownSession } from "./window";
 
 /* SSH（原生壳内的 russh 实现）前端入口。
  * 连接过程与数据都通过事件推送，这里只负责发起与写入。
@@ -30,7 +31,9 @@ export type Credential =
 	| { method: "keyboard_interactive" }
 	/** 连接到这一跳时再弹框问密码 / 私钥口令（跳板机没有保存凭据时用） */
 	| { method: "ask_password" }
-	| { method: "ask_passphrase"; path: string };
+	| { method: "ask_passphrase"; path: string }
+	/** 钥匙串（密钥库）里的私钥：私钥材料由 Rust 就地解开；口令缺省时用记住的口令或连接时再问 */
+	| { method: "stored_key"; keyId: string; label?: string | null; passphrase?: string | null };
 
 /** SSH Agent 里的一个身份：只有公钥信息，私钥始终留在 agent 自己的进程里 */
 export interface AgentIdentity {
@@ -174,6 +177,8 @@ export async function sshConnect(options: SshConnectOptions): Promise<void> {
 		rows: options.rows,
 		profile: options.profile ?? null,
 	});
+	// 会话归属登记：所在窗口关闭时后端断开它（多窗口，见 app_window.rs）
+	ownSession("ssh", options.key);
 }
 
 /** 远端命令的执行结果 */
@@ -266,6 +271,7 @@ export async function listenSsh(
 		onExit: (code: number | null) => void;
 		/** 键盘交互：服务器发来一轮提问，等用户作答 */
 		onAuthPrompt?: (payload: AuthPromptRequest) => void;
+		onZmodem?: (chunk: { encoding: string; data: string }) => void;
 	},
 ): Promise<() => void> {
 	const { listen } = await import("@tauri-apps/api/event");
@@ -273,6 +279,10 @@ export async function listenSsh(
 	const unlistenPhase = await listen<SshPhase>(`ssh://state/${key}`, (event) => handlers.onPhase(event.payload));
 	const unlistenData = await listen<string>(`ssh://data/${key}`, (event) => handlers.onData(event.payload));
 	const unlistenExit = await listen<number | null>(`ssh://exit/${key}`, (event) => handlers.onExit(event.payload));
+	// ZMODEM：Rust 闸门检测到 sz / rz 后推来的原始字节（见 src-tauri/src/zmodem.rs）
+	const unlistenZmodem = handlers.onZmodem
+		? await listen<{ encoding: string; data: string }>(`ssh://zmodem/${key}`, (event) => handlers.onZmodem?.(event.payload))
+		: null;
 	const unlistenPrompt = handlers.onAuthPrompt
 		? await listen<AuthPromptRequest>(`ssh://auth-prompt/${key}`, (event) => handlers.onAuthPrompt?.(event.payload))
 		: null;
@@ -281,6 +291,7 @@ export async function listenSsh(
 		unlistenPhase();
 		unlistenData();
 		unlistenExit();
+		unlistenZmodem?.();
 		unlistenPrompt?.();
 	};
 }

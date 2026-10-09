@@ -452,6 +452,130 @@ fn remove_line(path: &Path, line: &str) -> Result<usize, String> {
     Ok(removed)
 }
 
+/* ------------------------------ 导入（Netcatty KnownHostsManager 扫描系统 / 导入文件） ------------------------------ */
+
+/// Netcatty PUBLIC_SERVICE_HOSTNAMES：公共代码托管服务不当作受管主机导入
+const PUBLIC_SERVICE_HOSTNAMES: [&str; 5] = ["github.com", "gitlab.com", "bitbucket.org", "ssh.dev.azure.com", "vs-ssh.visualstudio.com"];
+
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownHostsImport {
+    /// 源文件不存在（扫描系统时 = Netcatty scanNoFile）
+    pub no_file: bool,
+    /// 源文件里可用的记录数
+    pub parsed: usize,
+    pub imported: usize,
+    /// 公共服务主机被过滤的条数（Netcatty scanFiltered）
+    pub filtered_public: usize,
+}
+
+/// 挑出要导入的行：能解析出公钥、不是 @cert-authority、不是公共服务主机、
+/// 且 TermX 记录里还没有这个 host:port（Netcatty 以 `${hostname}:${port}` 去重；哈希行按整行去重）
+fn select_import_lines(source: &str, existing: &str) -> (usize, usize, Vec<String>) {
+    let existing_entries = parse_entries(existing, "termx");
+    let mut seen_hosts: std::collections::HashSet<String> = existing_entries
+        .iter()
+        .filter_map(|e| e.host.as_ref().map(|h| format!("{}:{}", h.to_ascii_lowercase(), e.port)))
+        .collect();
+    let mut seen_lines: std::collections::HashSet<String> = existing_entries.into_iter().map(|e| e.line).collect();
+    let mut parsed = 0usize;
+    let mut filtered = 0usize;
+    let mut out = Vec::new();
+    for entry in parse_entries(source, "openssh") {
+        if entry.fingerprint.is_none() || entry.marker.as_deref() == Some("@cert-authority") {
+            continue;
+        }
+        parsed += 1;
+        if let Some(host) = &entry.host {
+            if PUBLIC_SERVICE_HOSTNAMES.contains(&host.to_ascii_lowercase().as_str()) {
+                filtered += 1;
+                continue;
+            }
+            // @revoked 只会收紧信任，同一主机有记录也照样导入
+            if entry.marker.is_none() && !seen_hosts.insert(format!("{}:{}", host.to_ascii_lowercase(), entry.port)) {
+                continue;
+            }
+        }
+        if seen_lines.insert(entry.line.clone()) {
+            out.push(entry.line);
+        }
+    }
+    (parsed, filtered, out)
+}
+
+fn append_lines(path: &Path, lines: &[String]) -> Result<(), String> {
+    use std::io::Write;
+    let needs_newline = std::fs::read(path).map(|b| !b.is_empty() && !b.ends_with(b"\n")).unwrap_or(false);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("写入 known_hosts 失败：{e}"))?;
+    let mut text = String::new();
+    if needs_newline {
+        text.push('\n');
+    }
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    file.write_all(text.as_bytes()).map_err(|e| format!("写入 known_hosts 失败：{e}"))
+}
+
+/// 导入 known_hosts：`path` 为空 = 扫描系统 ~/.ssh/known_hosts（Netcatty「扫描系统」），否则导入所选文件。
+/// 导入就是把这些主机密钥加入信任列表，所以写入前一律弹原生确认框（信任决定不交给前端）。
+#[tauri::command]
+pub async fn known_hosts_import(app: AppHandle, path: Option<String>) -> Result<KnownHostsImport, String> {
+    let source = match path.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(raw) => {
+            let p = crate::fs_guard::checked_local_path(raw)?;
+            crate::fs_guard::confirm_read(&app, &p, "导入 known_hosts").await?;
+            p
+        }
+        None => openssh_path().ok_or("无法定位用户目录")?,
+    };
+    let meta = match tokio::fs::metadata(&source).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(KnownHostsImport { no_file: true, ..Default::default() }),
+        Err(e) => return Err(format!("无法读取 {}：{e}", source.display())),
+    };
+    if meta.len() > 8 * 1024 * 1024 {
+        return Err("known_hosts 文件过大（超过 8 MB）".into());
+    }
+    let bytes = tokio::fs::read(&source).await.map_err(|e| format!("无法读取 {}：{e}", source.display()))?;
+    let store = store_path(&app)?;
+    let existing = match std::fs::read(&store) {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("读取 known_hosts 失败：{e}")),
+    };
+    let (parsed, filtered_public, lines) = select_import_lines(&String::from_utf8_lossy(&bytes), &existing);
+    if !lines.is_empty() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let preview: Vec<String> = parse_entries(&lines.join("\n"), "termx")
+            .into_iter()
+            .take(8)
+            .map(|e| format!("{}  {}", e.patterns.join(","), e.fingerprint.unwrap_or_default()))
+            .collect();
+        crate::fs_guard::confirm_native(
+            &app,
+            &format!("known-hosts-import\0{}\0{nonce}", source.display()),
+            "导入已知主机",
+            format!(
+                "将把 {} 条主机密钥加入 TermX 的信任列表（来源：{}）。之后连接这些主机将不再询问指纹：\n\n{}{}",
+                lines.len(),
+                source.display(),
+                preview.join("\n"),
+                if lines.len() > preview.len() { "\n…" } else { "" }
+            ),
+            "导入",
+        )
+        .await?;
+        append_lines(&store, &lines)?;
+    }
+    Ok(KnownHostsImport { no_file: false, parsed, imported: lines.len(), filtered_public })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,5 +802,32 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("ab {KEY_A}\n# keep\n"));
         assert_eq!(remove_line(&path, "nothing").unwrap(), 0);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn import_selection_dedupes_and_filters_public_hosts() {
+        let existing = format!("old.example {KEY_A}\n");
+        let source = format!(
+            "# comment\nold.example {KEY_B}\nnew.example,10.0.0.1 {KEY_A}\n[new.example]:2222 {KEY_B}\ngithub.com {KEY_A}\n@cert-authority *.corp {KEY_A}\nbroken.example ssh-ed25519 !!!\nnew.example {KEY_B}\n@revoked old.example {KEY_B}\n"
+        );
+        let (parsed, filtered, lines) = select_import_lines(&source, &existing);
+        assert_eq!(parsed, 6, "cert-authority and unparsable lines are not counted");
+        assert_eq!(filtered, 1);
+        assert_eq!(
+            lines,
+            vec![
+                format!("new.example,10.0.0.1 {KEY_A}"),
+                format!("[new.example]:2222 {KEY_B}"),
+                format!("@revoked old.example {KEY_B}"),
+            ]
+        );
+        let path = fresh_path("import_append");
+        std::fs::write(&path, format!("old.example {KEY_A}")).unwrap();
+        append_lines(&path, &lines).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 4);
+        assert!(text.ends_with('\n'));
+        let key = russh::keys::parse_public_key_base64(b64_of(KEY_A)).unwrap();
+        assert_eq!(check_in(&path, "new.example", 22, &key), Some(Verdict::Trusted));
     }
 }

@@ -316,7 +316,19 @@ export async function transferEntries(input: {
 	onFinished?: (result: { allDone: boolean }) => void;
 }): Promise<void> {
 	const { from, to, entries, destDir } = input;
-	if (from.side === to.side) throw new Error("同一侧之间请用复制 / 移动");
+	if (from.side === to.side) {
+		// 同侧（Netcatty 标签可以让两栏都是本地 / 都是远程）：本地 ↔ 本地、同一会话内直接复制；
+		// 两个不同远程会话之间走 sftp_copy_between（Netcatty remote-to-remote 传输）
+		if (from.side === "local" || from.sessionKey === to.sessionKey) {
+			await copyEntriesSameSide(to, entries.map((e) => e.path), destDir);
+			toast({ title: "复制完成", description: `${entries.length} 项 → ${destDir}`, tone: "success" });
+			input.onFinished?.({ allDone: true });
+			return;
+		}
+		await copyRemoteToRemote(requireKey(from), requireKey(to), entries, destDir);
+		input.onFinished?.({ allDone: true });
+		return;
+	}
 	const upload = from.side === "local";
 	const key = requireKey(upload ? to : from);
 	const hostId = (upload ? to.hostId : from.hostId) ?? "";
@@ -378,6 +390,54 @@ export async function transferEntries(input: {
 			input.onFinished?.({ allDone: done === requests.length });
 		},
 	});
+}
+
+/** 两个不同远程会话之间的复制（目录递归；逐个文件由后端从源 SFTP 读、向目标 SFTP 写） */
+async function copyRemoteToRemote(srcKey: string, dstKey: string, entries: SftpFileEntry[], destDir: string): Promise<void> {
+	let files = 0;
+	let bytes = 0;
+	for (const entry of entries) {
+		if (!entry.is_dir) {
+			bytes += await invoke<number>("sftp_copy_between", {
+				srcKey,
+				srcPath: entry.path,
+				dstKey,
+				dstPath: posixJoin(destDir, entry.name),
+			});
+			files++;
+			continue;
+		}
+		const tree = await walkRemoteTree(srcKey, entry);
+		for (const rel of tree.dirs) await ensureRemoteDir(dstKey, posixJoin(destDir, ...rel));
+		for (const f of tree.files) {
+			bytes += await invoke<number>("sftp_copy_between", { srcKey, srcPath: f.path, dstKey, dstPath: posixJoin(destDir, ...f.rel) });
+			files++;
+		}
+	}
+	toast({ title: "复制完成", description: `${files} 个文件（${bytes} 字节）→ ${destDir}`, tone: "success" });
+}
+
+/** 远程目录树（不做本地文件名检查：目标也是远程） */
+async function walkRemoteTree(key: string, root: SftpFileEntry): Promise<{ dirs: string[][]; files: TreeFile[] }> {
+	const dirs: string[][] = [[root.name]];
+	const files: TreeFile[] = [];
+	const queue: { path: string; rel: string[] }[] = [{ path: root.path, rel: [root.name] }];
+	while (queue.length) {
+		const cur = queue.shift()!;
+		for (const e of await sftpList(key, cur.path)) {
+			if (e.name === "." || e.name === "..") continue;
+			const rel = [...cur.rel, e.name];
+			if (e.is_dir) {
+				if (e.is_symlink) continue;
+				dirs.push(rel);
+				queue.push({ path: e.path, rel });
+			} else {
+				files.push({ rel, path: e.path, size: e.size });
+				if (files.length > MAX_TREE_FILES) throw new Error(`文件夹内文件超过 ${MAX_TREE_FILES} 个，请分批传输`);
+			}
+		}
+	}
+	return { dirs, files };
 }
 
 /** 本机路径 → SftpFileEntry（「上传文件… / 上传文件夹…」从系统对话框挑出来的路径） */

@@ -99,6 +99,23 @@ fn strip_secrets(data: &mut Value) -> usize {
             }
         }
     }
+    // 身份（Netcatty identities）与分组设置（groupConfigs）的密码同样只进钥匙串
+    for list in ["identities", "groupConfigs"] {
+        if let Some(items) = data.get_mut(list).and_then(Value::as_array_mut) {
+            for item in items {
+                if let Some(obj) = item.as_object_mut() {
+                    if obj.remove("password").is_some() {
+                        removed += 1;
+                    }
+                    if let Some(proxy) = obj.get_mut("proxyConfig").and_then(Value::as_object_mut) {
+                        if proxy.remove("password").is_some() {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
     removed
 }
 
@@ -150,12 +167,16 @@ pub async fn config_load(app: AppHandle) -> Result<Option<Value>, String> {
 
 /// 写入配置（明文密码一律剥掉）
 #[tauri::command]
-pub async fn config_save(app: AppHandle, mut data: Value) -> Result<(), String> {
+pub async fn config_save(app: AppHandle, webview: tauri::Webview, mut data: Value) -> Result<(), String> {
     let path = config_file(&app)?;
     strip_secrets(&mut data);
     tauri::async_runtime::spawn_blocking(move || write_at(&path, &data))
         .await
-        .map_err(|e| format!("写入配置失败：{e}"))?
+        .map_err(|e| format!("写入配置失败：{e}"))??;
+    // 多窗口：通知其它窗口重新载入（载荷只有来源窗口标签，不带配置内容）
+    use tauri::Emitter;
+    let _ = app.emit("config://changed", webview.label());
+    Ok(())
 }
 
 /// 配置文件在磁盘上的真实路径，供设置页展示（不再写死的示例路径）
@@ -255,6 +276,17 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn identity_and_group_passwords_are_stripped_before_write() {
+        let mut data = serde_json::json!({
+            "identities": [{"id": "i", "username": "u", "password": "p"}],
+            "groupConfigs": [{"groupId": "g", "password": "p", "proxyConfig": {"type": "socks5", "password": "x"}}]
+        });
+        assert_eq!(strip_secrets(&mut data), 3);
+        let text = data.to_string();
+        assert!(!text.contains("password"), "{text}");
+    }
+
     #[test]
     fn config_file_is_private() {
         use std::os::unix::fs::PermissionsExt;
