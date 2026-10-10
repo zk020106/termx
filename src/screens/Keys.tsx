@@ -422,13 +422,22 @@ export default function Keys() {
 											setMenu({ x: event.clientX, y: event.clientY, key });
 										}}
 										className={cn(
-											"w-full cursor-pointer rounded border p-2.5 text-left transition-colors",
-											active ? "border-border bg-surface-raised shadow-sm" : "border-transparent bg-surface hover:border-border",
+											"w-full cursor-pointer rounded-control border p-2.5 text-left transition-colors",
+											active
+												? "border-accent/40 bg-accent/10 shadow-xs"
+												: "border-border bg-surface-raised/40 hover:border-surface-foreground/10 hover:bg-surface-raised",
 										)}
 									>
 										<div className="flex items-center justify-between gap-2 text-[12px]">
 											<span className="truncate font-medium text-surface-foreground">{key.name}</span>
-											<span className="shrink-0 rounded border border-border bg-surface px-1 py-0.5 font-mono text-[9.5px] text-primary">
+											<span
+												className={cn(
+													"shrink-0 rounded-[4px] border px-1 py-0.5 font-mono text-[9.5px]",
+													active
+														? "border-accent/30 bg-accent/15 text-accent font-medium"
+														: "border-border bg-surface text-surface-foreground/90",
+												)}
+											>
 												{KEY_TYPE_LABEL[key.type]}
 												{key.bits ? ` ${key.bits}` : " —"}
 											</span>
@@ -471,9 +480,9 @@ export default function Keys() {
 										event.preventDefault();
 										setIdentityMenu({ x: event.clientX, y: event.clientY, identity });
 									}}
-									className="flex w-full items-center gap-2 rounded border border-transparent bg-surface p-2 text-left hover:border-border"
+									className="flex w-full items-center gap-2 rounded-control border border-transparent bg-surface-raised/40 p-2 text-left hover:border-surface-foreground/10 hover:bg-surface-raised cursor-pointer"
 								>
-									<span className="icon-[lucide--user] size-3.5 shrink-0 text-success" />
+									<span className="icon-[lucide--user] size-3.5 shrink-0 text-emerald-400" />
 									<span className="min-w-0 flex-1">
 										<span className="block truncate text-[11.5px] font-medium text-surface-foreground">{identity.label}</span>
 										<span className="block truncate font-mono text-[10px] text-faint">
@@ -489,7 +498,7 @@ export default function Keys() {
 						<button
 							type="button"
 							onClick={openAdd}
-							className="flex h-7 w-full items-center justify-center gap-1.5 rounded border border-border bg-surface text-[11px] font-medium text-muted hover:bg-surface-raised hover:text-surface-foreground"
+							className="flex h-7 w-full items-center justify-center gap-1.5 rounded-control border border-border bg-surface text-[11px] font-medium text-muted hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
 						>
 							<span className="icon-[lucide--file-key] size-3" />
 							<span>登记外部公钥（.pub / 粘贴）</span>

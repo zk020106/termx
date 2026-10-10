@@ -471,12 +471,12 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 			<div
 				role="dialog"
 				aria-modal="true"
-				className="relative flex h-[620px] max-h-[92vh] w-[780px] max-w-[95vw] flex-col overflow-hidden rounded-2xl border border-border/80 bg-surface shadow-2xl transition-all"
+				className="relative flex h-[620px] max-h-[92vh] w-[780px] max-w-[95vw] flex-col overflow-hidden rounded-card border border-border/80 bg-surface shadow-2xl"
 			>
 				{/* 顶栏 Header */}
 				<header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-surface-sunk/60 px-5">
 					<div className="flex items-center gap-3">
-						<div className="flex size-9 items-center justify-center rounded-xl border border-border/70 bg-surface shadow-2xs">
+						<div className="flex size-9 items-center justify-center rounded-control border border-border/70 bg-surface shadow-2xs">
 							<span className={cn(currentVisual.icon, currentVisual.color, "size-5")} />
 						</div>
 						<div>
@@ -485,7 +485,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 									{isEditing ? "编辑主机配置" : sourceHost ? "复制主机" : "新建主机节点"}
 								</h2>
 								{isDirty && (
-									<span className="flex items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-[9.5px] font-medium text-warning">
+									<span className="flex items-center gap-1 rounded-control bg-warning/15 px-2 py-0.5 text-[9.5px] font-medium text-warning">
 										<span className="size-1.5 rounded-full bg-warning animate-pulse" />
 										未保存修改
 									</span>
@@ -505,7 +505,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 							if (isDirty) setDiscardConfirm(true);
 							else onClose();
 						}}
-						className="flex size-7 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
+						className="flex size-7 items-center justify-center rounded-control text-muted transition-colors hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
 						title="关闭 (Esc)"
 					>
 						<span className="icon-[lucide--x] size-4" />
@@ -529,17 +529,17 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 										type="button"
 										onClick={() => setTab(item.id)}
 										className={cn(
-											"group relative flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left transition-all cursor-pointer select-none",
+											"group relative flex w-full items-center gap-2.5 rounded-control px-3 py-2 text-left transition-colors duration-150 cursor-pointer select-none",
 											active
-												? "border border-border/70 bg-surface font-semibold text-primary shadow-2xs"
-												: "text-muted hover:bg-surface/50 hover:text-surface-foreground",
+												? "border border-white/20 bg-white/10 font-semibold text-white shadow-2xs"
+												: "text-muted hover:bg-white/5 hover:text-surface-foreground",
 										)}
 									>
 										<span
 											className={cn(
 												item.icon,
 												"size-4 shrink-0 transition-colors",
-												active ? "text-primary" : "text-muted group-hover:text-surface-foreground",
+												active ? "text-white" : "text-muted group-hover:text-surface-foreground",
 											)}
 										/>
 										<div className="min-w-0 flex-1">
@@ -555,27 +555,27 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 						</div>
 
 						{/* 底部快捷信息卡 */}
-						<div className="mt-auto rounded-xl border border-border/60 bg-surface/40 p-2.5 text-[10.5px] text-muted">
+						<div className="mt-auto rounded-card border border-border/60 bg-surface/40 p-2.5 text-[10.5px] text-muted">
 							<div className="flex items-center gap-1.5 font-medium text-surface-foreground">
-								<span className="icon-[lucide--keyboard] size-3.5 text-primary" />
+								<span className="icon-[lucide--keyboard] size-3.5 text-white" />
 								<span>快捷键提示</span>
 							</div>
 							<div className="mt-1 flex items-center justify-between text-faint">
 								<span>快速保存</span>
-								<kbd className="font-mono text-[9px]">Ctrl Enter</kbd>
+								<kbd className="font-mono text-[9px] rounded-xs bg-white/10 px-1 py-0.5 text-white/80 border border-white/10">Ctrl Enter</kbd>
 							</div>
 							<div className="mt-0.5 flex items-center justify-between text-faint">
 								<span>退出对话框</span>
-								<kbd className="font-mono text-[9px]">Esc</kbd>
+								<kbd className="font-mono text-[9px] rounded-xs bg-white/10 px-1 py-0.5 text-white/80 border border-white/10">Esc</kbd>
 							</div>
 						</div>
 					</aside>
 
 					{/* 右侧表单内容区 */}
-					<main className="min-h-0 flex-1 overflow-y-auto p-6 space-y-5 bg-surface">
+					<main className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-6 space-y-5 bg-surface">
 						{/* 错误提示栏 */}
 						{Object.keys(errors).length > 0 && (
-							<div className="flex items-center gap-2 rounded-xl border border-danger/40 bg-danger/10 px-3.5 py-2.5 text-[11.5px] text-danger">
+							<div className="flex items-center gap-2 rounded-control border border-danger/40 bg-danger/10 px-3.5 py-2.5 text-[11.5px] text-danger">
 								<span className="icon-[lucide--alert-triangle] size-4 shrink-0" />
 								<span>请修正标红的字段后再保存（{Object.values(errors).join("、")}）</span>
 							</div>
@@ -598,7 +598,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 										type="button"
 										onClick={() => update("favorite", !form.favorite)}
 										className={cn(
-											"flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11.5px] transition-colors cursor-pointer",
+											"flex h-8 items-center gap-1.5 rounded-control border px-3 text-[11.5px] transition-colors cursor-pointer",
 											form.favorite
 												? "border-amber-500/40 bg-amber-500/10 text-amber-500 font-semibold"
 												: "border-border bg-surface text-muted hover:text-surface-foreground",
@@ -624,9 +624,9 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 													type="button"
 													onClick={() => update("osPreset", p.value)}
 													className={cn(
-														"flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] transition-all cursor-pointer border select-none",
+														"flex items-center gap-1.5 rounded-control px-2.5 py-1 text-[11px] transition-colors duration-150 cursor-pointer border select-none",
 														selected
-															? "border-primary/50 bg-primary/10 text-primary font-semibold shadow-2xs"
+															? "border-white/30 bg-white/10 text-white font-medium shadow-2xs"
 															: "border-border/70 bg-surface-raised/40 text-muted hover:border-border hover:bg-surface-raised hover:text-surface-foreground",
 													)}
 												>
@@ -784,10 +784,10 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 													type="button"
 													onClick={() => update("authMethod", item.value)}
 													className={cn(
-														"flex flex-col items-center justify-center gap-1.5 rounded-xl border p-2.5 text-center transition-all cursor-pointer",
+														"flex flex-col items-center justify-center gap-1.5 rounded-control border p-2.5 text-center transition-colors duration-150 cursor-pointer",
 														active
-															? "border-primary/50 bg-primary/10 text-primary font-semibold shadow-xs"
-															: "border-border/80 bg-surface-sunk/30 text-muted hover:border-border hover:bg-surface-raised hover:text-surface-foreground",
+															? "border-white/30 bg-white/10 text-white font-semibold shadow-xs"
+															: "border-border/80 bg-surface-sunk/30 text-muted hover:border-border hover:bg-surface-raised hover:text-white",
 													)}
 												>
 													<span className={cn(item.icon, "size-4.5")} />
@@ -800,7 +800,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 
 								{/* 密码模式 */}
 								{form.authMethod === "password" && (
-									<div className="rounded-xl border border-border/80 bg-surface-raised/40 p-4 space-y-3.5">
+									<div className="rounded-card border border-border/80 bg-surface-raised/40 p-4 space-y-3.5">
 										<Field label="SSH 登录密码">
 											<div className="relative">
 												<Input
@@ -831,7 +831,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 
 								{/* 私钥模式 */}
 								{(form.authMethod === "key" || form.authMethod === "key-passphrase") && (
-									<div className="rounded-xl border border-border/80 bg-surface-raised/40 p-4 space-y-3.5">
+									<div className="rounded-card border border-border/80 bg-surface-raised/40 p-4 space-y-3.5">
 										<div className="flex items-center justify-between">
 											<span className="text-[11.5px] font-medium text-surface-foreground">指定私钥身份</span>
 											<button
@@ -921,7 +921,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 
 								{/* Agent 模式 */}
 								{form.authMethod === "agent" && (
-									<div className="rounded-xl border border-border/80 bg-surface-raised/40 p-4">
+									<div className="rounded-card border border-border/80 bg-surface-raised/40 p-4">
 										<div className="flex items-start gap-3">
 											<span className="icon-[lucide--bot] size-5 text-primary shrink-0 mt-0.5" />
 											<div className="text-[12px] space-y-1">
@@ -936,7 +936,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 
 								{/* 键盘交互模式 */}
 								{form.authMethod === "keyboard-interactive" && (
-									<div className="rounded-xl border border-border/80 bg-surface-raised/40 p-4">
+									<div className="rounded-card border border-border/80 bg-surface-raised/40 p-4">
 										<div className="flex items-start gap-3">
 											<span className="icon-[lucide--keyboard] size-5 text-primary shrink-0 mt-0.5" />
 											<div className="text-[12px] space-y-1">
@@ -970,9 +970,9 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 									</div>
 
 									{/* 可视化流程图卡片 */}
-									<div className="rounded-xl border border-border/80 bg-surface-raised/40 p-3.5 space-y-2">
+									<div className="rounded-card border border-border/80 bg-surface-raised/40 p-3.5 space-y-2">
 										<div className="flex flex-wrap items-center gap-2">
-											<div className="flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-surface-foreground">
+											<div className="flex items-center gap-1.5 rounded-control border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-surface-foreground">
 												<span className="icon-[lucide--laptop] size-3.5 text-muted" />
 												<span>本地客户端</span>
 											</div>
@@ -982,13 +982,13 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 												return (
 													<div key={hopId} className="flex items-center gap-2">
 														<span className="icon-[lucide--arrow-right] size-3 text-muted" />
-														<div className="flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1 text-[11px] text-primary font-medium">
-															<span className="font-mono text-[9.5px] text-primary/70">跳板 {idx + 1}</span>
+														<div className="flex items-center gap-1.5 rounded-control border border-white/20 bg-white/10 px-2.5 py-1 text-[11px] text-white font-medium">
+															<span className="font-mono text-[9.5px] text-white/70">跳板 {idx + 1}</span>
 															<span>{hop?.name ?? hopId}</span>
 															<button
 																type="button"
 																onClick={() => update("jumpHostIds", form.jumpHostIds.filter((x) => x !== hopId))}
-																className="ml-1 text-primary/60 hover:text-danger cursor-pointer"
+																className="ml-1 text-white/60 hover:text-danger cursor-pointer"
 																title="移除跳板"
 															>
 																<span className="icon-[lucide--x] size-3" />
@@ -1000,7 +1000,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 
 											<span className="icon-[lucide--arrow-right] size-3 text-muted" />
 
-											<div className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1 text-[11px] font-semibold text-success">
+											<div className="flex items-center gap-1.5 rounded-control border border-success/40 bg-success/10 px-2.5 py-1 text-[11px] font-semibold text-success">
 												<span className="icon-[lucide--target] size-3.5" />
 												<span>{form.name || "当前目标主机"}</span>
 											</div>
@@ -1032,7 +1032,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 								</div>
 
 								{/* 网络代理隧道 */}
-								<div className="rounded-xl border border-border/80 bg-surface-raised/40 p-4 space-y-3">
+								<div className="rounded-card border border-border/80 bg-surface-raised/40 p-4 space-y-3">
 									<div className="flex items-center justify-between">
 										<div>
 											<span className="text-[12px] font-semibold text-surface-foreground">
@@ -1369,7 +1369,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 										终端渲染实时预览
 									</span>
 									<div
-										className="rounded-xl border border-border/80 p-3.5 shadow-inner"
+										className="rounded-card border border-border/80 p-3.5 shadow-inner"
 										style={{
 											backgroundColor:
 												COLOR_SCHEMES.find((s) => s.id === form.colorScheme)?.bg ?? "#1e1e1e",
@@ -1457,7 +1457,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 							size="sm"
 							variant="default"
 							icon="icon-[lucide--play]"
-							className="h-8 text-xs border-primary/40 bg-primary/10 text-primary hover:bg-primary/20"
+							className="h-8 text-xs border-white/20 bg-white/5 text-white hover:bg-white/10"
 							onClick={() => handleSave(true)}
 							title="保存更改并立即在工作区打开终端会话"
 						>
@@ -1480,7 +1480,7 @@ export function HostEditModal({ open, hostId, initialGroupId, duplicateFromId, o
 			{/* 未保存修改放弃确认弹窗 */}
 			{discardConfirm && (
 				<div className="fixed inset-0 z-60 flex items-center justify-center bg-black/50 p-4">
-					<div className="w-[360px] rounded-2xl border border-border bg-surface-raised p-5 shadow-xl space-y-3">
+					<div className="w-[360px] rounded-card border border-border bg-surface-raised p-5 shadow-xl space-y-3">
 						<div className="flex items-center gap-2.5 text-warning">
 							<span className="icon-[lucide--alert-triangle] size-5" />
 							<h3 className="font-bold text-[13px] text-surface-foreground">放弃未保存的更改？</h3>

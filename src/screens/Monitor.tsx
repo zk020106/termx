@@ -117,12 +117,12 @@ export default function Monitor() {
 
 					<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
 						{/* SSH 延迟遥测核心卡片 */}
-						<section className="shrink-0 rounded-2xl border border-border bg-surface-raised/70 p-4">
+						<section className="shrink-0 rounded-card border border-border bg-surface-raised/50 p-4">
 							<header className="flex h-9 items-center justify-between gap-2 border-b border-border/60 pb-3">
 								<div className="flex items-center gap-2">
-									<span className="icon-[lucide--zap] size-4 text-primary" />
+									<span className="icon-[lucide--zap] size-4 text-emerald-400" />
 									<span className="text-[13px] font-semibold text-surface-foreground">SSH 往返延迟 (RTT)</span>
-									<span className="rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[10px] text-primary">端到端实测</span>
+									<span className="rounded-[4px] bg-surface-foreground/5 border border-border px-2 py-0.5 font-mono text-[10px] text-surface-foreground/80">端到端实测</span>
 								</div>
 
 								<div className="flex items-center gap-2">
@@ -130,7 +130,7 @@ export default function Monitor() {
 										<select
 											value={activeTab?.sessionKey ?? ""}
 											onChange={(e) => setSelectedSessionKey(e.target.value)}
-											className="h-7 max-w-[240px] rounded-lg border border-border bg-surface px-2 font-mono text-[11px] text-surface-foreground transition-colors focus:border-primary focus:outline-none"
+											className="h-7 max-w-[240px] rounded-control border border-border bg-surface px-2 font-mono text-[11px] text-surface-foreground transition-colors focus:border-surface-foreground/40 focus:outline-none"
 											aria-label="选择测量会话"
 										>
 											{connectedTabs.map((t) => (
@@ -180,7 +180,7 @@ export default function Monitor() {
 						</section>
 
 						{/* 系统资源：无代理 SSH 周期采样 */}
-						<section className="rounded-2xl border border-border/60 bg-surface-raised/40 p-4">
+						<section className="rounded-card border border-border bg-surface-raised/50 p-4">
 							<div className="flex items-center gap-2 text-[12px] font-medium text-surface-foreground">
 								<span className="icon-[lucide--cpu] size-4 text-muted" />
 								<span>系统资源监控 (CPU / 内存 / 磁盘 / 进程)</span>
@@ -220,9 +220,9 @@ export default function Monitor() {
 									type="button"
 									onClick={() => setRightPanelTab(t.id)}
 									className={cn(
-										"rounded px-2 py-0.5 text-[11px] transition-colors",
+										"rounded-control px-2 py-0.5 text-[11px] transition-colors cursor-pointer",
 										tab === t.id
-											? "border border-border bg-surface-raised font-medium text-primary"
+											? "border border-accent/40 bg-accent/15 font-medium text-accent shadow-2xs"
 											: "text-muted hover:bg-surface-raised hover:text-surface-foreground",
 									)}
 								>

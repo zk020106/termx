@@ -42,7 +42,7 @@ export default function HostEdit() {
 
 				<div className="flex-1 p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 opacity-30 pointer-events-none">
 					{hosts.slice(0, 8).map((h) => (
-						<div key={h.id} className="rounded-2xl border border-border bg-surface p-4 text-[12px] space-y-1">
+						<div key={h.id} className="rounded-card border border-border bg-surface p-4 text-[12px] space-y-1">
 							<div className="font-semibold text-surface-foreground truncate">{h.name}</div>
 							<div className="font-mono text-muted text-[11px] truncate">{h.username}@{h.hostname}:{h.port}</div>
 						</div>

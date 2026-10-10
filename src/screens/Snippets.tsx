@@ -497,7 +497,7 @@ export default function Snippets() {
 			<div className="min-h-0 flex-1 overflow-y-auto p-6">
 				<div className="max-w-2xl space-y-5">
 					{/* 片段卡片 */}
-					<div className="rounded-lg border border-border bg-surface-raised p-5 shadow-sm">
+					<div className="rounded-card border border-border bg-surface-raised/60 p-5 shadow-sm">
 						<div className="flex items-start justify-between gap-3 border-b border-border pb-3">
 							<div className="min-w-0">
 								<div className="flex items-center gap-2">
@@ -530,7 +530,7 @@ export default function Snippets() {
 									piece.isVar ? (
 										<span
 											key={index}
-											className="rounded bg-primary/20 px-1 py-0.5 font-semibold text-primary ring-1 ring-primary/40"
+											className="rounded-[4px] bg-emerald-500/20 px-1 py-0.5 font-semibold text-emerald-400 ring-1 ring-emerald-500/40"
 										>
 											{piece.text}
 										</span>
@@ -543,10 +543,10 @@ export default function Snippets() {
 					</div>
 
 					{/* 执行面板：变量替换 + 发送目标 */}
-					<div className="rounded-lg border border-border bg-surface-raised p-5 shadow-md">
+					<div className="rounded-card border border-border bg-surface-raised/60 p-5 shadow-sm">
 						<div className="flex items-center justify-between gap-2 border-b border-border pb-3">
 							<div className="flex items-center gap-2">
-								<span className="flex size-5 items-center justify-center rounded bg-primary/15 text-primary">
+								<span className="flex size-5 items-center justify-center rounded-control bg-surface-foreground/10 text-surface-foreground">
 									<span className="icon-[lucide--play] size-3" />
 								</span>
 								<h3 className="text-[13px] font-semibold text-surface-foreground">执行前变量替换</h3>
@@ -1198,8 +1198,8 @@ function SnippetRow({
 			onClick={onSelect}
 			onContextMenu={onContextMenu}
 			className={cn(
-				"w-full rounded border p-2 text-left transition-colors",
-				active ? "border-border bg-surface-raised shadow-sm" : "border-transparent hover:border-border hover:bg-surface",
+				"w-full rounded-control border p-2 text-left transition-colors cursor-pointer",
+				active ? "border-accent/40 bg-accent/10 shadow-xs" : "border-transparent hover:border-border hover:bg-surface-raised",
 			)}
 		>
 			<div className="flex items-center gap-2">

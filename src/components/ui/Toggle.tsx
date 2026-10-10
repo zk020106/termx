@@ -23,15 +23,15 @@ export function Switch({
 			disabled={disabled}
 			onClick={() => onChange(!checked)}
 			className={cn(
-				"relative h-4 w-7 shrink-0 rounded-full border transition-colors disabled:opacity-45",
-				checked ? "border-primary bg-primary" : "border-border bg-surface-sunk",
+				"relative h-4 w-7 shrink-0 rounded-full border transition-colors duration-150 disabled:opacity-45 cursor-pointer",
+				checked ? "border-accent bg-accent" : "border-border bg-surface-sunk",
 				className,
 			)}
 		>
 			<span
 				className={cn(
-					"absolute top-0.5 size-2.5 rounded-full transition-[left] duration-150",
-					checked ? "left-3.5 bg-primary-foreground" : "left-0.5 bg-faint",
+					"absolute top-0.5 left-0.5 size-2.5 rounded-full motion-safe:transition-transform duration-150 ease-out",
+					checked ? "translate-x-3 bg-accent-foreground" : "translate-x-0 bg-faint",
 				)}
 			/>
 		</button>
@@ -69,7 +69,7 @@ export function Checkbox({
 				onClick={() => onChange(!checked)}
 				className={cn(
 					"mt-0.5 flex size-3.5 shrink-0 items-center justify-center rounded-[4px] border transition-colors",
-					checked ? "border-primary bg-primary text-primary-foreground" : "border-border bg-surface",
+					checked ? "border-accent bg-accent text-accent-foreground" : "border-border bg-surface",
 				)}
 			>
 				{checked && <span className="icon-[lucide--check] size-2.5" />}

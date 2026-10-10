@@ -5,6 +5,8 @@ try {
 	var resolved =
 		mode === "system" ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : mode;
 	document.documentElement.dataset.theme = resolved;
+	var accent = localStorage.getItem("termx.accent") || "vercel";
+	document.documentElement.dataset.accent = accent;
 } catch (e) {
-	/* 忽略：保持默认 dark */
+	/* 忽略：保持默认 dark & vercel */
 }

@@ -265,7 +265,19 @@ export default function Forward() {
 		void disposeForward(rule.id);
 		remove(rule.id);
 		setSelectedId((id) => (id === rule.id ? "" : id));
-		toast({ title: `已删除规则 ${rule.name}`, tone: "default" });
+		toast({
+			title: `已删除规则 ${rule.name}`,
+			description: "规则已从列表移除",
+			tone: "default",
+			action: {
+				label: "撤销",
+				run: () => {
+					upsert(rule);
+					setSelectedId(rule.id);
+					toast({ title: `已恢复规则 ${rule.name}`, tone: "success" });
+				},
+			},
+		});
 	}
 
 	const visual = stateVisual(selected?.state ?? "stopped");
@@ -277,7 +289,7 @@ export default function Forward() {
 				<aside className="flex w-[280px] shrink-0 flex-col border-r border-border bg-surface-sunk">
 					<div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
 						<div className="flex shrink-0 items-center gap-1.5 min-w-0">
-							<span className="icon-[lucide--waypoints] size-3.5 shrink-0 text-primary" />
+							<span className="icon-[lucide--waypoints] size-3.5 shrink-0 text-surface-foreground/90" />
 							<h1 className="whitespace-nowrap text-[12px] font-semibold text-surface-foreground">端口转发规则</h1>
 						</div>
 						<Button size="sm" variant="primary" icon="icon-[lucide--plus]" onClick={openNew}>
@@ -321,12 +333,12 @@ export default function Forward() {
 											setMenu({ x: event.clientX, y: event.clientY, rule });
 										}}
 										className={cn(
-											"w-full rounded border p-2.5 text-left transition-colors",
+											"w-full rounded-control border p-2.5 text-left transition-colors cursor-pointer",
 											active && rule.state === "error"
-												? "border-danger/40 bg-surface-raised shadow-sm"
+												? "border-danger/40 bg-danger/10 shadow-xs"
 												: active
-													? "border-border bg-surface-raised shadow-sm"
-													: "border-border bg-surface hover:border-primary/40",
+													? "border-accent/40 bg-accent/10 shadow-xs"
+													: "border-border bg-surface-raised/40 hover:border-surface-foreground/10 hover:bg-surface-raised",
 										)}
 									>
 										<div className="flex items-center justify-between gap-2 text-[12px]">
@@ -339,7 +351,7 @@ export default function Forward() {
 
 										<div className="mt-1 flex items-center justify-between gap-2 font-mono text-[11px]">
 											<span className="truncate text-muted">{bindText(rule)}</span>
-											<span className="shrink-0 rounded border border-border bg-surface px-1 text-[9.5px] text-faint">
+											<span className="shrink-0 rounded-[4px] border border-border bg-surface px-1 text-[9.5px] text-faint">
 												{FORWARD_LABEL[rule.type]}
 											</span>
 										</div>
@@ -363,7 +375,7 @@ export default function Forward() {
 				<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-6">
 					<div className="max-w-2xl space-y-6">
 						{selected ? (
-							<div className="rounded-lg border border-border bg-surface-raised p-5 shadow-sm">
+							<div className="rounded-card border border-border bg-surface-raised/60 p-5 shadow-sm">
 								<div className="flex items-start justify-between gap-3 border-b border-border pb-3">
 									<div className="min-w-0">
 										<div className="flex items-center gap-2">
@@ -391,7 +403,7 @@ export default function Forward() {
 										>
 											编辑
 										</Button>
-										<Button size="sm" variant="ghost" icon="icon-[lucide--trash-2]" onClick={() => removeRule(selected)}>
+										<Button size="sm" variant="danger" icon="icon-[lucide--trash-2]" onClick={() => removeRule(selected)}>
 											删除
 										</Button>
 									</div>

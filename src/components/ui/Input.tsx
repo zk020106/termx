@@ -1,8 +1,8 @@
 import { cn } from "@/lib/cn";
-import type { InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from "react";
+import { useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 
 const fieldBase =
-	"w-full rounded-control border border-border bg-surface px-2 py-1.5 text-[12px] text-surface-foreground placeholder:text-faint transition-colors focus:border-primary/60 focus:outline-none focus:ring-1 focus:ring-primary/40 disabled:opacity-50";
+	"w-full rounded-control border border-border bg-surface-raised/40 px-2.5 py-1 text-[12px] text-surface-foreground placeholder:text-faint transition-colors focus:border-accent focus:bg-surface focus:outline-none focus:ring-1 focus:ring-accent/35 disabled:opacity-50";
 
 export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
 	return <input {...props} className={cn(fieldBase, "h-7 py-0", className)} />;
@@ -14,9 +14,12 @@ export function Textarea({ className, ...props }: TextareaHTMLAttributes<HTMLTex
 
 export function Select({ className, children, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
 	return (
-		<select {...props} className={cn(fieldBase, "h-7 cursor-pointer py-0 appearance-none pr-6", className)}>
-			{children}
-		</select>
+		<div className="relative w-full">
+			<select {...props} className={cn(fieldBase, "h-7 cursor-pointer py-0 appearance-none pr-6", className)}>
+				{children}
+			</select>
+			<span aria-hidden="true" className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 icon-[lucide--chevron-down] size-3 text-muted" />
+		</div>
 	);
 }
 
@@ -36,6 +39,7 @@ export function Field({
 	children: ReactNode;
 	className?: string;
 }) {
+	const errorId = useId();
 	return (
 		<label className={cn("block space-y-1.5", className)}>
 			<span className="flex items-baseline gap-1.5">
@@ -45,7 +49,7 @@ export function Field({
 			</span>
 			{children}
 			{error && (
-				<span className="flex items-center gap-1 text-[10.5px] text-danger">
+				<span id={errorId} role="alert" className="flex items-center gap-1 text-[10.5px] text-danger">
 					<span className="icon-[lucide--circle-alert] size-3" />
 					{error}
 				</span>

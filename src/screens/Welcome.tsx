@@ -13,6 +13,7 @@ import { useHostsStore } from "@/store/hosts";
 import { useSessionsStore } from "@/store/sessions";
 import { useSettingsStore } from "@/store/settings";
 import { toast } from "@/store/toast";
+import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/lib/window";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
 /* 首次启动（对应 termx.vetd/frames/welcome.tsx，需求书 06）。
@@ -557,22 +558,42 @@ export default function Welcome() {
 					<span className="font-mono text-[10px] text-faint">
 						第 {step + 1} / {STEPS.length} 步 · {STEPS[step].label}
 					</span>
-					<div className="flex items-center text-muted">
-						<span className="flex size-8 items-center justify-center hover:bg-surface-raised">
-							<span className="icon-[lucide--minus] size-3.5" />
-						</span>
-						<span className="flex size-8 items-center justify-center hover:bg-surface-raised">
-							<span className="icon-[lucide--square] size-3" />
-						</span>
-						<span className="flex size-8 items-center justify-center hover:bg-danger hover:text-primary-foreground">
-							<span className="icon-[lucide--x] size-3.5" />
-						</span>
-					</div>
+					{isTauri() && (
+						<div className="flex items-center text-muted gap-0.5">
+							<button
+								type="button"
+								aria-label="最小化"
+								title="最小化"
+								onClick={() => void minimizeWindow()}
+								className="flex size-7 items-center justify-center rounded hover:bg-surface-raised cursor-pointer"
+							>
+								<span className="icon-[lucide--minus] size-3.5" />
+							</button>
+							<button
+								type="button"
+								aria-label="最大化"
+								title="最大化"
+								onClick={() => void toggleMaximizeWindow()}
+								className="flex size-7 items-center justify-center rounded hover:bg-surface-raised cursor-pointer"
+							>
+								<span className="icon-[lucide--square] size-3" />
+							</button>
+							<button
+								type="button"
+								aria-label="关闭"
+								title="关闭"
+								onClick={() => void closeWindow()}
+								className="flex size-7 items-center justify-center rounded hover:bg-danger hover:text-white cursor-pointer"
+							>
+								<span className="icon-[lucide--x] size-3.5" />
+							</button>
+						</div>
+					)}
 				</div>
 			</header>
 
 			{/* 主内容区：左分步内容 + 右上下文卡片 */}
-			<div className="grid min-h-0 flex-1 grid-cols-[1.1fr_0.9fr] items-center gap-10 px-16">
+			<div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] items-center gap-6 lg:gap-10 px-4 sm:px-8 lg:px-16 overflow-y-auto py-6">
 				<div className="max-w-lg">
 					{leftColumn()}
 

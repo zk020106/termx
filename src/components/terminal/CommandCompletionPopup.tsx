@@ -39,11 +39,11 @@ export function CommandCompletionPopup({
 				left: Math.max(8, Math.min(position.x - 8, window.innerWidth - 350)),
 				top: position.y + 4,
 			}}
-			className="absolute z-30 flex w-[330px] flex-col overflow-hidden rounded-xl border border-border/80 bg-surface/96 shadow-popover backdrop-blur-md ring-1 ring-black/5 animate-in fade-in-0 zoom-in-95 duration-100 select-none text-[11.5px]"
+			className="absolute z-30 flex w-[330px] flex-col overflow-hidden rounded-card border border-border/80 bg-surface/96 shadow-popover backdrop-blur-md ring-1 ring-black/5 animate-in fade-in-0 zoom-in-95 duration-100 select-none text-[11.5px]"
 			onClick={(e) => e.stopPropagation()}
 		>
 			{/* 列表项 */}
-			<div ref={listRef} className="max-h-[210px] overflow-y-auto p-1 space-y-0.5">
+			<div ref={listRef} className="max-h-[210px] overflow-y-auto overscroll-contain p-1 space-y-0.5">
 				{suggestions.map((item, index) => {
 					const isSelected = index === selectedIndex;
 					return (
@@ -53,10 +53,10 @@ export function CommandCompletionPopup({
 							onClick={() => onSelect(item)}
 							onMouseEnter={() => onHoverIndex(index)}
 							className={cn(
-								"group flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 cursor-pointer transition-colors",
+								"group flex items-center justify-between gap-2 rounded-control px-2 py-1.5 cursor-pointer transition-colors",
 								isSelected
-									? "bg-primary/15 text-primary font-medium"
-									: "text-surface-foreground hover:bg-surface-raised",
+									? "bg-surface-foreground/10 text-surface-foreground font-medium"
+									: "text-surface-foreground hover:bg-surface-foreground/5",
 							)}
 						>
 							<div className="flex items-center gap-1.5 min-w-0 flex-1">

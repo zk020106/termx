@@ -2,142 +2,212 @@
 @plugin "@iconify/tailwind4";
 
 /* =============================================================================
- * TermX — Meta Design System 落地层
+ * TermX — Vercel / Geist Design System
  *
- * 规范来源：getdesign.md/meta/design-md (DESIGN.md)
+ * 规范来源：Vercel / Geist Design System
  * 核心特征：
- *   - 配色：Meta 标志性深邃高对比画布（暗色 #0a1317 / 亮色 #ffffff）
- *   - 主色：Meta Cobalt Blue (#0064e0) 作为核心交互与 CTA 主色
- *   - 控件与卡片：药丸状按钮（Pill CTA）、柔和微圆角卡片（16px）、发丝级分割线（#dee3e9 / #232d36）
- *   - 语义状态：Meta Success (#31a24c)、Meta Warning (#f7b928)、Meta Critical (#e41e3f)
+ *   - 配色：OLED 极致纯黑 (#000000 / #050505 / #0a0a0a)，单像素微光发光边框 (rgba(255, 255, 255, 0.08))
+ *   - 主色：白底黑字高对比主 CTA (#ffffff / #000000)
+ *   - 控件与卡片：精密方圆角（控件 6px / 卡片 8px），高信息密度，去除大圆角与药丸胶囊
+ *   - 语义状态：Geist Emerald (#00e599)、Amber (#f59e0b)、Crimson (#ef4444)
  * ========================================================================== */
 
 :root,
 :root[data-theme="dark"] {
 	color-scheme: dark;
 
-	/* Meta Dark Surface System (ink-deep) */
-	--tx-surface: #0a1317;
-	--tx-surface-raised: #151d24;
-	--tx-surface-sunk: #060a0d;
-	--tx-surface-foreground: #f1f4f7;
-	--tx-muted: #8595a4;
-	--tx-faint: #5d6c7b;
-	--tx-border: #232d36;
+	/* Geist Dark Surface System (OLED black & crisp surfaces) */
+	--tx-surface: #000000;
+	--tx-surface-raised: #0a0a0a;
+	--tx-surface-sunk: #050505;
+	--tx-surface-foreground: #ededed;
+	--tx-muted: #888888;
+	--tx-faint: #555555;
+	--tx-border: rgba(255, 255, 255, 0.08);
 
-	/* Meta Accent Swatches */
-	--tx-swatch-indigo: #0064e0;
-	--tx-swatch-indigo-soft: rgba(0, 100, 224, 0.16);
-	--tx-swatch-cyan: #0091ff;
-	--tx-swatch-cyan-soft: rgba(0, 145, 255, 0.16);
-	--tx-swatch-emerald: #31a24c;
-	--tx-swatch-emerald-soft: rgba(49, 162, 76, 0.16);
-	--tx-swatch-amber: #f2a918;
-	--tx-swatch-amber-soft: rgba(242, 169, 24, 0.16);
-	--tx-swatch-rose: #f0284a;
-	--tx-swatch-rose-soft: rgba(240, 40, 74, 0.16);
-	--tx-swatch-steel: #5d6c7b;
-	--tx-swatch-steel-soft: rgba(93, 108, 123, 0.16);
+	/* Geist Accent Swatches */
+	--tx-swatch-vercel: #0070f3;
+	--tx-swatch-vercel-soft: rgba(0, 112, 243, 0.15);
+	--tx-swatch-indigo: #6366f1;
+	--tx-swatch-indigo-soft: rgba(99, 102, 241, 0.14);
+	--tx-swatch-cyan: #00e5ff;
+	--tx-swatch-cyan-soft: rgba(0, 229, 255, 0.14);
+	--tx-swatch-emerald: #00e599;
+	--tx-swatch-emerald-soft: rgba(0, 229, 153, 0.14);
+	--tx-swatch-amber: #f59e0b;
+	--tx-swatch-amber-soft: rgba(245, 158, 11, 0.14);
+	--tx-swatch-rose: #ef4444;
+	--tx-swatch-rose-soft: rgba(239, 68, 68, 0.14);
+	--tx-swatch-steel: #71717a;
+	--tx-swatch-steel-soft: rgba(113, 113, 122, 0.14);
 
-	/* Meta Primary (Cobalt Blue #0064e0) */
-	--tx-primary: #0064e0;
-	--tx-primary-foreground: #ffffff;
-	--tx-accent: #0091ff;
-	--tx-accent-soft: rgba(0, 100, 224, 0.16);
+	/* Geist Primary & Accent (Aligned with user-chosen theme accent color) */
+	--tx-primary: var(--tx-accent);
+	--tx-primary-foreground: var(--tx-accent-foreground);
+	--tx-accent: #6366f1;
+	--tx-accent-soft: rgba(99, 102, 241, 0.15);
+	--tx-accent-foreground: #ffffff;
 
-	/* Meta Semantics */
-	--tx-danger: #e41e3f;
-	--tx-danger-soft: rgba(228, 30, 63, 0.16);
-	--tx-warning: #f7b928;
-	--tx-warning-soft: rgba(247, 185, 40, 0.16);
-	--tx-success: #31a24c;
-	--tx-success-soft: rgba(49, 162, 76, 0.16);
+	/* Geist Semantics */
+	--tx-danger: #ef4444;
+	--tx-danger-soft: rgba(239, 68, 68, 0.14);
+	--tx-warning: #f59e0b;
+	--tx-warning-soft: rgba(245, 158, 11, 0.14);
+	--tx-success: #00e599;
+	--tx-success-soft: rgba(0, 229, 153, 0.14);
 
 	/* Terminal Canvas */
-	--tx-term: #070c0f;
-	--tx-term-ink: #f1f4f7;
+	--tx-term: #000000;
+	--tx-term-ink: #ededed;
+
+	/* Focus, Selection, Scrollbar & Shadows */
+	--tx-focus: var(--tx-accent);
+	--tx-selection: var(--tx-accent-soft);
+	--tx-scrollbar: rgba(255, 255, 255, 0.14);
+	--tx-scrollbar-hover: rgba(255, 255, 255, 0.28);
+	--tx-shadow-host-hover: 0 0 0 1px var(--tx-accent-soft), 0 8px 24px -4px rgba(0, 0, 0, 0.8);
+	--tx-shadow-host-active: 0 0 0 1px var(--tx-accent), 0 4px 12px -2px rgba(0, 0, 0, 0.8);
+	--tx-shadow-popover: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 16px 36px -4px rgba(0, 0, 0, 0.9);
 }
 
 :root[data-theme="light"] {
 	color-scheme: light;
 
-	/* Meta Light Surface System (canvas & surface-soft) */
+	/* Geist Light Surface System */
 	--tx-surface: #ffffff;
-	--tx-surface-raised: #f1f4f7;
-	--tx-surface-sunk: #eef2f6;
-	--tx-surface-foreground: #0a1317;
-	--tx-muted: #4b4c4f;
-	--tx-faint: #8595a4;
-	--tx-border: #dee3e9;
+	--tx-surface-raised: #f7f7f7;
+	--tx-surface-sunk: #f2f2f2;
+	--tx-surface-foreground: #111111;
+	--tx-muted: #666666;
+	--tx-faint: #888888;
+	--tx-border: #eaeaea;
 
-	/* Meta Accent Swatches (Light) */
-	--tx-swatch-indigo: #0064e0;
-	--tx-swatch-indigo-soft: rgba(0, 100, 224, 0.1);
-	--tx-swatch-cyan: #0091ff;
-	--tx-swatch-cyan-soft: rgba(0, 145, 255, 0.1);
-	--tx-swatch-emerald: #31a24c;
-	--tx-swatch-emerald-soft: rgba(49, 162, 76, 0.1);
-	--tx-swatch-amber: #f2a918;
-	--tx-swatch-amber-soft: rgba(242, 169, 24, 0.1);
-	--tx-swatch-rose: #e41e3f;
-	--tx-swatch-rose-soft: rgba(228, 30, 63, 0.1);
-	--tx-swatch-steel: #5d6c7b;
-	--tx-swatch-steel-soft: rgba(93, 108, 123, 0.1);
+	/* Geist Accent Swatches (Light) */
+	--tx-swatch-vercel: #0070f3;
+	--tx-swatch-vercel-soft: rgba(0, 112, 243, 0.10);
+	--tx-swatch-indigo: #4f46e5;
+	--tx-swatch-indigo-soft: rgba(79, 70, 229, 0.08);
+	--tx-swatch-cyan: #0284c7;
+	--tx-swatch-cyan-soft: rgba(2, 132, 199, 0.08);
+	--tx-swatch-emerald: #10b981;
+	--tx-swatch-emerald-soft: rgba(16, 185, 129, 0.08);
+	--tx-swatch-amber: #d97706;
+	--tx-swatch-amber-soft: rgba(217, 119, 6, 0.08);
+	--tx-swatch-rose: #dc2626;
+	--tx-swatch-rose-soft: rgba(220, 38, 38, 0.08);
+	--tx-swatch-steel: #71717a;
+	--tx-swatch-steel-soft: rgba(113, 113, 122, 0.08);
 
-	/* Meta Primary (Cobalt Blue #0064e0) */
-	--tx-primary: #0064e0;
-	--tx-primary-foreground: #ffffff;
-	--tx-accent: #0064e0;
-	--tx-accent-soft: rgba(0, 100, 224, 0.1);
+	/* Geist Primary & Accent (Light) */
+	--tx-primary: var(--tx-accent);
+	--tx-primary-foreground: var(--tx-accent-foreground);
+	--tx-accent: #4f46e5;
+	--tx-accent-soft: rgba(79, 70, 229, 0.10);
+	--tx-accent-foreground: #ffffff;
 
-	/* Meta Semantics */
-	--tx-danger: #e41e3f;
-	--tx-danger-soft: rgba(228, 30, 63, 0.1);
-	--tx-warning: #f2a918;
-	--tx-warning-soft: rgba(242, 169, 24, 0.1);
-	--tx-success: #31a24c;
-	--tx-success-soft: rgba(49, 162, 76, 0.1);
+	/* Geist Semantics (Light) */
+	--tx-danger: #dc2626;
+	--tx-danger-soft: rgba(220, 38, 38, 0.08);
+	--tx-warning: #d97706;
+	--tx-warning-soft: rgba(217, 119, 6, 0.08);
+	--tx-success: #10b981;
+	--tx-success-soft: rgba(16, 185, 129, 0.08);
 
 	/* Terminal Canvas */
 	--tx-term: #ffffff;
-	--tx-term-ink: #0a1317;
+	--tx-term-ink: #111111;
+
+	/* Focus, Selection, Scrollbar & Shadows (Light) */
+	--tx-focus: var(--tx-accent);
+	--tx-selection: var(--tx-accent-soft);
+	--tx-scrollbar: rgba(0, 0, 0, 0.14);
+	--tx-scrollbar-hover: rgba(0, 0, 0, 0.28);
+	--tx-shadow-host-hover: 0 0 0 1px var(--tx-accent-soft), 0 8px 20px -4px rgba(0, 0, 0, 0.08);
+	--tx-shadow-host-active: 0 0 0 1px var(--tx-accent), 0 4px 12px -2px rgba(0, 0, 0, 0.08);
+	--tx-shadow-popover: 0 0 0 1px rgba(0, 0, 0, 0.08), 0 16px 32px -4px rgba(0, 0, 0, 0.12);
+}
+
+:root[data-accent="vercel"] {
+	--tx-accent: #0070f3;
+	--tx-accent-soft: rgba(0, 112, 243, 0.15);
+	--tx-accent-foreground: #ffffff;
+}
+:root[data-theme="light"][data-accent="vercel"] {
+	--tx-accent: #0068d6;
+	--tx-accent-soft: rgba(0, 104, 214, 0.10);
+	--tx-accent-foreground: #ffffff;
 }
 
 :root[data-accent="indigo"] {
-	--tx-primary: #0064e0;
-	--tx-accent: #0091ff;
-	--tx-accent-soft: rgba(0, 100, 224, 0.16);
+	--tx-accent: #6366f1;
+	--tx-accent-soft: rgba(99, 102, 241, 0.15);
+	--tx-accent-foreground: #ffffff;
 }
+:root[data-theme="light"][data-accent="indigo"] {
+	--tx-accent: #4f46e5;
+	--tx-accent-soft: rgba(79, 70, 229, 0.10);
+	--tx-accent-foreground: #ffffff;
+}
+
 :root[data-accent="cyan"] {
-	--tx-primary: #0091ff;
-	--tx-accent: #0091ff;
-	--tx-accent-soft: rgba(0, 145, 255, 0.16);
+	--tx-accent: #00e5ff;
+	--tx-accent-soft: rgba(0, 229, 255, 0.15);
+	--tx-accent-foreground: #000000;
 }
+:root[data-theme="light"][data-accent="cyan"] {
+	--tx-accent: #0284c7;
+	--tx-accent-soft: rgba(2, 132, 199, 0.10);
+	--tx-accent-foreground: #ffffff;
+}
+
 :root[data-accent="emerald"] {
-	--tx-primary: #31a24c;
-	--tx-accent: #24e400;
-	--tx-accent-soft: rgba(49, 162, 76, 0.16);
+	--tx-accent: #00e599;
+	--tx-accent-soft: rgba(0, 229, 153, 0.15);
+	--tx-accent-foreground: #000000;
 }
+:root[data-theme="light"][data-accent="emerald"] {
+	--tx-accent: #059669;
+	--tx-accent-soft: rgba(5, 150, 105, 0.10);
+	--tx-accent-foreground: #ffffff;
+}
+
 :root[data-accent="amber"] {
-	--tx-primary: #f2a918;
-	--tx-accent: #ffe200;
-	--tx-accent-soft: rgba(242, 169, 24, 0.16);
+	--tx-accent: #f59e0b;
+	--tx-accent-soft: rgba(245, 158, 11, 0.15);
+	--tx-accent-foreground: #000000;
 }
+:root[data-theme="light"][data-accent="amber"] {
+	--tx-accent: #d97706;
+	--tx-accent-soft: rgba(217, 119, 6, 0.10);
+	--tx-accent-foreground: #ffffff;
+}
+
 :root[data-accent="rose"] {
-	--tx-primary: #f0284a;
-	--tx-accent: #f0284a;
-	--tx-accent-soft: rgba(240, 40, 74, 0.16);
+	--tx-accent: #ef4444;
+	--tx-accent-soft: rgba(239, 68, 68, 0.15);
+	--tx-accent-foreground: #ffffff;
 }
+:root[data-theme="light"][data-accent="rose"] {
+	--tx-accent: #dc2626;
+	--tx-accent-soft: rgba(220, 38, 38, 0.10);
+	--tx-accent-foreground: #ffffff;
+}
+
 :root[data-accent="steel"] {
-	--tx-primary: #5d6c7b;
-	--tx-accent: #8595a4;
-	--tx-accent-soft: rgba(93, 108, 123, 0.16);
+	--tx-accent: #a1a1aa;
+	--tx-accent-soft: rgba(161, 161, 170, 0.15);
+	--tx-accent-foreground: #000000;
+}
+:root[data-theme="light"][data-accent="steel"] {
+	--tx-accent: #52525b;
+	--tx-accent-soft: rgba(82, 82, 91, 0.10);
+	--tx-accent-foreground: #ffffff;
 }
 
 @theme {
-	--font-sans: "Optimistic Text", "Optimistic VF", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+	--font-sans: "Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
 		Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
-	--font-display: "Optimistic Display", "Optimistic VF", var(--font-sans);
+	--font-display: "Geist", var(--font-sans);
 	--font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
 
 	--color-primary: var(--tx-primary);
@@ -152,7 +222,9 @@
 
 	--color-accent: var(--tx-accent);
 	--color-accent-soft: var(--tx-accent-soft);
+	--color-accent-foreground: var(--tx-accent-foreground);
 
+	--color-swatch-vercel: var(--tx-swatch-vercel);
 	--color-swatch-indigo: var(--tx-swatch-indigo);
 	--color-swatch-cyan: var(--tx-swatch-cyan);
 	--color-swatch-emerald: var(--tx-swatch-emerald);
@@ -169,9 +241,9 @@
 	--color-term: var(--tx-term);
 	--color-term-ink: var(--tx-term-ink);
 
-	/* Meta 规范：卡片圆角 16px，控制台/输入框基础圆角 8px */
-	--radius-card: 16px;
-	--radius-control: 8px;
+	/* Geist 规范：卡片圆角 8px，控制台/输入框基础圆角 6px */
+	--radius-card: 8px;
+	--radius-control: 6px;
 }
 
 @layer base {
@@ -187,6 +259,7 @@
 		font-size: 13px;
 		letter-spacing: -0.01em;
 		-webkit-font-smoothing: antialiased;
+		-webkit-tap-highlight-color: transparent;
 		text-rendering: optimizeLegibility;
 	}
 
@@ -201,23 +274,23 @@
 		user-select: text;
 	}
 
-	/* Meta 风格细滚动条 */
+	/* Geist 风格细滚动条 */
 	* {
 		scrollbar-width: thin;
-		scrollbar-color: var(--color-border) transparent;
+		scrollbar-color: var(--tx-scrollbar) transparent;
 	}
 	*::-webkit-scrollbar {
-		width: 8px;
-		height: 8px;
+		width: 6px;
+		height: 6px;
 	}
 	*::-webkit-scrollbar-thumb {
-		background-color: var(--color-border);
-		border: 2px solid transparent;
+		background-color: var(--tx-scrollbar);
+		border: 1px solid transparent;
 		background-clip: content-box;
-		border-radius: 9999px;
+		border-radius: 4px;
 	}
 	*::-webkit-scrollbar-thumb:hover {
-		background-color: var(--color-faint);
+		background-color: var(--tx-scrollbar-hover);
 		background-clip: content-box;
 	}
 	*::-webkit-scrollbar-corner {
@@ -225,7 +298,7 @@
 	}
 
 	:focus-visible {
-		outline: 2px solid var(--color-primary);
+		outline: 2px solid var(--tx-focus);
 		outline-offset: 1px;
 	}
 
@@ -234,21 +307,29 @@
 	}
 
 	::selection {
-		background: rgba(0, 100, 224, 0.28);
+		background: var(--tx-selection);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		::before,
+		::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+			scroll-behavior: auto !important;
+		}
 	}
 }
 
 @utility shadow-host-hover {
-	box-shadow: 0 14px 32px -4px color-mix(in srgb, var(--tx-primary) 32%, transparent),
-	            0 4px 14px -2px rgba(0, 0, 0, 0.08);
+	box-shadow: var(--tx-shadow-host-hover);
 }
 
 @utility shadow-host-active {
-	box-shadow: 0 6px 20px -2px color-mix(in srgb, var(--tx-primary) 28%, transparent),
-	            0 2px 6px -1px rgba(0, 0, 0, 0.06);
+	box-shadow: var(--tx-shadow-host-active);
 }
 
 @utility shadow-popover {
-	box-shadow: 0 18px 42px -6px color-mix(in srgb, var(--tx-primary) 22%, rgba(0, 0, 0, 0.28)),
-	            0 6px 18px -2px rgba(0, 0, 0, 0.12);
+	box-shadow: var(--tx-shadow-popover);
 }

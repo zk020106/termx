@@ -89,7 +89,7 @@ function toForm(config: GroupConfig | undefined, name: string, parentId: string 
 
 function Section({ icon, title, children }: { icon: string; title: string; children: React.ReactNode }) {
 	return (
-		<section className="space-y-2 rounded-lg border border-border/80 bg-surface-raised/40 p-3">
+		<section className="space-y-2 rounded-card border border-border/80 bg-surface-raised/40 p-3">
 			<div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-surface-foreground">
 				<span className={`${icon} size-3.5 text-muted`} />
 				{title}
@@ -317,7 +317,7 @@ export function GroupSettingsDrawer({ groupId, onClose }: { groupId: string | nu
 				</Section>
 
 				<Section icon="icon-[lucide--square-terminal]" title="SSH">
-					<div className="flex h-8 items-center gap-2 rounded-md border border-border/70 bg-surface px-2">
+					<div className="flex h-8 items-center gap-2 rounded-control border border-border/70 bg-surface px-2">
 						<span className="text-[11px] text-muted">SSH on</span>
 						<Input
 							value={form.port}
@@ -418,7 +418,7 @@ export function GroupSettingsDrawer({ groupId, onClose }: { groupId: string | nu
 						</Select>
 					)}
 					{form.proxyMode === "manual" && (
-						<div className="space-y-2 rounded-md border border-border/60 p-2">
+						<div className="space-y-2 rounded-control border border-border/60 p-2">
 							<Select value={form.proxyType} onChange={(e) => update("proxyType", e.target.value as Form["proxyType"])}>
 								<option value="socks5">SOCKS5</option>
 								<option value="http">HTTP</option>

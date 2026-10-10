@@ -165,7 +165,7 @@ function useSshRttPolling(sessionKey: string | undefined, connected: boolean, in
 }
 
 function Divider() {
-	return <span className="text-border">/</span>;
+	return <span aria-hidden="true" className="text-border">/</span>;
 }
 
 /** 独立会话视图可直接用：给一个 host 就渲染完整状态栏 */

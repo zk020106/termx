@@ -37,6 +37,8 @@
 		"src/lib/osc7Setup.ts",
 		"src/lib/terminalCwd.ts",
 		"src/lib/zmodem/zmodemHelper.ts",
-		"src/lib/sftpColumns.ts"
+		"src/lib/sftpColumns.ts",
+		"src/data/preferences.ts",
+		"src/store/settings.ts"
 	]
 }

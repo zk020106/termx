@@ -3,6 +3,7 @@ import type { Accent, Density, ThemeMode } from "@/data/types";
 
 const THEME_KEY = "termx.theme";
 const DENSITY_KEY = "termx.density";
+const ACCENT_KEY = "termx.accent";
 
 type Resolved = "dark" | "light";
 
@@ -16,19 +17,57 @@ function resolveMode(mode: ThemeMode): Resolved {
 	return mode === "system" ? systemResolved() : mode;
 }
 
+/** 规范：主题与强调色切换时抑制所有过渡，防止全局颜色插值涂抹 */
+function withDisabledTransitions(fn: () => void): void {
+	if (typeof document === "undefined") {
+		fn();
+		return;
+	}
+	const style = document.createElement("style");
+	style.append(
+		document.createTextNode("*,*::before,*::after{transition:none !important}"),
+	);
+	document.head.append(style);
+
+	fn();
+
+	// 强制同步样式重排，确保新主题变量立即解析后再恢复 transition
+	if (document.body) {
+		void document.body.offsetHeight;
+	}
+
+	requestAnimationFrame(() => {
+		requestAnimationFrame(() => {
+			style.remove();
+		});
+	});
+}
+
 /** 主题属性必须写回 <html>，--color-* 的 var 引用才会解析到正确主题 */
-function applyTheme(mode: ThemeMode): Resolved {
+function applyTheme(mode: ThemeMode, suppressTransitions = true): Resolved {
 	const resolved = resolveMode(mode);
 	if (typeof document !== "undefined") {
-		document.documentElement.dataset.theme = resolved;
+		if (suppressTransitions) {
+			withDisabledTransitions(() => {
+				document.documentElement.dataset.theme = resolved;
+			});
+		} else {
+			document.documentElement.dataset.theme = resolved;
+		}
 	}
 	return resolved;
 }
 
 /** 强调色同样挂在 <html>：theme.css 按 data-accent 把 --tx-accent 指向对应色板 */
-function applyAccent(accent: Accent): void {
+function applyAccent(accent: Accent, suppressTransitions = true): void {
 	if (typeof document !== "undefined") {
-		document.documentElement.dataset.accent = accent;
+		if (suppressTransitions) {
+			withDisabledTransitions(() => {
+				document.documentElement.dataset.accent = accent;
+			});
+		} else {
+			document.documentElement.dataset.accent = accent;
+		}
 	}
 }
 
@@ -52,14 +91,12 @@ interface ThemeState {
 }
 
 const initialMode = readStored<ThemeMode>(THEME_KEY, ["dark", "light", "system"], "dark");
-
-/** 默认强调色；配置文件里有值时由 hydrateStores 覆盖再渲染 */
-const initialAccent: Accent = "indigo";
-applyAccent(initialAccent);
+const initialAccent = readStored<Accent>(ACCENT_KEY, ["vercel", "indigo", "cyan", "emerald", "amber", "rose", "steel"], "vercel");
+applyAccent(initialAccent, false);
 
 export const useThemeStore = create<ThemeState>((set) => ({
 	mode: initialMode,
-	resolved: applyTheme(initialMode),
+	resolved: applyTheme(initialMode, false),
 	density: readStored<Density>(DENSITY_KEY, ["compact", "standard"], "standard"),
 	accent: initialAccent,
 
@@ -83,9 +120,14 @@ export const useThemeStore = create<ThemeState>((set) => ({
 		set({ density });
 	},
 
-	/** 强调色入配置文件（store/persistence.ts 统一写盘），改 <html> 即全界面即时生效 */
+	/** 强调色入配置文件与本地存储，改 <html> 即全界面即时生效 */
 	setAccent: (accent) => {
 		applyAccent(accent);
+		try {
+			localStorage.setItem(ACCENT_KEY, accent);
+		} catch {
+			/* 忽略 */
+		}
 		set({ accent });
 	},
 }));

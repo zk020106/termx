@@ -110,5 +110,8 @@ function pickTerminalExtras(state: TerminalPreferences) {
 		sftpVisibleColumns: state.sftpVisibleColumns,
 		sftpDirectoriesFirst: state.sftpDirectoriesFirst,
 		sftpHostViewModes: state.sftpHostViewModes,
+		customCss: state.customCss,
+		uiFontFamily: state.uiFontFamily,
+		sessionRestore: state.sessionRestore,
 	};
 }

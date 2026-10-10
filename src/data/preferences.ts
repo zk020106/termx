@@ -121,6 +121,12 @@ export interface TerminalPreferences {
 	sftpDirectoriesFirst: boolean;
 	/** 每台主机记住的视图模式：列表 / 树形（Netcatty STORAGE_KEY_SFTP_HOST_VIEW_MODES；本地栏键为 "local"） */
 	sftpHostViewModes: Record<string, "list" | "tree">;
+	/** 自定义全局 CSS 样式（实时注入到 document） */
+	customCss: string;
+	/** 自定义 UI 界面字体 */
+	uiFontFamily: string;
+	/** 启动时是否恢复未关闭的会话标签页 */
+	sessionRestore: boolean;
 }
 
 export type SftpDoubleClickBehavior = "open" | "transfer";
@@ -203,6 +209,9 @@ export const DEFAULT_TERMINAL: TerminalPreferences = {
 	sftpVisibleColumns: { ...DEFAULT_SFTP_COLUMN_VISIBILITY },
 	sftpDirectoriesFirst: true,
 	sftpHostViewModes: {},
+	customCss: "",
+	uiFontFamily: "",
+	sessionRestore: true,
 };
 
 export const DEFAULT_SECURITY: SecurityPreferences = {
@@ -367,6 +376,9 @@ export function normalizePreferences(raw: unknown): Preferences {
 			sftpVisibleColumns: normalizeSftpColumnVisibility(terminal.sftpVisibleColumns),
 			sftpDirectoriesFirst: pickBoolean(terminal.sftpDirectoriesFirst, DEFAULT_TERMINAL.sftpDirectoriesFirst),
 			sftpHostViewModes: normalizeHostViewModes(terminal.sftpHostViewModes),
+			customCss: typeof terminal.customCss === "string" ? terminal.customCss : DEFAULT_TERMINAL.customCss,
+			uiFontFamily: typeof terminal.uiFontFamily === "string" ? terminal.uiFontFamily : DEFAULT_TERMINAL.uiFontFamily,
+			sessionRestore: pickBoolean(terminal.sessionRestore, DEFAULT_TERMINAL.sessionRestore),
 		},
 		security: {
 			keychain: pickBoolean(security.keychain, DEFAULT_SECURITY.keychain),

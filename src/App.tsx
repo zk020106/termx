@@ -34,9 +34,40 @@ const Updater = lazy(() => import("@/screens/Updater"));
 const Welcome = lazy(() => import("@/screens/Welcome"));
 const Workspace = lazy(() => import("@/screens/Workspace"));
 
+import { useSettingsStore } from "@/store/settings";
+
+function CustomAppearanceManager() {
+	const customCss = useSettingsStore((s) => s.customCss);
+	const uiFontFamily = useSettingsStore((s) => s.uiFontFamily);
+
+	useEffect(() => {
+		let el = document.getElementById("termx-custom-css") as HTMLStyleElement | null;
+		if (!el) {
+			el = document.createElement("style");
+			el.id = "termx-custom-css";
+			document.head.appendChild(el);
+		}
+		el.textContent = customCss || "";
+	}, [customCss]);
+
+	useEffect(() => {
+		if (uiFontFamily && uiFontFamily.trim()) {
+			document.documentElement.style.setProperty(
+				"--font-sans",
+				`"${uiFontFamily.trim()}", "IBM Plex Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`,
+			);
+		} else {
+			document.documentElement.style.removeProperty("--font-sans");
+		}
+	}, [uiFontFamily]);
+
+	return null;
+}
+
 export default function App() {
 	return (
 		<HashRouter>
+			<CustomAppearanceManager />
 			<LockGate>
 				<ScreenBoundary>
 					<Suspense fallback={<ScreenLoading />}>

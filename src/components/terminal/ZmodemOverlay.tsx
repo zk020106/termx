@@ -95,7 +95,7 @@ function ZmodemProgressIndicator({
 				</div>
 				<div className="h-1 w-full overflow-hidden rounded-full bg-surface-raised">
 					<div
-						className={`h-full rounded-full transition-all duration-150 ${transferType === "upload" ? "bg-primary" : "bg-success"}`}
+						className={`h-full rounded-full transition-[width] duration-150 ease-out ${transferType === "upload" ? "bg-primary" : "bg-success"}`}
 						style={{ width: `${percent}%` }}
 					/>
 				</div>

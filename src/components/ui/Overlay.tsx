@@ -1,6 +1,6 @@
 import { cn } from "@/lib/cn";
 import { useToastStore, type ToastTone } from "@/store/toast";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Kbd } from "./Button";
 import { Input } from "./Input";
 
@@ -8,6 +8,67 @@ import { Input } from "./Input";
  * 浮层：右侧抽屉、模态框、危险确认、Toast。
  * 原则（需求书 03-2）：少用模态弹窗 —— 编辑用抽屉，只有危险操作与指纹确认才用模态。
  * ========================================================================== */
+
+function useFocusTrap<T extends HTMLElement>(open: boolean, onClose: () => void) {
+	const containerRef = useRef<T | null>(null);
+	const prevActiveElement = useRef<HTMLElement | null>(null);
+
+	useEffect(() => {
+		if (!open) return;
+		prevActiveElement.current = document.activeElement as HTMLElement | null;
+
+		const handleKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "Escape") {
+				e.stopPropagation();
+				onClose();
+				return;
+			}
+			if (e.key !== "Tab" || !containerRef.current) return;
+
+			const focusables = Array.from(
+				containerRef.current.querySelectorAll<HTMLElement>(
+					'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+				),
+			).filter((el) => el.offsetParent !== null || el.getClientRects().length > 0);
+
+			if (focusables.length === 0) return;
+
+			const first = focusables[0];
+			const last = focusables[focusables.length - 1];
+
+			if (e.shiftKey) {
+				if (document.activeElement === first) {
+					e.preventDefault();
+					last.focus();
+				}
+			} else {
+				if (document.activeElement === last) {
+					e.preventDefault();
+					first.focus();
+				}
+			}
+		};
+
+		window.addEventListener("keydown", handleKeyDown);
+
+		const timer = setTimeout(() => {
+			if (containerRef.current) {
+				const firstFocusable = containerRef.current.querySelector<HTMLElement>(
+					'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+				);
+				firstFocusable?.focus();
+			}
+		}, 0);
+
+		return () => {
+			clearTimeout(timer);
+			window.removeEventListener("keydown", handleKeyDown);
+			prevActiveElement.current?.focus();
+		};
+	}, [open, onClose]);
+
+	return containerRef;
+}
 
 /** 右侧抽屉：编辑主机、查看详情 */
 export function Drawer({
@@ -27,14 +88,7 @@ export function Drawer({
 	footer?: ReactNode;
 	children: ReactNode;
 }) {
-	useEffect(() => {
-		if (!open) return;
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") onClose();
-		};
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
-	}, [open, onClose]);
+	const trapRef = useFocusTrap<HTMLElement>(open, onClose);
 
 	if (!open) return null;
 
@@ -47,6 +101,7 @@ export function Drawer({
 				className="absolute inset-0 cursor-default bg-black/40 backdrop-blur-[1px]"
 			/>
 			<aside
+				ref={trapRef}
 				role="dialog"
 				aria-modal="true"
 				style={{ width }}
@@ -67,7 +122,7 @@ export function Drawer({
 					</button>
 				</header>
 
-				<div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+				<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{children}</div>
 
 				{footer && (
 					<footer className="flex h-11 shrink-0 items-center justify-end gap-2 border-t border-border bg-surface px-3">
@@ -97,14 +152,7 @@ export function Modal({
 	footer?: ReactNode;
 	children: ReactNode;
 }) {
-	useEffect(() => {
-		if (!open) return;
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") onClose();
-		};
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
-	}, [open, onClose]);
+	const trapRef = useFocusTrap<HTMLDivElement>(open, onClose);
 
 	if (!open) return null;
 
@@ -112,6 +160,7 @@ export function Modal({
 		<div className="absolute inset-0 z-50 flex items-center justify-center p-6">
 			<button type="button" aria-label="关闭" onClick={onClose} className="absolute inset-0 cursor-default bg-black/50" />
 			<div
+				ref={trapRef}
 				role="dialog"
 				aria-modal="true"
 				style={{ width }}
@@ -129,7 +178,7 @@ export function Modal({
 						<span className="icon-[lucide--x] size-3.5" />
 					</button>
 				</header>
-				<div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 text-[11.5px] leading-5 text-muted">{children}</div>
+				<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-3 text-[11.5px] leading-5 text-muted">{children}</div>
 				{footer && (
 					<footer className="flex shrink-0 items-center justify-end gap-2 border-t border-border bg-surface px-3 py-2.5">
 						{footer}
@@ -205,7 +254,7 @@ export function Toaster() {
 	if (toasts.length === 0) return null;
 
 	return (
-		<div className="pointer-events-none absolute bottom-9 left-1/2 z-50 flex w-[min(420px,80vw)] -translate-x-1/2 flex-col gap-1.5">
+		<div role="status" aria-live="polite" className="pointer-events-none absolute bottom-9 left-1/2 z-50 flex w-[min(420px,80vw)] -translate-x-1/2 flex-col gap-1.5">
 			{toasts.map((t) => (
 				<div
 					key={t.id}
@@ -234,9 +283,9 @@ export function Toaster() {
 						type="button"
 						onClick={() => dismiss(t.id)}
 						aria-label="关闭提示"
-						className="flex size-5 shrink-0 items-center justify-center rounded text-faint hover:bg-surface hover:text-surface-foreground"
+						className="flex size-6 shrink-0 items-center justify-center rounded text-faint hover:bg-surface hover:text-surface-foreground"
 					>
-						<span className="icon-[lucide--x] size-3" />
+						<span className="icon-[lucide--x] size-3.5" />
 					</button>
 				</div>
 			))}

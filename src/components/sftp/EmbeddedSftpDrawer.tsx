@@ -42,6 +42,7 @@ interface EmbeddedSftpDrawerProps {
 		status: ConnectionStatus;
 	}>;
 	onSelectSession?: (tabId: string) => void;
+	isDock?: boolean;
 }
 
 export function EmbeddedSftpDrawer({
@@ -55,6 +56,7 @@ export function EmbeddedSftpDrawer({
 	onToggleFollow,
 	availableSessions,
 	onSelectSession,
+	isDock = false,
 }: EmbeddedSftpDrawerProps) {
 	const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
 
@@ -245,15 +247,20 @@ export function EmbeddedSftpDrawer({
 	if (status === "connecting" || status === "reconnecting") {
 		return (
 			<div
-				style={{ height }}
-				className="relative flex shrink-0 flex-col border-t border-border bg-surface select-none z-10"
+				style={isDock ? undefined : { height }}
+				className={cn(
+					"relative flex flex-col bg-surface select-none z-10",
+					isDock ? "flex-1 min-h-0 w-full" : "shrink-0 border-t border-border",
+				)}
 			>
-				<div
-					onMouseDown={handleMouseDown}
-					className="group/resizer absolute -top-1 left-0 right-0 h-2 cursor-row-resize z-20 flex items-center justify-center"
-				>
-					<div className="h-0.5 w-12 rounded-full bg-border group-hover/resizer:bg-primary transition-colors" />
-				</div>
+				{!isDock && (
+					<div
+						onMouseDown={handleMouseDown}
+						className="group/resizer absolute -top-1 left-0 right-0 h-2 cursor-row-resize z-20 flex items-center justify-center"
+					>
+						<div className="h-0.5 w-12 rounded-full bg-border group-hover/resizer:bg-primary transition-colors" />
+					</div>
+				)}
 				<div className="flex h-7.5 shrink-0 items-center justify-between border-b border-border bg-surface-raised px-3 text-[11px]">
 					<SftpSessionPill
 						hostTitle={hostTitle}
@@ -265,7 +272,7 @@ export function EmbeddedSftpDrawer({
 						isOpen={sessionMenuOpen}
 						onToggleOpen={() => setSessionMenuOpen((v) => !v)}
 					/>
-					<IconButton icon="icon-[lucide--x]" label="关闭" className="size-5" onClick={onClose} />
+					{!isDock && <IconButton icon="icon-[lucide--x]" label="关闭" className="size-5" onClick={onClose} />}
 				</div>
 				<div className="flex flex-1 flex-col items-center justify-center p-6 text-muted">
 					<span className="icon-[lucide--loader-2] size-5 animate-spin text-primary mb-2" />
@@ -279,15 +286,20 @@ export function EmbeddedSftpDrawer({
 	if (!sessionKey || status === "disconnected" || status === "failed") {
 		return (
 			<div
-				style={{ height }}
-				className="relative flex shrink-0 flex-col border-t border-border bg-surface select-none z-10"
+				style={isDock ? undefined : { height }}
+				className={cn(
+					"relative flex flex-col bg-surface select-none z-10",
+					isDock ? "flex-1 min-h-0 w-full" : "shrink-0 border-t border-border",
+				)}
 			>
-				<div
-					onMouseDown={handleMouseDown}
-					className="group/resizer absolute -top-1 left-0 right-0 h-2 cursor-row-resize z-20 flex items-center justify-center"
-				>
-					<div className="h-0.5 w-12 rounded-full bg-border group-hover/resizer:bg-primary transition-colors" />
-				</div>
+				{!isDock && (
+					<div
+						onMouseDown={handleMouseDown}
+						className="group/resizer absolute -top-1 left-0 right-0 h-2 cursor-row-resize z-20 flex items-center justify-center"
+					>
+						<div className="h-0.5 w-12 rounded-full bg-border group-hover/resizer:bg-primary transition-colors" />
+					</div>
+				)}
 				<div className="flex h-7.5 shrink-0 items-center justify-between border-b border-border bg-surface-raised px-3 text-[11px]">
 					<SftpSessionPill
 						hostTitle={hostTitle}
@@ -299,7 +311,7 @@ export function EmbeddedSftpDrawer({
 						isOpen={sessionMenuOpen}
 						onToggleOpen={() => setSessionMenuOpen((v) => !v)}
 					/>
-					<IconButton icon="icon-[lucide--x]" label="关闭" className="size-5" onClick={onClose} />
+					{!isDock && <IconButton icon="icon-[lucide--x]" label="关闭" className="size-5" onClick={onClose} />}
 				</div>
 				<div className="flex flex-1 flex-col items-center justify-center p-6 text-center">
 					<EmptyState
@@ -321,8 +333,11 @@ export function EmbeddedSftpDrawer({
 
 	return (
 		<div
-			style={{ height }}
-			className="relative flex shrink-0 flex-col border-t border-border bg-surface select-none z-10 shadow-lg"
+			style={isDock ? undefined : { height }}
+			className={cn(
+				"relative flex flex-col bg-surface select-none z-10",
+				isDock ? "flex-1 min-h-0 w-full" : "shrink-0 border-t border-border shadow-lg",
+			)}
 			onContextMenu={(e) => {
 				// 点击空白区呼出上下文菜单
 				if ((e.target as HTMLElement).closest(".file-row")) return;
@@ -330,13 +345,15 @@ export function EmbeddedSftpDrawer({
 			}}
 		>
 			{/* 拖拽高度调节手柄 */}
-			<div
-				onMouseDown={handleMouseDown}
-				title="拖拽调节 SFTP 面板高度"
-				className="group/resizer absolute -top-1 left-0 right-0 h-2 cursor-row-resize z-20 flex items-center justify-center"
-			>
-				<div className="h-0.75 w-12 rounded-full bg-border/80 group-hover/resizer:bg-primary transition-colors" />
-			</div>
+			{!isDock && (
+				<div
+					onMouseDown={handleMouseDown}
+					title="拖拽调节 SFTP 面板高度"
+					className="group/resizer absolute -top-1 left-0 right-0 h-2 cursor-row-resize z-20 flex items-center justify-center"
+				>
+					<div className="h-0.75 w-12 rounded-full bg-border/80 group-hover/resizer:bg-primary transition-colors" />
+				</div>
+			)}
 
 			{/* 头部控制条 */}
 			<div className="flex h-8 shrink-0 items-center justify-between border-b border-border bg-surface-raised px-2.5 text-[11px]">
@@ -445,7 +462,7 @@ export function EmbeddedSftpDrawer({
 							value={filter}
 							onChange={(e) => setFilter(e.target.value)}
 							placeholder="过滤项…"
-							className="h-6 w-24 rounded border border-border/70 bg-surface px-1.5 text-[10.5px] outline-none focus:w-36 focus:border-primary transition-all"
+							className="h-6 w-24 rounded border border-border/70 bg-surface px-1.5 text-[10.5px] outline-none focus:w-36 focus:border-primary transition-[width,border-color] duration-150 ease-out"
 						/>
 						{filter && (
 							<button
@@ -473,7 +490,7 @@ export function EmbeddedSftpDrawer({
 					<IconButton
 						icon="icon-[lucide--folder-sync]"
 						label={followTerminalCwd ? "关闭追随终端目录" : "开启追随终端目录"}
-						className={cn("size-6", followTerminalCwd && "text-primary")}
+						className={cn("size-6", followTerminalCwd && "text-emerald-400 bg-emerald-500/10")}
 						onClick={() => {
 							const next = !followTerminalCwd;
 							useSettingsStore.getState().setTerminal({ sftpFollowTerminalCwd: next });
@@ -501,19 +518,19 @@ export function EmbeddedSftpDrawer({
 					<IconButton
 						icon="icon-[lucide--upload]"
 						label="上传文件到此目录"
-						className="size-6 text-primary hover:bg-primary/10"
+						className="size-6 text-surface-foreground hover:bg-surface-foreground/10"
 						onClick={handleUpload}
 					/>
 					<IconButton
 						icon="icon-[lucide--refresh-cw]"
 						label="刷新"
-						className={cn("size-6", loading && "animate-spin text-primary")}
+						className={cn("size-6", loading && "animate-spin text-surface-foreground")}
 						onClick={() => loadDir(remotePath)}
 					/>
 					<div className="h-3.5 w-px bg-border mx-1" />
 					<Link
 						to={`/sftp?hostId=${hostId ?? ""}`}
-						className="flex items-center gap-1 rounded px-1.5 py-1 text-[10.5px] font-medium text-primary hover:bg-primary/10 transition-colors"
+						className="flex items-center gap-1 rounded-control px-2 py-0.5 text-[10.5px] font-medium text-surface-foreground/80 hover:bg-surface-foreground/10 hover:text-surface-foreground transition-colors"
 						title="在全屏双栏模式中打开 SFTP"
 					>
 						<span>双栏全屏</span>
@@ -543,7 +560,7 @@ export function EmbeddedSftpDrawer({
 				}}
 				tabIndex={0}
 				onKeyDown={actions.handleKeyDown}
-				className="relative min-h-0 flex-1 overflow-y-auto outline-none"
+				className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain outline-none"
 			>
 				{filteredEntries.length === 0 ? (
 					<div className="flex h-full flex-col items-center justify-center p-6 text-center text-faint">
@@ -730,7 +747,7 @@ function SftpSessionPill({
 	return (
 		<div className="relative flex items-center gap-1.5 shrink-0">
 			<div className="flex items-center gap-1.5">
-				<span className="icon-[lucide--folder-tree] size-3.5 text-primary shrink-0" />
+				<span className="icon-[lucide--folder-tree] size-3.5 text-surface-foreground/90 shrink-0" />
 				{status && (
 					<span
 						className={cn(
@@ -747,7 +764,7 @@ function SftpSessionPill({
 					<button
 						type="button"
 						onClick={onToggleOpen}
-						className="flex items-center gap-1 font-medium text-surface-foreground hover:bg-surface px-1.5 py-0.5 rounded cursor-pointer transition-colors max-w-[130px]"
+						className="flex items-center gap-1 font-medium text-surface-foreground hover:bg-surface px-1.5 py-0.5 rounded-control cursor-pointer transition-colors max-w-[130px]"
 						title="点击切换 SFTP 关联的主机会话"
 					>
 						<span className="truncate">{hostTitle}</span>
@@ -761,7 +778,7 @@ function SftpSessionPill({
 			{isOpen && availableSessions && (
 				<>
 					<div className="fixed inset-0 z-30" onClick={onToggleOpen} />
-					<div className="absolute top-full left-0 mt-1 z-40 w-52 rounded-lg border border-border bg-surface-raised p-1 shadow-lg shadow-black/20">
+					<div className="absolute top-full left-0 mt-1 z-40 w-52 rounded-card border border-border bg-surface-raised p-1 shadow-popover">
 						<div className="px-2 py-1 text-[10px] text-faint border-b border-border mb-1">
 							选择 SFTP 关联的主机会话
 						</div>

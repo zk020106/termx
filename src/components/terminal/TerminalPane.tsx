@@ -80,6 +80,7 @@ export function TerminalPane({
 			style={customColors ? { backgroundColor: customColors.background, color: customColors.foreground } : undefined}
 			className={cn(
 				"group relative flex min-h-0 min-w-0 flex-col overflow-hidden transition-colors duration-150",
+				isSplit && (focused ? "ring-1 ring-inset ring-accent/60" : "ring-1 ring-inset ring-border/50"),
 				!customColors && "bg-term text-term-ink",
 			)}
 		>
@@ -144,7 +145,7 @@ export function TerminalPane({
 							className={cn(
 								"flex size-5 items-center justify-center rounded transition-colors",
 								isMaximized
-									? "text-primary bg-primary/10"
+									? "text-surface-foreground bg-surface-foreground/10"
 									: "text-muted hover:bg-surface-raised hover:text-surface-foreground",
 							)}
 							title={isMaximized ? `还原分屏${hint("toggle-pane-zoom")}` : `最大化分屏${hint("toggle-pane-zoom")}`}

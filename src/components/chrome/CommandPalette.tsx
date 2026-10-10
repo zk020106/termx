@@ -1,11 +1,12 @@
 import { ContextMenu, MenuItem } from "@/components/ui/Menu";
 import { Kbd } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/Display";
-import type { CommandItem } from "@/data/types";
+import type { Accent, CommandItem } from "@/data/types";
 import { cn } from "@/lib/cn";
 import { useHostsStore } from "@/store/hosts";
 import { liveTabForHost, useSessionsStore, writeToActiveTerminal } from "@/store/sessions";
 import { useSnippetsStore } from "@/store/snippets";
+import { useThemeStore } from "@/store/theme";
 import { toast } from "@/store/toast";
 import { useUiStore } from "@/store/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -27,7 +28,7 @@ const GROUP_TITLE: Record<PaletteGroupKey, string> = {
 	recent: "最近连接",
 	host: "主机",
 	command: "命令片段与操作",
-	setting: "设置",
+	setting: "设置与主题",
 };
 
 /** 应用真实存在的快捷动作与设置入口（不是示例数据，是产品自身的功能清单） */
@@ -35,11 +36,24 @@ const STATIC_ACTIONS: CommandItem[] = [
 	{ id: "act-new-tab", group: "command", title: "新建标签", shortcut: "Ctrl T", icon: "icon-[lucide--square-plus]", keywords: ["tab", "标签"] },
 	{ id: "act-split-right", group: "command", title: "水平分屏", shortcut: "Ctrl Shift D", icon: "icon-[lucide--columns-2]", keywords: ["split", "分屏"] },
 	{ id: "act-split-down", group: "command", title: "垂直分屏", shortcut: "Ctrl Shift E", icon: "icon-[lucide--rows-2]" },
-	{ id: "act-toggle-sftp", group: "command", title: "显示 / 隐藏 SFTP 面板", shortcut: "Ctrl Shift O", icon: "icon-[lucide--folder-tree]", keywords: ["sftp", "文件"] },
+	{ id: "act-toggle-sftp", group: "command", title: "切换 SFTP 伴随面板", shortcut: "Ctrl Shift O", icon: "icon-[lucide--folder-tree]", keywords: ["sftp", "文件"] },
+	{ id: "act-toggle-forward", group: "command", title: "切换端口转发 HUD", shortcut: "Ctrl Shift W", icon: "icon-[lucide--waypoints]", keywords: ["forward", "转发", "tunnel"] },
+	{ id: "act-toggle-snippets", group: "command", title: "切换命令片段伴随面板", shortcut: "Ctrl Shift K", icon: "icon-[lucide--code-xml]", keywords: ["snippet", "片段", "脚本"] },
+	{ id: "act-toggle-monitor", group: "command", title: "切换主机遥测 HUD", icon: "icon-[lucide--activity]", keywords: ["monitor", "监控", "rtt", "cpu"] },
 	{ id: "act-broadcast", group: "command", title: "广播输入到全部终端", shortcut: "Ctrl B", icon: "icon-[lucide--radio]" },
 	{ id: "act-new-forward", group: "command", title: "新建端口转发规则", icon: "icon-[lucide--waypoints]", keywords: ["forward", "转发"] },
 	{ id: "act-lock", group: "command", title: "锁定应用", shortcut: "Ctrl Shift L", icon: "icon-[lucide--lock]" },
-	{ id: "set-appearance", group: "setting", title: "外观与主题", icon: "icon-[lucide--palette]", keywords: ["主题", "深色", "浅色"] },
+	{ id: "theme-mode-dark", group: "setting", title: "切换深色模式 (Dark)", icon: "icon-[lucide--moon]", keywords: ["dark", "深色", "暗色", "夜间", "主题"] },
+	{ id: "theme-mode-light", group: "setting", title: "切换浅色模式 (Light)", icon: "icon-[lucide--sun]", keywords: ["light", "浅色", "亮色", "明亮", "主题"] },
+	{ id: "theme-mode-system", group: "setting", title: "跟随系统主题 (System)", icon: "icon-[lucide--monitor]", keywords: ["system", "系统", "自动", "主题"] },
+	{ id: "theme-accent-vercel", group: "setting", title: "主题色：Vercel Blue (标志电光蓝)", icon: "icon-[lucide--palette]", keywords: ["accent", "主题色", "vercel", "blue", "蓝色"] },
+	{ id: "theme-accent-indigo", group: "setting", title: "主题色：Indigo (经典靛蓝)", icon: "icon-[lucide--palette]", keywords: ["accent", "主题色", "indigo", "靛蓝", "紫色"] },
+	{ id: "theme-accent-cyan", group: "setting", title: "主题色：Cyan (电光青)", icon: "icon-[lucide--palette]", keywords: ["accent", "主题色", "cyan", "青色", "蓝绿"] },
+	{ id: "theme-accent-emerald", group: "setting", title: "主题色：Emerald (翡翠绿)", icon: "icon-[lucide--palette]", keywords: ["accent", "主题色", "emerald", "绿色"] },
+	{ id: "theme-accent-amber", group: "setting", title: "主题色：Amber (琥珀金)", icon: "icon-[lucide--palette]", keywords: ["accent", "主题色", "amber", "金色", "橙色"] },
+	{ id: "theme-accent-rose", group: "setting", title: "主题色：Rose (玫瑰粉)", icon: "icon-[lucide--palette]", keywords: ["accent", "主题色", "rose", "粉色", "红色"] },
+	{ id: "theme-accent-steel", group: "setting", title: "主题色：Steel (金属银灰)", icon: "icon-[lucide--palette]", keywords: ["accent", "主题色", "steel", "银灰", "黑白"] },
+	{ id: "set-appearance", group: "setting", title: "外观与主题详细设置", icon: "icon-[lucide--palette]", keywords: ["主题", "深色", "浅色", "设置"] },
 	{ id: "set-terminal", group: "setting", title: "终端字体与配色", icon: "icon-[lucide--type]" },
 	{ id: "set-shortcuts", group: "setting", title: "快捷键", shortcut: "Ctrl ,", icon: "icon-[lucide--keyboard]" },
 	{ id: "set-security", group: "setting", title: "安全与应用锁", icon: "icon-[lucide--shield]" },
@@ -162,6 +176,27 @@ export function CommandPalettePanel({
 			if (!item) return;
 			onClose?.();
 
+			if (item.id === "theme-mode-dark") {
+				useThemeStore.getState().setMode("dark");
+				toast({ title: "已切换为深色模式", tone: "default" });
+				return;
+			}
+			if (item.id === "theme-mode-light") {
+				useThemeStore.getState().setMode("light");
+				toast({ title: "已切换为浅色模式", tone: "default" });
+				return;
+			}
+			if (item.id === "theme-mode-system") {
+				useThemeStore.getState().setMode("system");
+				toast({ title: "已跟随系统主题", tone: "default" });
+				return;
+			}
+			if (item.id.startsWith("theme-accent-")) {
+				const acc = item.id.slice("theme-accent-".length) as Accent;
+				useThemeStore.getState().setAccent(acc);
+				toast({ title: `主题色已切换为 ${item.title.split("：")[1] || acc}`, tone: "default" });
+				return;
+			}
 			if (item.group === "setting") {
 				navigate("/settings");
 				return;
@@ -185,7 +220,22 @@ export function CommandPalettePanel({
 				return;
 			}
 			if (item.id === "act-toggle-sftp") {
-				useUiStore.getState().toggleEmbeddedSftp();
+				useUiStore.getState().toggleCompanion("sftp");
+				navigate("/workspace");
+				return;
+			}
+			if (item.id === "act-toggle-forward") {
+				useUiStore.getState().toggleCompanion("forward");
+				navigate("/workspace");
+				return;
+			}
+			if (item.id === "act-toggle-snippets") {
+				useUiStore.getState().toggleCompanion("snippets");
+				navigate("/workspace");
+				return;
+			}
+			if (item.id === "act-toggle-monitor") {
+				useUiStore.getState().toggleCompanion("monitor");
 				navigate("/workspace");
 				return;
 			}
@@ -283,10 +333,10 @@ export function CommandPalettePanel({
 				className="absolute inset-0 cursor-default bg-black/50"
 			/>
 
-			<div className="relative flex max-h-[76vh] w-[580px] flex-col overflow-hidden rounded-lg border border-border bg-surface-raised shadow-2xl">
+			<div className="relative flex max-h-[76vh] w-[580px] flex-col overflow-hidden rounded-card border border-border bg-surface-raised shadow-popover">
 				{/* 搜索输入栏 */}
-				<div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-border bg-surface px-3.5">
-					<span className={cn("size-4 shrink-0", commandOnly ? "icon-[lucide--terminal] text-accent" : "icon-[lucide--search] text-primary")} />
+				<div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-border bg-surface-sunk px-3.5">
+					<span className={cn("size-4 shrink-0", commandOnly ? "icon-[lucide--terminal] text-emerald-400" : "icon-[lucide--search] text-surface-foreground/90")} />
 					<input
 						ref={inputRef}
 						value={query}
@@ -295,18 +345,18 @@ export function CommandPalettePanel({
 						spellCheck={false}
 						className="h-full min-w-0 flex-1 bg-transparent font-mono text-[13px] text-surface-foreground placeholder:text-faint focus:outline-none"
 					/>
-					{commandOnly && <span className="shrink-0 font-mono text-[10px] text-accent">仅搜命令</span>}
+					{commandOnly && <span className="shrink-0 font-mono text-[10px] text-emerald-400">仅搜命令</span>}
 					<button
 						type="button"
 						onClick={onClose}
-						className="flex shrink-0 items-center rounded border border-border bg-surface-raised px-1.5 py-0.5 font-mono text-[9px] text-muted transition-colors hover:text-surface-foreground"
+						className="flex shrink-0 items-center rounded-[4px] border border-border bg-surface px-1.5 py-0.5 font-mono text-[9px] text-muted transition-colors hover:text-surface-foreground"
 					>
 						ESC
 					</button>
 				</div>
 
 				{/* 结果列表 */}
-				<div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-1.5">
+				<div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-1.5">
 					{flat.length === 0 ? (
 						<EmptyState icon="icon-[lucide--search-x]" title="没有匹配的结果" />
 					) : (
@@ -376,7 +426,7 @@ export function CommandPalettePanel({
 							输入 <Kbd className="text-muted">&gt;</Kbd> 仅搜命令
 						</span>
 					</div>
-					<button type="button" onClick={onClose} className="font-sans text-primary hover:underline">
+					<button type="button" onClick={onClose} className="font-sans text-surface-foreground/80 hover:underline">
 						关闭面板
 					</button>
 				</div>
@@ -405,28 +455,28 @@ function ResultRow({
 			onContextMenu={onContextMenu}
 			onMouseMove={onHover}
 			className={cn(
-				"flex h-9 w-full items-center justify-between gap-2 rounded border px-2.5 text-left text-[12px] transition-colors",
+				"flex h-8.5 w-full items-center justify-between gap-2 rounded-control border px-2.5 text-left text-[12px] transition-colors cursor-pointer",
 				selected
-					? "border-border bg-surface text-surface-foreground"
-					: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
+					? "border-accent/40 bg-accent/15 text-surface-foreground"
+					: "border-transparent text-muted hover:bg-surface-foreground/5 hover:text-surface-foreground",
 			)}
 		>
 			<span className="flex min-w-0 flex-1 items-center gap-2">
-				<span className={cn(item.icon ?? "icon-[lucide--square-terminal]", "size-3.5 shrink-0", selected ? "text-primary" : "text-muted")} />
-				<span className="truncate font-mono font-medium text-surface-foreground">{item.title}</span>
+				<span className={cn(item.icon ?? "icon-[lucide--square-terminal]", "size-3.5 shrink-0", selected ? "text-accent" : "text-muted")} />
+				<span className="truncate font-sans font-medium text-surface-foreground">{item.title}</span>
 				{item.subtitle && <span className="truncate font-mono text-[11px] text-faint">{item.subtitle}</span>}
 			</span>
 
 			<span className="flex shrink-0 items-center gap-2">
 				{item.keywords?.[0] && (
-					<span className="rounded border border-border bg-surface px-1 py-px font-mono text-[9px] text-muted">
+					<span className="rounded-[4px] border border-border bg-surface px-1 py-0.5 font-mono text-[9px] text-muted">
 						{item.keywords[0]}
 					</span>
 				)}
 				{item.shortcut ? (
 					<span className="font-mono text-[9.5px] text-muted">{item.shortcut}</span>
 				) : (
-					selected && <span className="font-mono text-[9.5px] text-muted">回车</span>
+					selected && <span className="font-mono text-[9.5px] text-accent font-medium">↵ 执行</span>
 				)}
 			</span>
 		</button>

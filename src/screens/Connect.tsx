@@ -798,7 +798,7 @@ export default function Connect() {
 					</div>
 
 					<div className="absolute inset-0 flex items-center justify-center bg-term/80 p-4 backdrop-blur-sm">
-						<div className="max-h-full w-[420px] overflow-y-auto rounded-card border border-border bg-surface-raised p-5 shadow-2xl">
+						<div className="max-h-full w-[420px] overflow-y-auto overscroll-contain rounded-card border border-border bg-surface-raised p-5 shadow-2xl">
 							<div className="flex items-center justify-between border-b border-border pb-3">
 								<div className="flex items-center gap-2">
 									<span className="icon-[lucide--server] size-4 text-primary" />

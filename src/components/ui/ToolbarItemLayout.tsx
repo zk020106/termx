@@ -168,7 +168,7 @@ export function ToolbarOverflowMenu({
 				<div
 					role="menu"
 					data-toolbar-overflow-menu="true"
-					className="absolute right-0 top-full z-50 mt-1 min-w-[190px] rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover ring-1 ring-black/5"
+					className="absolute right-0 top-full z-50 mt-1 min-w-[190px] rounded-card border border-border/80 bg-surface/98 p-1.5 shadow-popover ring-1 ring-black/5"
 					onClick={(e) => {
 						const target = e.target as Element | null;
 						if (target?.closest('[data-toolbar-overflow-keep-open="true"]')) return;

@@ -305,10 +305,10 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 			<div className="pointer-events-none absolute -top-12 -left-12 size-64 rounded-full bg-primary/5 blur-3xl" />
 			<div className="pointer-events-none absolute -right-12 -bottom-12 size-64 rounded-full bg-accent/5 blur-3xl" />
 
-			<div className="relative z-10 w-full max-w-[400px] rounded-xl border border-border bg-surface-raised/95 p-5 shadow-2xl backdrop-blur-md">
+			<div className="relative z-10 w-full max-w-[400px] rounded-card border border-border bg-surface-raised/95 p-5 shadow-2xl backdrop-blur-md">
 				{/* 头部信息 */}
 				<div className="flex items-center gap-3 border-b border-border/80 pb-3.5">
-					<div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+					<div className="flex size-9 shrink-0 items-center justify-center rounded-control bg-surface-foreground/10 text-surface-foreground">
 						<span className="icon-[lucide--server] size-4.5" />
 					</div>
 					<div className="min-w-0 flex-1">
@@ -324,7 +324,7 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 					<div className="mt-4 space-y-3">
 						<div
 							className={cn(
-								"rounded-lg border p-3 text-[11.5px] leading-5",
+								"rounded-control border p-3 text-[11.5px] leading-5",
 								fingerprintAlert.kind === "host_unknown"
 									? "border-primary/40 bg-primary/10 text-surface-foreground"
 									: "border-danger/40 bg-danger/10 text-danger",
@@ -432,7 +432,7 @@ export function InTabConnect({ hostId, sessionKey, onConnected, onCancel }: InTa
 											setError(null);
 										}}
 										className={cn(
-											"flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-all cursor-pointer",
+											"flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors duration-150 cursor-pointer",
 											active
 												? "border border-border/80 bg-surface font-semibold text-primary shadow-2xs"
 												: "text-muted hover:bg-surface/50 hover:text-surface-foreground",

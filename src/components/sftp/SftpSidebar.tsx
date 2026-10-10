@@ -207,7 +207,7 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 				</div>
 			) : !isConnected ? (
 				<div className="flex flex-1 flex-col p-3 text-muted">
-					<div className="rounded-xl border border-dashed border-border/80 bg-surface/50 p-3 text-center">
+					<div className="rounded-card border border-dashed border-border/80 bg-surface/50 p-3 text-center">
 						<span className="icon-[lucide--plug-zap] size-6 text-muted/60 mx-auto mb-1.5" />
 						<div className="font-medium text-surface-foreground text-[11.5px]">未连接远程主机</div>
 						<div className="text-[10px] text-faint mt-1 leading-relaxed">
@@ -226,7 +226,7 @@ export function SftpSidebar({ activeTab, activeHost, onOpenHost }: SftpSidebarPr
 										key={host.id}
 										type="button"
 										onClick={() => onOpenHost(host)}
-										className="w-full text-left rounded-lg border border-border/50 bg-surface/60 p-2 hover:bg-surface hover:border-primary/40 transition-all cursor-pointer group"
+										className="w-full text-left rounded-lg border border-border/50 bg-surface/60 p-2 hover:bg-surface hover:border-primary/40 transition-colors duration-150 cursor-pointer group"
 									>
 										<div className="flex items-center justify-between">
 											<span className="font-medium text-surface-foreground group-hover:text-primary truncate">

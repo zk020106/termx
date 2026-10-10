@@ -4,7 +4,7 @@ import { GroupSettingsDrawer } from "@/components/host/GroupSettingsDrawer";
 import { useScreenActive } from "@/lib/screenActive";
 import { startForward, stopForward } from "@/lib/forwardManager";
 import { HostEditModal } from "@/components/host/HostEditModal";
-import { EmbeddedSftpDrawer } from "@/components/sftp/EmbeddedSftpDrawer";
+import { CompanionDock } from "@/components/workbench/CompanionDock";
 import { SftpSidebar } from "@/components/sftp/SftpSidebar";
 import { observeSshLifecycle } from "@/components/terminal/sshCache";
 import { type TerminalHandle, type TerminalMatchInfo } from "@/components/terminal/Terminal";
@@ -138,13 +138,48 @@ export default function Workspace() {
 	const activity = useUiStore((s) => s.activity);
 	const embeddedSftpOpen = useUiStore((s) => s.embeddedSftpOpen);
 	const toggleEmbeddedSftp = useUiStore((s) => s.toggleEmbeddedSftp);
+	const companionOpen = useUiStore((s) => s.companionOpen);
+	const companionTab = useUiStore((s) => s.companionTab);
+	const toggleCompanion = useUiStore((s) => s.toggleCompanion);
+	const setCompanionOpen = useUiStore((s) => s.setCompanionOpen);
 	const rightClick = useSettingsStore((s) => s.rightClick);
 	const showContextMenuOverFullscreenApps = useSettingsStore((s) => s.showContextMenuOverFullscreenApps);
 	const tabDoubleClick = useSettingsStore((s) => s.tabDoubleClick);
 	const hotkeys = useHotkeyContext();
 	const kbd = (id: string) => shortcutLabel(hotkeys.bindings, id, hotkeys.scheme) || undefined;
 	const sftpFollowActiveTab = useSettingsStore((s) => s.sftpFollowActiveTab);
-	const setTerminal = useSettingsStore((s) => s.setTerminal);
+	const sessionRestore = useSettingsStore((s) => s.sessionRestore);
+	const sessionRestoredRef = useRef(false);
+	useEffect(() => {
+		if (sessionRestoredRef.current) return;
+		sessionRestoredRef.current = true;
+		if (!sessionRestore || tabs.length > 0) return;
+		try {
+			const raw = localStorage.getItem("termx:saved_sessions");
+			if (!raw) return;
+			const list = JSON.parse(raw) as Array<{ hostId: string | null; title?: string }>;
+			if (Array.isArray(list) && list.length > 0) {
+				for (const item of list) {
+					useSessionsStore.getState().openSession(item.hostId, null, item.title);
+				}
+			}
+		} catch {}
+	}, [sessionRestore, tabs.length]);
+
+	useEffect(() => {
+		// 只有在首轮恢复执行完成后，才开始同步写回 localStorage，防止首帧 tabs 为空把已保存的会话冲掉
+		if (!sessionRestoredRef.current) return;
+		if (!sessionRestore) {
+			try { localStorage.removeItem("termx:saved_sessions"); } catch {}
+			return;
+		}
+		if (tabs.length > 0) {
+			const saved = tabs.map((t) => ({ hostId: t.hostId, title: t.title }));
+			try { localStorage.setItem("termx:saved_sessions", JSON.stringify(saved)); } catch {}
+		} else {
+			try { localStorage.removeItem("termx:saved_sessions"); } catch {}
+		}
+	}, [tabs, sessionRestore]);
 
 	const [searchOpen, setSearchOpen] = useState(false);
 	const [shellHistoryOpen, setShellHistoryOpen] = useState(false);
@@ -173,8 +208,10 @@ export default function Workspace() {
 	const hostSearchRef = useRef<HTMLInputElement | null>(null);
 	const terminals = useRef(new Map<string, TerminalHandle>());
 
-	const isVaults = activeTabId === "vaults" || tabs.length === 0;
-	const activeTab = isVaults ? null : (tabs.find((t) => t.id === activeTabId) ?? tabs[0]);
+	// 双态主舞台：无会话时为罗盘态 (Compass)，有会话时完全沉浸于终端态
+	const isCompass = tabs.length === 0;
+	const isVaults = isCompass;
+	const activeTab = isCompass ? null : (tabs.find((t) => t.id === activeTabId) ?? tabs[0]);
 	const activeHost = hostStore.hosts.find((h) => h.id === activeTab?.hostId) ?? null;
 	const gridPanes = activeTab ? panesForTab(activeTab, panes) : [];
 	const focusId = gridPanes.some((p) => p.id === focusedPaneId) ? focusedPaneId : (gridPanes[0]?.id ?? "");
@@ -196,10 +233,6 @@ export default function Workspace() {
 		if (!effectiveSftpTab?.hostId) return null;
 		return hostStore.hosts.find((h) => h.id === effectiveSftpTab.hostId) ?? null;
 	}, [effectiveSftpTab?.hostId, hostStore.hosts]);
-
-	const effectiveSftpHostLabel = effectiveSftpHost
-		? `${effectiveSftpHost.username}@${effectiveSftpHost.name}`
-		: (effectiveSftpTab?.title ?? "本地终端");
 
 	const isMaximized = Boolean(maximizedPaneId && gridPanes.some((p) => p.id === maximizedPaneId));
 	const effectiveMaximizedPaneId = isMaximized ? maximizedPaneId : null;
@@ -302,8 +335,8 @@ export default function Workspace() {
 
 	/** Netcatty AppHandlers 里属于标签 / 分屏的动作 */
 	const runWorkspaceAction = (action: string, event: KeyboardEvent): boolean => {
-		const order = ["vaults", ...tabs.map((t) => t.id)];
-		const current = isVaults ? "vaults" : (activeTab?.id ?? "vaults");
+		const order = tabs.map((t) => t.id);
+		const current = activeTab?.id ?? "";
 		switch (action) {
 			case "switchToTab": {
 				const digit = Number.parseInt((event.code.match(/^Digit([1-9])$/) ?? [])[1] ?? event.key, 10);
@@ -335,11 +368,10 @@ export default function Workspace() {
 				onNewTab();
 				return true;
 			case "openHosts":
-				setActiveTab("vaults");
+				useUiStore.getState().setSidebarOpen(true);
 				return true;
 			case "openSftp":
-				if (activeTab) toggleEmbeddedSftp();
-				else navigate("/sftp");
+				toggleCompanion("sftp");
 				return true;
 			case "splitHorizontal":
 				splitRight();
@@ -883,147 +915,147 @@ export default function Workspace() {
 
 				{/* 终端与主机工作台综合主区 */}
 				<section ref={sectionRef} className="relative flex min-w-0 flex-1 flex-col bg-surface">
-					{/* 统一标签栏：常驻主机库主标签 + 动态终端会话标签 */}
-					<div className="flex h-8.5 items-end gap-1 border-b border-border bg-surface-sunk px-2 shrink-0">
-						{/* 常驻的主机库大本营标签 (Pinned Vaults Tab) */}
-						<button
-							type="button"
-							role="tab"
-							aria-selected={isVaults}
-							onClick={() => setActiveTab("vaults")}
-							className={cn(
-								"group relative mb-[-1px] flex h-7 items-center gap-1.5 rounded-t-lg px-3 text-[11.5px] transition-all cursor-pointer select-none",
-								isVaults
-									? "border-t border-x border-border bg-surface font-semibold text-primary shadow-2xs z-10"
-									: "text-muted hover:bg-surface-raised/70 hover:text-surface-foreground",
-							)}
-						>
-							<span className="icon-[lucide--server] size-3.5 text-primary" />
-							<span>主机库</span>
-							<span className="rounded-full bg-surface-raised px-1.5 py-0.2 font-mono text-[9px] text-faint">
-								{hostStore.hosts.length}
-							</span>
-						</button>
-
-						{tabs.map((tab) => (
-							<TabItem
-								key={tab.id}
-								tab={tab}
-								active={tab.id === activeTab?.id && !isVaults}
-								isRenaming={renamingTabId === tab.id}
-								renameValue={renameValue}
-								onRenameChange={setRenameValue}
-								onRenameSubmit={handleRenameSubmit}
-								onRenameCancel={() => setRenamingTabId(null)}
-								onSelect={() => setActiveTab(tab.id)}
-								onClose={() => onCloseTab(tab)}
-								onContextMenu={(e) => onTabContextMenu(e, tab.id)}
-								onDoubleClick={() => onTabDoubleClick(tab)}
-							/>
-						))}
-
-						<button
-							type="button"
-							onClick={onNewTab}
-							className="mb-1 ml-1 flex size-6.5 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
-							title="新建本地终端"
-							aria-label="新建标签"
-						>
-							<span className="icon-[lucide--plus] size-3.5" />
-						</button>
-
-						{/* 处于终端会话时的右侧工具栏 */}
-						{!isVaults && activeTab && (
-							<div className="mb-1 ml-auto flex items-center gap-1.5 text-[11px] text-muted">
-								{broadcasting && (
-									<button
-										type="button"
-										onClick={toggleBroadcastNow}
-										className="flex items-center gap-1 rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
-										title={`广播输入到全部终端（${kbd("broadcast") ?? "Ctrl Shift I"}）`}
-									>
-										<span className="icon-[lucide--radio] size-3" />
-										广播中 · {gridPanes.length} 个终端
-									</button>
-								)}
-
-<TerminalToolbarItems
-									available={[
-										"splitHorizontal",
-										"splitVertical",
-										"sftp",
-										"search",
-										"scripts",
-										"history",
-										// Netcatty：只对远端 shell 会话提供（shouldOfferOsc7SetupAction）
-										...(gridPanes.find((p) => p.id === focusId)?.sessionKey && gridPanes.find((p) => p.id === focusId)?.status === "connected" ? (["configureOsc7"] as const) : []),
-										"layout",
-									]}
-									renderItem={(id, mode) => {
-										const def = TERMINAL_TOOLBAR_ITEMS[id];
-										const label = id === "splitHorizontal"
-											? `水平分屏${kbd("split-horizontal") ? ` (${kbd("split-horizontal")})` : ""}`
-											: id === "splitVertical"
-												? `垂直分屏${kbd("split-vertical") ? ` (${kbd("split-vertical")})` : ""}`
-												: id === "sftp"
-													? `切换 SFTP 面板${kbd("open-sftp") ? ` (${kbd("open-sftp")})` : ""}`
-													: id === "search"
-														? `搜索终端${kbd("search-terminal") ? ` (${kbd("search-terminal")})` : ""}`
-														: def.label;
-										const action = () => {
-											if (id === "splitHorizontal") splitRight();
-											else if (id === "splitVertical") splitDown();
-											else if (id === "sftp") toggleEmbeddedSftp();
-											else if (id === "search") setSearchOpen(true);
-											else if (id === "scripts") useUiStore.getState().setActivity("snippets");
-											else if (id === "history") setShellHistoryOpen(true);
-											else if (id === "configureOsc7") setOsc7SetupPane(focusId);
-										};
-										if (id === "layout") {
-											return mode === "inline" ? (
-												<div key={id} className="flex items-center rounded border border-border bg-surface p-0.5" title="切换分屏布局">
-									{(["single", "horizontal", "vertical", "grid"] as SplitLayout[]).map((mode) => {
-										const info = LAYOUT_CHIP[mode];
-										const isCurrent = activeTab?.layout === mode && !effectiveMaximizedPaneId;
-										return (
-											<button
-												key={mode}
-												type="button"
-												onClick={() => {
-													if (effectiveMaximizedPaneId) setMaximizedPaneId(null);
-													if (activeTab) useSessionsStore.getState().setLayout(activeTab.id, mode);
-												}}
-												className={cn(
-													"flex size-5 items-center justify-center rounded transition-colors",
-													isCurrent
-														? "bg-surface-raised text-primary shadow-xs font-semibold"
-														: "text-muted hover:text-surface-foreground",
-												)}
-												title={`布局：${info.label}`}
-											>
-												<span className={cn(info.icon, "size-3")} />
-											</button>
-										);
-									})}
-								</div>
-											) : null;
-										}
-										return mode === "inline" ? (
-											<IconButton
-												key={id}
-												icon={def.icon}
-												label={label}
-												className={cn("size-5.5", id === "sftp" && embeddedSftpOpen && "text-primary", id === "search" && searchOpen && "text-primary")}
-												onClick={action}
-											/>
-										) : (
-											<MenuItem key={id} icon={def.icon} label={label} checked={id === "sftp" && embeddedSftpOpen} onClick={action} />
-										);
-									}}
+					{/* 统一标签栏：仅在有活动终端时显示会话标签，空闲时无缝进入主机罗盘 */}
+					{!isCompass && (
+						<div role="tablist" aria-label="会话标签栏" className="flex h-8.5 items-end gap-1 border-b border-border bg-surface-sunk px-2 shrink-0">
+							{tabs.map((tab) => (
+								<TabItem
+									key={tab.id}
+									tab={tab}
+									active={tab.id === activeTab?.id}
+									isRenaming={renamingTabId === tab.id}
+									renameValue={renameValue}
+									onRenameChange={setRenameValue}
+									onRenameSubmit={handleRenameSubmit}
+									onRenameCancel={() => setRenamingTabId(null)}
+									onSelect={() => setActiveTab(tab.id)}
+									onClose={() => onCloseTab(tab)}
+									onContextMenu={(e) => onTabContextMenu(e, tab.id)}
+									onDoubleClick={() => onTabDoubleClick(tab)}
 								/>
-							</div>
-						)}
-					</div>
+							))}
+
+							<button
+								type="button"
+								onClick={onNewTab}
+								className="mb-1 ml-1 flex size-6.5 items-center justify-center rounded-control text-muted transition-colors hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
+								title="新建本地终端"
+								aria-label="新建标签"
+							>
+								<span className="icon-[lucide--plus] size-3.5" />
+							</button>
+
+							{/* 处于终端会话时的右侧工具栏 */}
+							{activeTab && (
+								<div className="mb-1 ml-auto flex items-center gap-1.5 text-[11px] text-muted">
+									{broadcasting && (
+										<button
+											type="button"
+											onClick={toggleBroadcastNow}
+											className="flex items-center gap-1 rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
+											title={`广播输入到全部终端（${kbd("broadcast") ?? "Ctrl Shift I"}）`}
+										>
+											<span className="icon-[lucide--radio] size-3" />
+											广播中 · {gridPanes.length} 个终端
+										</button>
+									)}
+
+									<TerminalToolbarItems
+										available={[
+											"splitHorizontal",
+											"splitVertical",
+											"sftp",
+											"forward",
+											"scripts",
+											"monitor",
+											"search",
+											"history",
+											// Netcatty：只对远端 shell 会话提供（shouldOfferOsc7SetupAction）
+											...(gridPanes.find((p) => p.id === focusId)?.sessionKey && gridPanes.find((p) => p.id === focusId)?.status === "connected" ? (["configureOsc7"] as const) : []),
+											"layout",
+										]}
+										renderItem={(id, mode) => {
+											const def = TERMINAL_TOOLBAR_ITEMS[id];
+											const label = id === "splitHorizontal"
+												? `水平分屏${kbd("split-horizontal") ? ` (${kbd("split-horizontal")})` : ""}`
+												: id === "splitVertical"
+													? `垂直分屏${kbd("split-vertical") ? ` (${kbd("split-vertical")})` : ""}`
+													: id === "sftp"
+														? `切换 SFTP 面板${kbd("open-sftp") ? ` (${kbd("open-sftp")})` : ""}`
+														: id === "forward"
+															? "端口转发 HUD"
+															: id === "scripts"
+																? "命令片段"
+																: id === "monitor"
+																	? "主机遥测 HUD"
+																	: id === "search"
+																		? `搜索终端${kbd("search-terminal") ? ` (${kbd("search-terminal")})` : ""}`
+																		: def.label;
+											const action = () => {
+												if (id === "splitHorizontal") splitRight();
+												else if (id === "splitVertical") splitDown();
+												else if (id === "sftp") toggleCompanion("sftp");
+												else if (id === "forward") toggleCompanion("forward");
+												else if (id === "scripts") toggleCompanion("snippets");
+												else if (id === "monitor") toggleCompanion("monitor");
+												else if (id === "search") setSearchOpen(true);
+												else if (id === "history") setShellHistoryOpen(true);
+												else if (id === "configureOsc7") setOsc7SetupPane(focusId);
+											};
+											if (id === "layout") {
+												return mode === "inline" ? (
+													<div key={id} className="flex items-center rounded border border-border bg-surface p-0.5" title="切换分屏布局">
+														{(["single", "horizontal", "vertical", "grid"] as SplitLayout[]).map((mode) => {
+															const info = LAYOUT_CHIP[mode];
+															const isCurrent = activeTab?.layout === mode && !effectiveMaximizedPaneId;
+															return (
+																<button
+																	key={mode}
+																	type="button"
+																	onClick={() => {
+																		if (effectiveMaximizedPaneId) setMaximizedPaneId(null);
+																		if (activeTab) useSessionsStore.getState().setLayout(activeTab.id, mode);
+																	}}
+																	className={cn(
+																		"flex size-5 items-center justify-center rounded transition-colors",
+																		isCurrent
+																			? "bg-surface-raised text-primary shadow-xs font-semibold"
+																			: "text-muted hover:text-surface-foreground",
+																	)}
+																	title={`布局：${info.label}`}
+																>
+																	<span className={cn(info.icon, "size-3")} />
+																</button>
+															);
+														})}
+													</div>
+												) : null;
+											}
+
+											const isItemActive =
+												(id === "sftp" && companionOpen && companionTab === "sftp") ||
+												(id === "forward" && companionOpen && companionTab === "forward") ||
+												(id === "scripts" && companionOpen && companionTab === "snippets") ||
+												(id === "monitor" && companionOpen && companionTab === "monitor") ||
+												(id === "search" && searchOpen);
+
+											return mode === "inline" ? (
+												<IconButton
+													key={id}
+													icon={def.icon}
+													label={label}
+													className={cn("size-5.5", isItemActive && "text-accent bg-accent/15")}
+													onClick={action}
+												/>
+											) : (
+												<MenuItem key={id} icon={def.icon} label={label} checked={isItemActive} onClick={action} />
+											);
+										}}
+									/>
+								</div>
+							)}
+						</div>
+					)}
 
 					{/* Netcatty TerminalView 的「配置目录追踪」对话框 */}
 					<Modal
@@ -1148,9 +1180,9 @@ export default function Workspace() {
 								</div>
 							)}
 
-							{/* 终端分屏网格 + 底部内嵌 SFTP */}
-							<div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-								<div className={cn("grid min-h-0 flex-1 gap-px bg-border/40", gridClass)}>
+							{/* 终端主舞台 + 右侧流体伴随面板 (Companion Dock) */}
+							<div className="flex min-h-0 flex-1 flex-row overflow-hidden">
+								<div className={cn("grid min-h-0 min-w-0 flex-1 gap-px bg-border/40", gridClass)}>
 									{displayPanes.map((pane) => (
 										<TerminalPane
 											key={pane.id}
@@ -1171,30 +1203,22 @@ export default function Workspace() {
 											onSplitDown={splitDown}
 											onToggleMaximize={() => toggleMaximize(pane.id)}
 											isMaximized={effectiveMaximizedPaneId === pane.id}
-											onOpenSftp={toggleEmbeddedSftp}
+											onOpenSftp={() => toggleCompanion("sftp")}
 											onClear={() => handleFor(pane.id)?.clear()}
 										/>
 									))}
 								</div>
 
-								{embeddedSftpOpen && (
-									<EmbeddedSftpDrawer
-										sessionKey={effectiveSftpTab?.sessionKey ?? null}
-										status={effectiveSftpTab?.status}
-										hostTitle={effectiveSftpHostLabel}
-										hostId={effectiveSftpTab?.hostId ?? null}
-										onClose={toggleEmbeddedSftp}
-										onReconnect={() => {
-											if (effectiveSftpTab) useSessionsStore.getState().reconnectTab(effectiveSftpTab.id);
+								{/* 一体化会话流体伴随面板 (SFTP / 转发 / 片段 / 监控) */}
+								{companionOpen && (
+									<CompanionDock
+										activeTab={effectiveSftpTab}
+										activeHost={effectiveSftpHost}
+										focusedPaneId={focusId}
+										onWriteToTerminal={(data) => {
+											handleFor(focusId)?.writeToSession(data);
 										}}
-										isFollowing={sftpFollowActiveTab}
-										onToggleFollow={() => {
-											setTerminal({ sftpFollowActiveTab: !sftpFollowActiveTab });
-											toast({
-												title: !sftpFollowActiveTab ? "SFTP 已开启跟随活跃终端" : "SFTP 已锁定当前会话",
-												tone: "default",
-											});
-										}}
+										onClose={() => setCompanionOpen(false)}
 										availableSessions={tabs.map((t) => ({
 											tabId: t.id,
 											sessionKey: t.sessionKey,
@@ -1207,6 +1231,9 @@ export default function Workspace() {
 											if (sftpFollowActiveTab) {
 												setActiveTab(tabId);
 											}
+										}}
+										onReconnect={() => {
+											if (effectiveSftpTab) useSessionsStore.getState().reconnectTab(effectiveSftpTab.id);
 										}}
 									/>
 								)}
@@ -1694,7 +1721,7 @@ function HostsSidebar({
 						value={hostStore.query}
 						onChange={(e) => hostStore.setQuery(e.target.value)}
 						placeholder="搜索主机名、IP、标签…"
-						className="h-7.5 w-full rounded-lg border border-border/70 bg-surface pr-12 pl-8 font-sans text-[11.5px] text-surface-foreground transition-all placeholder:text-faint focus:border-primary focus:bg-surface-raised focus:outline-none shadow-2xs"
+						className="h-7.5 w-full rounded-lg border border-border/70 bg-surface pr-12 pl-8 font-sans text-[11.5px] text-surface-foreground transition-colors duration-150 placeholder:text-faint focus:border-primary focus:bg-surface-raised focus:outline-none shadow-2xs"
 					/>
 					{hostStore.query ? (
 						<button
@@ -1713,7 +1740,7 @@ function HostsSidebar({
 						type="button"
 						onClick={() => setFilterScope("all")}
 						className={cn(
-							"flex h-5.5 items-center justify-center gap-1.5 rounded-md font-medium transition-all cursor-pointer select-none",
+							"flex h-5.5 items-center justify-center gap-1.5 rounded-md font-medium transition-colors duration-150 cursor-pointer select-none",
 							filterScope === "all"
 								? "bg-surface text-surface-foreground font-semibold shadow-2xs border border-border/40"
 								: "text-muted hover:text-surface-foreground",
@@ -1726,7 +1753,7 @@ function HostsSidebar({
 						type="button"
 						onClick={() => setFilterScope("online")}
 						className={cn(
-							"flex h-5.5 items-center justify-center gap-1.5 rounded-md font-medium transition-all cursor-pointer select-none",
+							"flex h-5.5 items-center justify-center gap-1.5 rounded-md font-medium transition-colors duration-150 cursor-pointer select-none",
 							filterScope === "online"
 								? "bg-surface text-surface-foreground font-semibold shadow-2xs border border-border/40"
 								: "text-muted hover:text-surface-foreground",
@@ -1883,7 +1910,7 @@ function HostsSidebar({
 								<button
 									type="button"
 									onClick={onAddHost ? () => onAddHost() : () => navigate("/hosts/new")}
-									className="mt-2 inline-flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[10px] font-medium text-white hover:bg-primary-hover transition-colors cursor-pointer"
+									className="mt-2 inline-flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90 transition-opacity cursor-pointer"
 								>
 									<span className="icon-[lucide--plus] size-3" />
 									新建主机
@@ -2116,7 +2143,7 @@ function ForwardSidebar({
 						onClearFilter?.();
 					}}
 					className={cn(
-						"inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium transition-all cursor-pointer border select-none",
+						"inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium transition-colors duration-150 cursor-pointer border select-none",
 						scope === "all"
 							? "border-primary/50 bg-primary/15 text-primary font-semibold shadow-2xs"
 							: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
@@ -2131,7 +2158,7 @@ function ForwardSidebar({
 						type="button"
 						onClick={() => setScope("host")}
 						className={cn(
-							"inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium transition-all cursor-pointer border select-none truncate max-w-[130px]",
+							"inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium transition-colors duration-150 cursor-pointer border select-none truncate max-w-[130px]",
 							scope === "host"
 								? "border-primary/50 bg-primary/15 text-primary font-semibold shadow-2xs"
 								: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
@@ -2433,7 +2460,7 @@ function GroupLabel({
 			type="button"
 			onClick={onToggle}
 			onContextMenu={onContextMenu}
-			className="group flex w-full items-center justify-between rounded-lg px-2 py-1 text-left select-none text-[11px] font-semibold tracking-tight text-muted hover:bg-surface hover:text-surface-foreground transition-all cursor-pointer"
+			className="group flex w-full items-center justify-between rounded-lg px-2 py-1 text-left select-none text-[11px] font-semibold tracking-tight text-muted hover:bg-surface hover:text-surface-foreground transition-colors duration-150 cursor-pointer"
 		>
 			<div className="flex items-center gap-1.5 min-w-0">
 				{onToggle && (
@@ -2493,14 +2520,14 @@ function HostItem({
 			onContextMenu={onContextMenu}
 			onKeyDown={(event) => event.key === "Enter" && onOpen()}
 			className={cn(
-				"group relative mb-1.5 flex flex-col gap-1 rounded-xl p-2 text-[11.5px] transition-all cursor-pointer border select-none",
+				"group relative mb-1 flex flex-col gap-1 rounded-control p-2 text-[11.5px] transition-[color,background-color,border-color,box-shadow] duration-150 ease-out cursor-pointer border select-none",
 				selected
-					? "border-primary/60 bg-primary/10 text-surface-foreground shadow-host-active ring-1 ring-primary/30"
-					: "border-border/60 bg-surface/60 hover:border-primary/50 hover:bg-surface hover:shadow-host-hover text-muted hover:text-surface-foreground",
+					? "border-accent/40 bg-accent/10 text-surface-foreground shadow-host-active"
+					: "border-transparent bg-transparent hover:border-surface-foreground/10 hover:bg-surface-raised/70 text-muted hover:text-surface-foreground",
 			)}
 		>
 			{selected && (
-				<span className="absolute left-0 top-2 bottom-2 w-0.75 rounded-r-full bg-primary" />
+				<span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-accent shadow-[0_0_8px_var(--tx-accent)]" />
 			)}
 
 			{/* 顶行：状态点 + 系统/云平台图标 + 主机名 + 星标 + 转发胶囊/悬浮操作 */}
@@ -2510,15 +2537,15 @@ function HostItem({
 				<span
 					className={cn(
 						"min-w-0 flex-1 truncate font-sans text-[11.5px] tracking-tight",
-						selected ? "font-semibold text-primary" : "font-medium text-surface-foreground group-hover:text-primary transition-colors",
+						selected ? "font-semibold text-surface-foreground" : "font-medium text-surface-foreground group-hover:text-surface-foreground transition-colors",
 					)}
 				>
 					{host.name}
 				</span>
 
-				{host.pinned && <span className="icon-[lucide--pin] size-3 shrink-0 text-primary" title="已置顶" />}
+				{host.pinned && <span className="icon-[lucide--pin] size-3 shrink-0 text-surface-foreground/80" title="已置顶" />}
 				{host.favorite && (
-					<span className="icon-[lucide--star] size-3 shrink-0 text-amber-500 fill-amber-500" />
+					<span className="icon-[lucide--star] size-3 shrink-0 text-amber-400 fill-amber-400" />
 				)}
 
 				{/* 默认态：仅在配置了端口转发时显露轻量胶囊 */}
@@ -2530,7 +2557,7 @@ function HostItem({
 								e.stopPropagation();
 								onOpenForward?.();
 							}}
-							className="text-[9px] font-mono px-1.5 py-0.2 rounded-full bg-surface text-primary border border-primary/20 hover:bg-primary/10 transition-colors cursor-pointer"
+							className="text-[9px] font-mono px-1.5 py-0.2 rounded-[4px] bg-surface-foreground/5 text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500/10 transition-colors cursor-pointer"
 							title={onOpenForward ? "查看/配置端口转发" : undefined}
 						>
 							{forwardCount} 转发
@@ -2545,7 +2572,7 @@ function HostItem({
 							type="button"
 							onClick={onOpenSftp}
 							title="打开 SFTP 文件"
-							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-primary transition-colors cursor-pointer"
+							className="flex size-5 items-center justify-center rounded-control text-muted hover:bg-surface-foreground/10 hover:text-surface-foreground transition-colors cursor-pointer"
 						>
 							<span className="icon-[lucide--folder-tree] size-3" />
 						</button>
@@ -2555,7 +2582,7 @@ function HostItem({
 							type="button"
 							onClick={onOpenInNewTab}
 							title="在新标签打开终端"
-							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-primary transition-colors cursor-pointer"
+							className="flex size-5 items-center justify-center rounded-control text-muted hover:bg-surface-foreground/10 hover:text-surface-foreground transition-colors cursor-pointer"
 						>
 							<span className="icon-[lucide--plus-square] size-3" />
 						</button>
@@ -2565,7 +2592,7 @@ function HostItem({
 							type="button"
 							onClick={onEdit}
 							title="编辑主机配置"
-							className="flex size-5 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-primary transition-colors cursor-pointer"
+							className="flex size-5 items-center justify-center rounded-control text-muted hover:bg-surface-foreground/10 hover:text-surface-foreground transition-colors cursor-pointer"
 						>
 							<span className="icon-[lucide--pencil] size-3" />
 						</button>
@@ -2632,46 +2659,57 @@ function TabItem({
 }) {
 	return (
 		<div
-			role="button"
-			tabIndex={0}
-			onClick={onSelect}
-			onDoubleClick={onDoubleClick}
-			onContextMenu={onContextMenu}
-			onKeyDown={(event) => event.key === "Enter" && onSelect()}
 			className={cn(
-				"group relative flex h-7.5 cursor-pointer items-center gap-2 rounded-t-lg border-x border-t px-3 text-[12px] transition-all select-none",
+				"group relative flex h-7 items-center gap-1.5 rounded-t-md border-x border-t pl-2.5 pr-1 text-[11.5px] transition-colors duration-150 select-none",
 				active
-					? "border-border bg-surface-raised font-semibold text-surface-foreground shadow-2xs"
+					? "border-border bg-surface font-medium text-surface-foreground shadow-2xs"
 					: "border-transparent bg-transparent text-muted hover:bg-surface-raised/40 hover:text-surface-foreground",
 			)}
+			onContextMenu={onContextMenu}
+			onDoubleClick={onDoubleClick}
 		>
-			{active && <span className="absolute top-0 inset-x-0 h-0.5 rounded-t-full bg-primary" />}
-			<StatusDot status={tab.status} size={5} />
-			{isRenaming ? (
-				<input
-					autoFocus
-					value={renameValue}
-					onChange={(e) => onRenameChange?.(e.target.value)}
-					onBlur={onRenameSubmit}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") onRenameSubmit?.();
-						if (e.key === "Escape") onRenameCancel?.();
-					}}
-					onClick={(e) => e.stopPropagation()}
-					className="h-5 w-24 rounded border border-primary bg-surface px-1 text-[11px] text-surface-foreground outline-none"
-				/>
-			) : (
-				<span className="max-w-[120px] truncate">{tab.title}</span>
-			)}
+			{active && <span className="absolute top-0 inset-x-0 h-0.5 bg-accent shadow-[0_0_8px_var(--tx-accent)] rounded-t-md" />}
+			<button
+				type="button"
+				role="tab"
+				aria-selected={active}
+				tabIndex={active ? 0 : -1}
+				onClick={onSelect}
+				onKeyDown={(event) => {
+					if (event.key === "Enter" || event.key === " ") {
+						event.preventDefault();
+						onSelect();
+					}
+				}}
+				className="flex cursor-pointer items-center gap-1.5 border-0 bg-transparent p-0 text-inherit font-inherit outline-none"
+			>
+				<StatusDot status={tab.status} size={5} />
+				{isRenaming ? (
+					<input
+						autoFocus
+						value={renameValue}
+						onChange={(e) => onRenameChange?.(e.target.value)}
+						onBlur={onRenameSubmit}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") onRenameSubmit?.();
+							if (e.key === "Escape") onRenameCancel?.();
+						}}
+						onClick={(e) => e.stopPropagation()}
+						className="h-5 w-24 rounded border border-surface-foreground/40 bg-surface px-1 text-[11px] text-surface-foreground outline-none"
+					/>
+				) : (
+					<span className="max-w-[120px] truncate">{tab.title}</span>
+				)}
+			</button>
 			<button
 				type="button"
 				onClick={(event) => {
 					event.stopPropagation();
 					onClose();
 				}}
-				className="ml-0.5 text-muted transition-colors hover:text-surface-foreground"
+				className="flex size-5 cursor-pointer items-center justify-center rounded-control text-muted transition-colors hover:bg-surface-raised hover:text-surface-foreground"
 				title={`关闭 ${tab.title}`}
-				aria-label="关闭标签"
+				aria-label={`关闭 ${tab.title}`}
 			>
 				<span className="icon-[lucide--x] size-3" />
 			</button>
@@ -2801,148 +2839,148 @@ function HostWorkbench({
 			{/* 顶栏：工作台标题 + 快捷操作 */}
 			<div className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-surface-sunk/40 px-6">
 				<div className="flex items-center gap-3">
-					<div className="flex size-8 items-center justify-center rounded-full bg-primary text-white shadow-xs">
-						<span className="icon-[lucide--server] size-4" />
-					</div>
-					<div>
-						<h1 className="text-[13.5px] font-bold tracking-tight text-surface-foreground">主机工作台</h1>
-						<p className="text-[11px] text-muted">点击或双击主机卡片就地连接终端</p>
-					</div>
+					<div className="flex size-8 items-center justify-center rounded-control bg-accent text-accent-foreground shadow-xs font-bold">
+					<span className="icon-[lucide--server] size-4" />
 				</div>
-
-				<div className="flex items-center gap-2">
-					{hasActiveSessions && onReturnToTerminal && (
-						<Button
-							size="sm"
-							variant="default"
-							icon="icon-[lucide--terminal]"
-							onClick={onReturnToTerminal}
-							className="h-8 text-xs border-primary/40 bg-primary/10 text-primary hover:bg-primary/20"
-						>
-							返回终端会话 ({activeTabCount})
-						</Button>
-					)}
-
-					{/* 搜索框 */}
-					<div className="relative">
-						<span className="icon-[lucide--search] pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted" />
-						<input
-							value={searchQuery}
-							onChange={(e) => setSearchQuery(e.target.value)}
-							onKeyDown={(e) => e.key === "Enter" && handleQuickConnect()}
-							placeholder="查找主机或 ssh user@host…"
-							className="h-8 w-[240px] rounded-full border border-border/80 bg-surface-raised pl-9 pr-3 text-[12px] text-surface-foreground placeholder:text-faint focus:border-primary focus:outline-none transition-all shadow-2xs"
-						/>
-					</div>
-
-					<Button
-						size="sm"
-						variant="primary"
-						icon="icon-[lucide--play]"
-						onClick={handleQuickConnect}
-						className="h-8 text-xs shadow-xs"
-					>
-						快速连接
-					</Button>
-
-					<Button
-						size="sm"
-						variant="default"
-						icon="icon-[lucide--square-terminal]"
-						onClick={onNewTerminal}
-						className="h-8 text-xs"
-					>
-						新建本地终端
-					</Button>
-
-					<Button
-						size="sm"
-						variant="default"
-						icon="icon-[lucide--folder-plus]"
-						onClick={() => groupDialogs.openCreate(null)}
-						className="h-8 text-xs cursor-pointer"
-					>
-						新建分组
-					</Button>
-
-					<Button
-						size="sm"
-						variant="default"
-						icon="icon-[lucide--plus]"
-						onClick={() => (onAddHost ? onAddHost() : navigate("/hosts/new"))}
-						className="h-8 text-xs cursor-pointer"
-					>
-						添加主机
-					</Button>
+				<div>
+					<h1 className="text-[13.5px] font-semibold tracking-tight text-surface-foreground">主机工作台</h1>
+					<p className="text-[11px] text-muted">点击或双击主机卡片就地连接终端</p>
 				</div>
 			</div>
 
-			{/* 胶囊过滤芯片 (按组过滤) */}
-			<div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border bg-surface-sunk/40 px-6 text-[12px] overflow-x-auto no-scrollbar">
-				<button
-					type="button"
-					onClick={() => setSelectedGroup("all")}
-					className={cn(
-						"flex items-center gap-1.5 rounded-full px-3.5 py-1 text-xs font-semibold transition-all duration-150 cursor-pointer shrink-0",
-						selectedGroup === "all"
-							? "bg-primary text-primary-foreground shadow-xs"
-							: "border border-border/80 bg-surface text-muted hover:border-border hover:text-surface-foreground hover:bg-surface-raised",
-					)}
+			<div className="flex items-center gap-2">
+				{hasActiveSessions && onReturnToTerminal && (
+					<Button
+						size="sm"
+						variant="default"
+						icon="icon-[lucide--terminal]"
+						onClick={onReturnToTerminal}
+						className="h-7 text-xs border-accent/40 bg-accent/15 text-accent hover:bg-accent/25"
+					>
+						返回终端会话 ({activeTabCount})
+					</Button>
+				)}
+
+				{/* 搜索框 */}
+				<div className="relative">
+					<span className="icon-[lucide--search] pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted" />
+					<input
+						value={searchQuery}
+						onChange={(e) => setSearchQuery(e.target.value)}
+						onKeyDown={(e) => e.key === "Enter" && handleQuickConnect()}
+						placeholder="查找主机或 ssh user@host…"
+						className="h-7 w-[240px] rounded-control border border-border bg-surface-raised pl-8 pr-2.5 text-[12px] text-surface-foreground placeholder:text-faint focus:border-surface-foreground/40 focus:ring-1 focus:ring-surface-foreground/20 focus:outline-none transition-colors duration-150"
+					/>
+				</div>
+
+				<Button
+					size="sm"
+					variant="primary"
+					icon="icon-[lucide--play]"
+					onClick={handleQuickConnect}
+					className="h-7 text-xs shadow-xs"
 				>
-					<span>全部主机</span>
-					<span className={cn("font-mono text-[10.5px]", selectedGroup === "all" ? "text-primary-foreground/80" : "text-faint")}>
-						({allHosts.length})
-					</span>
-				</button>
+					快速连接
+				</Button>
 
-				{groupTree.map(({ group }) => {
-					const count = allHosts.filter((h) => h.groupId === group.id).length;
-					const active = selectedGroup === group.id;
-					return (
-						<button
-							key={group.id}
-							type="button"
-							onClick={() => setSelectedGroup(group.id)}
-							onContextMenu={(e) => openGroupMenu(e, group.id)}
-							className={cn(
-								"flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all duration-150 cursor-pointer shrink-0",
-								active
-									? "bg-primary text-primary-foreground font-semibold shadow-xs"
-									: "border border-border/80 bg-surface text-muted hover:border-border hover:text-surface-foreground hover:bg-surface-raised",
-							)}
-						>
-							<span className={cn("icon-[lucide--folder] size-3.5", active ? "text-primary-foreground" : "text-amber-500")} />
-							<span>{groupPathLabel(groups, group.id)}</span>
-							<span className={cn("font-mono text-[10.5px]", active ? "text-primary-foreground/80" : "text-faint")}>
-								({count})
-							</span>
-						</button>
-					);
-				})}
+				<Button
+					size="sm"
+					variant="default"
+					icon="icon-[lucide--square-terminal]"
+					onClick={onNewTerminal}
+					className="h-7 text-xs"
+				>
+					新建本地终端
+				</Button>
 
-				{ungroupedHosts.length > 0 && groups.length > 0 && (
+				<Button
+					size="sm"
+					variant="default"
+					icon="icon-[lucide--folder-plus]"
+					onClick={() => groupDialogs.openCreate(null)}
+					className="h-7 text-xs cursor-pointer"
+				>
+					新建分组
+				</Button>
+
+				<Button
+					size="sm"
+					variant="default"
+					icon="icon-[lucide--plus]"
+					onClick={() => (onAddHost ? onAddHost() : navigate("/hosts/new"))}
+					className="h-7 text-xs cursor-pointer"
+				>
+					添加主机
+				</Button>
+			</div>
+		</div>
+
+		{/* 胶囊过滤芯片 (按组过滤) */}
+		<div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border bg-surface-sunk/40 px-6 text-[12px] overflow-x-auto no-scrollbar">
+			<button
+				type="button"
+				onClick={() => setSelectedGroup("all")}
+				className={cn(
+					"flex items-center gap-1.5 rounded-control px-2.5 py-1 text-xs transition-colors duration-150 cursor-pointer shrink-0",
+					selectedGroup === "all"
+						? "bg-accent text-accent-foreground font-medium shadow-xs"
+						: "border border-border/80 bg-surface-raised/40 text-muted hover:border-surface-foreground/20 hover:text-surface-foreground hover:bg-surface-raised",
+				)}
+			>
+				<span>全部主机</span>
+				<span className={cn("font-mono text-[10.5px]", selectedGroup === "all" ? "text-accent-foreground/80 font-bold" : "text-faint")}>
+					({allHosts.length})
+				</span>
+			</button>
+
+			{groupTree.map(({ group }) => {
+				const count = allHosts.filter((h) => h.groupId === group.id).length;
+				const active = selectedGroup === group.id;
+				return (
 					<button
+						key={group.id}
 						type="button"
-						onClick={() => setSelectedGroup("ungrouped")}
+						onClick={() => setSelectedGroup(group.id)}
+						onContextMenu={(e) => openGroupMenu(e, group.id)}
 						className={cn(
-							"flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all duration-150 cursor-pointer shrink-0",
-							selectedGroup === "ungrouped"
-								? "bg-primary text-primary-foreground font-semibold shadow-xs"
-								: "border border-border/80 bg-surface text-muted hover:border-border hover:text-surface-foreground hover:bg-surface-raised",
+							"flex items-center gap-1.5 rounded-control px-2.5 py-1 text-xs transition-colors duration-150 cursor-pointer shrink-0",
+							active
+								? "bg-accent text-accent-foreground font-medium shadow-xs"
+								: "border border-border/80 bg-surface-raised/40 text-muted hover:border-surface-foreground/20 hover:text-surface-foreground hover:bg-surface-raised",
 						)}
 					>
-						<span className="icon-[lucide--layers] size-3.5" />
-						<span>未分组</span>
-						<span className={cn("font-mono text-[10.5px]", selectedGroup === "ungrouped" ? "text-primary-foreground/80" : "text-faint")}>
-							({allHosts.filter((h) => !h.groupId || !validGroupIds.has(h.groupId)).length})
+						<span className={cn("icon-[lucide--folder] size-3.5", active ? "text-accent-foreground" : "text-amber-400")} />
+						<span>{groupPathLabel(groups, group.id)}</span>
+						<span className={cn("font-mono text-[10.5px]", active ? "text-accent-foreground/80 font-bold" : "text-faint")}>
+							({count})
 						</span>
 					</button>
-				)}
+				);
+			})}
+
+			{ungroupedHosts.length > 0 && groups.length > 0 && (
+				<button
+					type="button"
+					onClick={() => setSelectedGroup("ungrouped")}
+					className={cn(
+						"flex items-center gap-1.5 rounded-control px-2.5 py-1 text-xs transition-colors duration-150 cursor-pointer shrink-0",
+						selectedGroup === "ungrouped"
+							? "bg-accent text-accent-foreground font-medium shadow-xs"
+							: "border border-border/80 bg-surface-raised/40 text-muted hover:border-surface-foreground/20 hover:text-surface-foreground hover:bg-surface-raised",
+					)}
+				>
+					<span className="icon-[lucide--layers] size-3.5" />
+					<span>未分组</span>
+					<span className={cn("font-mono text-[10.5px]", selectedGroup === "ungrouped" ? "text-accent-foreground/80 font-bold" : "text-faint")}>
+						({allHosts.filter((h) => !h.groupId || !validGroupIds.has(h.groupId)).length})
+					</span>
+				</button>
+			)}
 
 				<button
 					type="button"
 					onClick={() => groupDialogs.openCreate(null)}
-					className="flex items-center gap-1 rounded-full border border-dashed border-border/80 bg-surface px-2.5 py-1 text-xs text-muted hover:border-primary hover:text-primary transition-colors cursor-pointer shrink-0 ml-1"
+					className="flex items-center gap-1 rounded-control border border-dashed border-border/80 bg-surface px-2.5 py-1 text-xs text-muted hover:border-surface-foreground/30 hover:text-surface-foreground transition-colors cursor-pointer shrink-0 ml-1"
 					title="新建分组"
 				>
 					<span className="icon-[lucide--plus] size-3" />
@@ -2953,7 +2991,7 @@ function HostWorkbench({
 			{/* 主内容区域：按组分区渲染 */}
 			<div className="min-h-0 flex-1 overflow-y-auto p-6 space-y-6">
 				{searchedHosts.length === 0 ? (
-					<div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border py-16 text-center">
+					<div className="flex flex-col items-center justify-center rounded-card border border-dashed border-border py-16 text-center">
 						<span className="icon-[lucide--server] size-9 text-faint mb-2.5" />
 						<p className="text-[13px] font-semibold text-surface-foreground">没有找到匹配的主机</p>
 						<p className="mt-1 text-[11.5px] text-muted">点击上方「添加主机」或输入 ssh 连接指令</p>
@@ -3093,7 +3131,7 @@ function HostWorkbench({
 										{!isCollapsed && (
 											<>
 												{members.length === 0 ? (
-													<div className="flex items-center justify-between rounded-xl border border-dashed border-border/80 bg-surface-sunk/30 px-4 py-3.5 text-[11.5px] text-muted">
+													<div className="flex items-center justify-between rounded-card border border-dashed border-border/80 bg-surface-sunk/30 px-4 py-3.5 text-[11.5px] text-muted">
 														<div className="flex items-center gap-2">
 															<span className="icon-[lucide--folder-open] size-4 text-faint" />
 															<span>该分组下暂无主机</span>
@@ -3245,22 +3283,22 @@ function WorkbenchHostCard({
 			}}
 			onContextMenu={onContextMenu}
 			onKeyDown={(e) => e.key === "Enter" && onConnect()}
-			className="group relative flex cursor-pointer flex-col justify-between rounded-2xl border border-border/80 bg-surface-raised/70 p-4 transition-all duration-200 hover:-translate-y-1 hover:border-primary hover:bg-surface hover:shadow-host-hover"
+			className="group relative flex cursor-pointer flex-col justify-between rounded-card border border-border bg-surface-raised/50 p-3.5 transition-[color,background-color,border-color,box-shadow] duration-150 ease-out hover:border-accent/40 hover:bg-surface-raised hover:shadow-host-hover"
 		>
 			{/* 卡片头部：图标 + 名称 + 状态 + 地址，右上角仅在悬浮时显示极简的 [编辑] 与 [更多] */}
 			<div className="flex items-start gap-3 min-w-0">
-				<div className="flex size-9.5 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-surface text-muted transition-colors group-hover:border-primary/40 group-hover:text-primary">
-					<span className={cn(visual.icon, visual.color, "size-4.5")} />
+				<div className="flex size-8 shrink-0 items-center justify-center rounded-control border border-border bg-surface text-muted transition-colors group-hover:border-surface-foreground/20 group-hover:text-surface-foreground">
+					<span className={cn(visual.icon, "size-4", isConnected ? "text-emerald-400" : "text-muted group-hover:text-surface-foreground")} />
 				</div>
-				<div className="min-w-0 flex-1 group-hover:pr-12 transition-all">
+				<div className="min-w-0 flex-1 pr-12">
 					<div className="flex items-center gap-1.5 min-w-0">
-						<span className="truncate text-[13px] font-semibold text-surface-foreground group-hover:text-primary transition-colors">
+						<span className="truncate text-[13px] font-medium text-surface-foreground group-hover:text-surface-foreground group-hover:font-semibold transition-colors">
 							{host.name}
 						</span>
-						{host.pinned && <span className="icon-[lucide--pin] size-3 shrink-0 text-primary" title="已置顶" />}
+						{host.pinned && <span className="icon-[lucide--pin] size-3 shrink-0 text-surface-foreground/90" title="已置顶" />}
 						<StatusDot status={status} size={6} className="shrink-0" />
 					</div>
-					<div className="mt-1 font-mono text-[11px] text-muted truncate">
+					<div className="mt-0.5 font-mono text-[11px] text-muted truncate">
 						{host.username}@{host.hostname}:{host.port}
 					</div>
 				</div>
@@ -3276,7 +3314,7 @@ function WorkbenchHostCard({
 							e.stopPropagation();
 							onEdit();
 						}}
-						className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-surface-foreground transition-colors cursor-pointer"
+						className="flex size-6 items-center justify-center rounded-control text-muted hover:bg-surface-foreground/10 hover:text-surface-foreground transition-colors cursor-pointer"
 						title="编辑配置"
 					>
 						<span className="icon-[lucide--pencil] size-3.5" />
@@ -3288,7 +3326,7 @@ function WorkbenchHostCard({
 								e.stopPropagation();
 								onContextMenu(e);
 							}}
-							className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-surface-foreground transition-colors cursor-pointer"
+							className="flex size-6 items-center justify-center rounded-control text-muted hover:bg-surface-foreground/10 hover:text-surface-foreground transition-colors cursor-pointer"
 							title="更多选项 (右键菜单)"
 						>
 							<span className="icon-[lucide--more-horizontal] size-3.5" />
@@ -3298,7 +3336,7 @@ function WorkbenchHostCard({
 			</div>
 
 			{/* 卡片底栏：左侧属性胶囊 + 右侧快速连接与联动动作组 */}
-			<div className="mt-4 flex items-center justify-between pt-3 border-t border-border/50 text-[11px]">
+			<div className="mt-3.5 flex items-center justify-between pt-2.5 border-t border-border/50 text-[11px]">
 				<div className="flex items-center gap-1.5 overflow-hidden">
 					{forwardCount > 0 && (
 						<button
@@ -3307,24 +3345,24 @@ function WorkbenchHostCard({
 								e.stopPropagation();
 								onOpenForward?.();
 							}}
-							className="rounded-full bg-surface px-2.5 py-0.5 font-mono text-[10px] text-primary border border-primary/30 hover:bg-primary/10 transition-colors cursor-pointer"
+							className="rounded-[4px] bg-surface-foreground/5 px-2 py-0.5 font-mono text-[10px] text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500/10 transition-colors cursor-pointer"
 							title={`查看/配置 ${forwardCount} 条端口转发`}
 						>
 							{forwardCount} 转发
 						</button>
 					)}
 					{host.latencyMs !== undefined && host.latencyMs > 0 && (
-						<span className="rounded-full bg-surface px-2 py-0.5 font-mono text-[10px] text-faint border border-border/60">
+						<span className="rounded-[4px] bg-surface px-1.5 py-0.5 font-mono text-[10px] text-muted border border-border">
 							{host.latencyMs}ms
 						</span>
 					)}
 					{host.tags.slice(0, 2).map((tag) => (
-						<span key={tag} className="rounded-full bg-surface px-2.5 py-0.5 font-mono text-[10px] text-faint border border-border/60">
+						<span key={tag} className="rounded-[4px] bg-surface px-1.5 py-0.5 font-mono text-[10px] text-muted border border-border">
 							{tag}
 						</span>
 					))}
 					{host.tags.length === 0 && forwardCount === 0 && (!host.latencyMs || host.latencyMs === 0) && (
-						<span className="rounded-full bg-surface px-2.5 py-0.5 font-mono text-[10px] text-faint border border-border/60">
+						<span className="rounded-[4px] bg-surface px-1.5 py-0.5 font-mono text-[10px] text-faint border border-border">
 							默认
 						</span>
 					)}
@@ -3340,7 +3378,7 @@ function WorkbenchHostCard({
 									e.stopPropagation();
 									onOpenSftp();
 								}}
-								className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
+								className="flex size-6 items-center justify-center rounded-control text-muted hover:bg-surface-foreground/10 hover:text-surface-foreground transition-colors cursor-pointer"
 								title="打开 SFTP 文件管理"
 							>
 								<span className="icon-[lucide--folder-tree] size-3.5" />
@@ -3353,7 +3391,7 @@ function WorkbenchHostCard({
 									e.stopPropagation();
 									onSplitWithHost("horizontal");
 								}}
-								className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
+								className="flex size-6 items-center justify-center rounded-control text-muted hover:bg-surface-foreground/10 hover:text-surface-foreground transition-colors cursor-pointer"
 								title="向右分屏打开终端"
 							>
 								<span className="icon-[lucide--columns-2] size-3.5" />
@@ -3366,7 +3404,7 @@ function WorkbenchHostCard({
 									e.stopPropagation();
 									onOpenInNewTab();
 								}}
-								className="flex size-6 items-center justify-center rounded text-muted hover:bg-surface hover:text-primary transition-colors cursor-pointer"
+								className="flex size-6 items-center justify-center rounded-control text-muted hover:bg-surface-foreground/10 hover:text-surface-foreground transition-colors cursor-pointer"
 								title="在新标签打开终端 (鼠标中键也可触发)"
 							>
 								<span className="icon-[lucide--plus-square] size-3.5" />
@@ -3381,14 +3419,14 @@ function WorkbenchHostCard({
 							onConnect();
 						}}
 						className={cn(
-							"flex items-center gap-1 font-medium transition-all cursor-pointer rounded px-1.5 py-0.5",
+							"flex items-center gap-1.5 font-medium transition-[color,background-color] duration-150 ease-out cursor-pointer rounded-control px-2.5 py-0.5 text-[11.5px]",
 							isConnected
-								? "bg-primary/10 text-primary hover:bg-primary/20"
-								: "text-muted hover:text-primary group-hover:translate-x-0.5",
+								? "bg-surface-foreground/10 text-surface-foreground hover:bg-surface-foreground/20 border border-surface-foreground/10"
+								: "bg-accent text-accent-foreground hover:opacity-90 shadow-2xs font-medium",
 						)}
 					>
 						<span>{isConnected ? "进入终端" : isConnecting ? "连接中…" : "连接"}</span>
-						<span className={cn("size-3.5", isConnected ? "icon-[lucide--terminal]" : "icon-[lucide--arrow-right]")} />
+						<span className={cn("size-3", isConnected ? "icon-[lucide--terminal]" : "icon-[lucide--arrow-right]")} />
 					</button>
 				</div>
 			</div>

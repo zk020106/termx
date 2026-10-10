@@ -42,6 +42,32 @@ export function ContextMenu({
 			if (event.key === "Escape") {
 				event.stopPropagation();
 				onClose();
+				return;
+			}
+			const menuEl = ref.current;
+			if (!menuEl) return;
+			const items = Array.from(menuEl.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([disabled])'));
+			if (items.length === 0) return;
+			const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+
+			if (event.key === "ArrowDown") {
+				event.preventDefault();
+				event.stopPropagation();
+				const nextIndex = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
+				items[nextIndex]?.focus();
+			} else if (event.key === "ArrowUp") {
+				event.preventDefault();
+				event.stopPropagation();
+				const prevIndex = currentIndex > 0 ? currentIndex - 1 : items.length - 1;
+				items[prevIndex]?.focus();
+			} else if (event.key === "Home") {
+				event.preventDefault();
+				event.stopPropagation();
+				items[0]?.focus();
+			} else if (event.key === "End") {
+				event.preventDefault();
+				event.stopPropagation();
+				items[items.length - 1]?.focus();
 			}
 		};
 		window.addEventListener("keydown", onKey, true);
@@ -62,7 +88,8 @@ export function ContextMenu({
 				ref={ref}
 				role="menu"
 				aria-label={label}
-				className="fixed z-50 max-h-[calc(100vh-16px)] overflow-y-auto rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover backdrop-blur-md ring-1 ring-black/5"
+				tabIndex={-1}
+				className="fixed z-50 max-h-[calc(100vh-16px)] overflow-y-auto overscroll-contain rounded-card border border-border bg-surface-raised/95 p-1 shadow-popover backdrop-blur-md"
 				style={{ left: pos.left, top: pos.top, width }}
 				onContextMenu={(event) => event.preventDefault()}
 			>
@@ -74,7 +101,7 @@ export function ContextMenu({
 
 export function MenuHeader({ title, subtitle, icon = "icon-[lucide--square-terminal]" }: { title: string; subtitle?: string; icon?: string }) {
 	return (
-		<div className="flex items-center gap-2 border-b border-border px-2.5 pt-1 pb-1.5 text-[10px] text-faint">
+		<div className="flex items-center gap-2 border-b border-border px-2 pt-1 pb-1.5 text-[10px] text-faint">
 			<span className={cn(icon, "size-3 text-muted")} />
 			<span className="text-muted">{title}</span>
 			{subtitle && <span className="truncate font-mono">{subtitle}</span>}
@@ -110,22 +137,22 @@ export function MenuItem({
 			disabled={disabled}
 			onClick={onClick}
 			className={cn(
-				"group flex h-7.5 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[11.5px] transition-all cursor-pointer select-none",
+				"group flex h-7 w-full items-center gap-2 rounded-control px-2 text-left text-[11.5px] transition-colors duration-100 ease-out cursor-pointer select-none",
 				disabled && "cursor-not-allowed opacity-40 text-faint",
-				!disabled && !danger && "text-surface-foreground hover:bg-primary/15 hover:text-primary font-normal hover:font-medium",
-				!disabled && danger && "text-danger hover:bg-danger/15 hover:text-danger font-normal hover:font-medium",
+				!disabled && !danger && "text-surface-foreground hover:bg-surface-foreground/10 hover:text-surface-foreground font-normal",
+				!disabled && danger && "text-danger hover:bg-danger/15 hover:text-danger font-normal",
 			)}
 		>
 			<span
 				className={cn(
 					icon,
 					"size-3.5 shrink-0 transition-colors",
-					disabled ? "text-faint" : danger ? "text-danger" : "text-muted group-hover:text-primary",
+					disabled ? "text-faint" : danger ? "text-danger" : "text-muted group-hover:text-surface-foreground",
 				)}
 			/>
 			<span className="flex-1 truncate">{label}</span>
-			{checked && <span className="icon-[lucide--check] size-3 text-primary" />}
-			{kbd && <span className="font-mono text-[9.5px] text-faint group-hover:text-primary/80">{kbd}</span>}
+			{checked && <span className="icon-[lucide--check] size-3 text-accent" />}
+			{kbd && <span className="font-mono text-[9.5px] text-faint group-hover:text-surface-foreground/80">{kbd}</span>}
 		</button>
 	);
 }
@@ -171,11 +198,11 @@ export function MenuSub({
 				aria-expanded={pos !== null}
 				onClick={openSub}
 				className={cn(
-					"group flex h-7.5 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[11.5px] text-surface-foreground transition-all hover:bg-primary/15 hover:text-primary",
-					pos && "bg-primary/10",
+					"group flex h-7 w-full items-center gap-2 rounded-control px-2 text-left text-[11.5px] text-surface-foreground transition-colors duration-100 ease-out hover:bg-surface-foreground/10 hover:text-surface-foreground",
+					pos && "bg-surface-foreground/10 text-surface-foreground",
 				)}
 			>
-				{typeof icon === "string" ? <span className={cn(icon, "size-3.5 shrink-0 text-muted group-hover:text-primary")} /> : icon}
+				{typeof icon === "string" ? <span className={cn(icon, "size-3.5 shrink-0 text-muted group-hover:text-surface-foreground")} /> : icon}
 				<span className="flex-1 truncate">{label}</span>
 				{hint && <span className="flex shrink-0 items-center gap-1 text-[10px] text-faint">{hint}</span>}
 				<span className="icon-[lucide--chevron-right] size-3 shrink-0 text-faint" />
@@ -184,7 +211,7 @@ export function MenuSub({
 				<div
 					role="menu"
 					aria-label={label}
-					className="fixed z-[60] rounded-2xl border border-border/80 bg-surface/98 p-1.5 shadow-popover backdrop-blur-md ring-1 ring-black/5"
+					className="fixed z-[60] rounded-card border border-border bg-surface-raised/95 p-1 shadow-popover backdrop-blur-md"
 					style={{ left: pos.left, top: pos.top, width }}
 					onMouseEnter={openSub}
 					onMouseLeave={closeSoon}

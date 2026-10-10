@@ -462,10 +462,10 @@ export interface UpdateInfo {
 export type ThemeMode = "dark" | "light" | "system";
 export type Density = "compact" | "standard";
 
-/** 强调色：六套预置色板，id 与 theme.css 里的 --tx-swatch-* 一一对应 */
-export type Accent = "indigo" | "cyan" | "emerald" | "amber" | "rose" | "steel";
+/** 强调色：七套预置色板，id 与 theme.css 里的 --tx-swatch-* 一一对应 */
+export type Accent = "vercel" | "indigo" | "cyan" | "emerald" | "amber" | "rose" | "steel";
 
-export const ACCENT_IDS: readonly Accent[] = ["indigo", "cyan", "emerald", "amber", "rose", "steel"];
+export const ACCENT_IDS: readonly Accent[] = ["vercel", "indigo", "cyan", "emerald", "amber", "rose", "steel"];
 
 /** 配置文件里读回来的 accent 可能是任意值（手改过 / 旧版本），校验后再用 */
 export function isAccent(value: unknown): value is Accent {

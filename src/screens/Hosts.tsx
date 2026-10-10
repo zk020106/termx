@@ -168,10 +168,11 @@ export default function Hosts() {
 						{query && (
 							<button
 								type="button"
+								aria-label="清空搜索"
 								onClick={() => useHostsStore.getState().setQuery("")}
-								className="absolute top-1/2 right-1.5 -translate-y-1/2 flex size-4 items-center justify-center rounded-full text-muted hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
+								className="absolute top-1/2 right-1.5 -translate-y-1/2 flex size-6 items-center justify-center rounded-full text-muted hover:bg-surface-raised hover:text-surface-foreground cursor-pointer"
 							>
-								<span className="icon-[lucide--x] size-2.5" />
+								<span className="icon-[lucide--x] size-3" />
 							</button>
 						)}
 					</div>
@@ -224,12 +225,23 @@ export default function Hosts() {
 									onClick={(e) => {
 										e.stopPropagation();
 										store.removeGroup(g.id);
-										toast({ title: `已删除分组「${g.name}」`, tone: "default" });
+										toast({
+											title: `已删除分组「${g.name}」`,
+											tone: "default",
+											action: {
+												label: "撤销",
+												run: () => {
+													store.addGroup(g.name);
+													toast({ title: `已恢复分组「${g.name}」`, tone: "success" });
+												},
+											},
+										});
 									}}
-									className="absolute right-7 top-1/2 -translate-y-1/2 hidden group-hover/item:flex size-4 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-danger cursor-pointer transition-colors"
+									className="absolute right-7 top-1/2 -translate-y-1/2 hidden group-hover/item:flex group-focus-within/item:flex size-6 items-center justify-center rounded text-muted hover:bg-surface-raised hover:text-danger cursor-pointer transition-colors"
 									title="删除分组"
+									aria-label={`删除分组 ${g.name}`}
 								>
-									<span className="icon-[lucide--trash-2] size-2.5" />
+									<span className="icon-[lucide--trash-2] size-3" />
 								</button>
 							</div>
 						))}
@@ -250,7 +262,7 @@ export default function Hosts() {
 								<button
 									type="button"
 									onClick={handleAddGroup}
-									className="flex size-6 items-center justify-center rounded bg-primary text-white hover:bg-primary-hover shrink-0 cursor-pointer"
+									className="flex size-6 items-center justify-center rounded bg-primary text-primary-foreground hover:opacity-90 shrink-0 cursor-pointer"
 								>
 									<span className="icon-[lucide--check] size-3" />
 								</button>
@@ -645,7 +657,7 @@ function GroupRow({
 				onDrop(e.dataTransfer.getData("text/plain"));
 			}}
 			className={cn(
-				"group flex h-7.5 cursor-pointer items-center justify-between rounded-md px-2.5 text-[11.5px] transition-all select-none border",
+				"group flex h-7.5 cursor-pointer items-center justify-between rounded-md px-2.5 text-[11.5px] transition-colors duration-150 select-none border",
 				active
 					? "border-primary/30 bg-primary/10 font-semibold text-primary shadow-2xs"
 					: "border-transparent text-muted hover:bg-surface hover:text-surface-foreground",
@@ -713,7 +725,7 @@ function HostCard({
 					</div>
 					<span className="flex shrink-0 items-center gap-1">
 						{selected && <span className="icon-[lucide--check-circle] size-3 text-primary" />}
-						<span className="hidden items-center gap-0.5 group-hover:flex">
+						<span className="hidden items-center gap-0.5 group-hover:flex group-focus-within:flex">
 							<IconAction icon="icon-[lucide--terminal]" label="新建连接" onClick={onConnect} />
 							<IconAction icon="icon-[lucide--pencil]" label="编辑" onClick={onEdit} />
 							<IconAction icon="icon-[lucide--trash-2]" label="删除" danger onClick={onDelete} />
@@ -801,7 +813,7 @@ function HostRow({
 			</span>
 			<LatencyCell host={host} showDot className="w-[76px] shrink-0 justify-end" />
 			<span className="flex w-[92px] shrink-0 items-center justify-end gap-0.5">
-				<span className="hidden items-center gap-0.5 group-hover:flex">
+				<span className="hidden items-center gap-0.5 group-hover:flex group-focus-within:flex">
 					<IconAction icon="icon-[lucide--terminal]" label="新建连接" onClick={onConnect} />
 					<IconAction icon="icon-[lucide--pencil]" label="编辑" onClick={onEdit} />
 					<IconAction icon="icon-[lucide--trash-2]" label="删除" danger onClick={onDelete} />
@@ -822,11 +834,11 @@ function IconAction({ icon, label, danger, onClick }: { icon: string; label: str
 				onClick();
 			}}
 			className={cn(
-				"flex size-5 items-center justify-center rounded transition-colors",
+				"flex size-6 items-center justify-center rounded transition-colors",
 				danger ? "text-muted hover:bg-danger/15 hover:text-danger" : "text-muted hover:bg-surface hover:text-surface-foreground",
 			)}
 		>
-			<span className={cn(icon, "size-3")} />
+			<span className={cn(icon, "size-3.5")} />
 		</button>
 	);
 }
